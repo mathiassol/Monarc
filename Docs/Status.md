@@ -49,6 +49,19 @@ Confirmed by direct testing on the development machine, not assumed:
 ## Toolchain quirks worth remembering
 
 - MSVC reports `__cplusplus == 199711` unless built with `/Zc:__cplusplus`. Set it globally.
+- **MSVC 19.51 does not accept `/std:c++23` at all.** Passed explicitly it warns
+  `D9002: ignoring unknown option` and silently drops to C++14. CMake's `CXX_STANDARD 23`
+  therefore falls back to `/std:c++latest`, under which `__cplusplus` reports `202400L` —
+  a value *beyond* C++23. `clang-cl` reports exactly `202302L`.
+
+  The consequence is worth stating plainly: **a successful MSVC build is not evidence that
+  code is C++23-conforming.** MSVC will happily accept post-C++23 features that Clang
+  rejects. This is precisely the divergence
+  [ADR-0003](Architecture/Decisions/ADR-0003-cpp23-baseline.md) makes the Clang build
+  conditional on catching, and it means that build is load-bearing rather than belt-and-braces.
+- `/MP` is inert under Ninja and is deliberately absent from the compiler flags. It
+  parallelises multiple sources within a single `cl.exe` invocation, and Ninja invokes
+  `cl.exe` once per file. Build parallelism comes from Ninja's scheduler.
 - CMake 4.2 enables C++20 module dependency scanning by default at C++23. We do not use
   modules ([ADR-0003](Architecture/Decisions/ADR-0003-cpp23-baseline.md)), so
   `CXX_SCAN_FOR_MODULES OFF` is free build time.

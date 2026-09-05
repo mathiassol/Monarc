@@ -80,8 +80,10 @@ function(monarc_set_target_options target)
             /Zc:__cplusplus     # otherwise __cplusplus reports 199711
             /Zc:preprocessor    # conforming preprocessor
             /utf-8
-            /EHsc
-            /MP)
+            /EHsc)
+        # No /MP: it parallelises multiple sources within a single cl.exe invocation,
+        # but Ninja invokes cl.exe once per source file, so it never has anything to
+        # do. Build parallelism comes from Ninja's own scheduler.
         # clang-cl accepts the MSVC flags above but warns about a few it ignores.
         if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
             target_compile_options(${target} PRIVATE
@@ -106,9 +108,13 @@ project(Monarc
     DESCRIPTION "Monarc game engine"
     LANGUAGES CXX)
 
-if(NOT CMAKE_CXX_COMPILER_ID MATCHES "MSVC|Clang")
+# AppleClang is listed deliberately: ADR-0012 schedules a Metal backend once macOS
+# hardware is available, and that build reports AppleClang. An unanchored regex would
+# accept AppleClang by accident rather than by intent.
+set(MONARC_SUPPORTED_COMPILERS MSVC Clang AppleClang)
+if(NOT CMAKE_CXX_COMPILER_ID IN_LIST MONARC_SUPPORTED_COMPILERS)
     message(FATAL_ERROR
-        "Monarc supports MSVC and Clang. Found: ${CMAKE_CXX_COMPILER_ID}")
+        "Monarc supports: ${MONARC_SUPPORTED_COMPILERS}. Found: ${CMAKE_CXX_COMPILER_ID}")
 endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/CMake")
