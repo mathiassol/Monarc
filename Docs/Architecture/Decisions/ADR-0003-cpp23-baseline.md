@@ -34,8 +34,18 @@ language, and it differs by module kind — which the build system already knows
 
 | Kind | Language | Standard library |
 |---|---|---|
-| `Runtime` | Full C++23 | Restricted to the universally-available header-only subset: `<type_traits>`, `<concepts>`, `<utility>`, `<expected>`, `<span>`, `<bit>`, `<atomic>`, `<cstdint>`, and similar. **Banned:** `<iostream>`, `<regex>`, `<generator>`, `<flat_map>`, `<stacktrace>`, C++23 ranges adaptors, and `std::print`/`std::format` in runtime paths |
+| `Runtime` | Full C++23 | Restricted to the universally-available header-only subset: `<type_traits>`, `<concepts>`, `<utility>`, `<expected>`, `<span>`, `<bit>`, `<atomic>`, `<cstdint>`, `<format>`, and similar. **Banned:** `<iostream>`, `<regex>`, `<print>`, `<generator>`, `<flat_map>`, `<stacktrace>`, and C++23 ranges adaptors |
 | `Tool`, `Editor`, `Test` | Full C++23 | Unrestricted. These build only on developer machines with current toolchains |
+
+**Amended 2026-09-05.** This decision originally banned `<format>` alongside `<print>` in
+runtime code. That conflated two different things: `<print>` is C++23 and genuinely lags in
+libc++, whereas `<format>` is C++20 and widely available. Logging needs type-safe
+formatting, and writing a formatter to satisfy a rule we had drawn too broadly would have
+been the wrong trade. `<format>` is now permitted in runtime code, on the condition that it
+formats into a fixed buffer via `std::format_to_n` rather than allocating a `std::string` —
+see `Monarc::Detail::Format` in `Log.h`. If `<format>`'s compile-time cost later becomes a
+problem, the formatter sits behind `MONARC_LOG` and can be replaced without touching call
+sites.
 
 Additionally:
 

@@ -80,8 +80,10 @@ function(monarc_set_target_options target)
             /Zc:__cplusplus     # otherwise __cplusplus reports 199711
             /Zc:preprocessor    # conforming preprocessor
             /utf-8
-            /EHsc
-            /MP)
+            /EHsc)
+        # No /MP: it parallelises multiple sources within a single cl.exe invocation,
+        # but Ninja invokes cl.exe once per source file, so it never has anything to
+        # do. Build parallelism comes from Ninja's own scheduler.
         # clang-cl accepts the MSVC flags above but warns about a few it ignores.
         if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
             target_compile_options(${target} PRIVATE
@@ -106,9 +108,13 @@ project(Monarc
     DESCRIPTION "Monarc game engine"
     LANGUAGES CXX)
 
-if(NOT CMAKE_CXX_COMPILER_ID MATCHES "MSVC|Clang")
+# AppleClang is listed deliberately: ADR-0012 schedules a Metal backend once macOS
+# hardware is available, and that build reports AppleClang. An unanchored regex would
+# accept AppleClang by accident rather than by intent.
+set(MONARC_SUPPORTED_COMPILERS MSVC Clang AppleClang)
+if(NOT CMAKE_CXX_COMPILER_ID IN_LIST MONARC_SUPPORTED_COMPILERS)
     message(FATAL_ERROR
-        "Monarc supports MSVC and Clang. Found: ${CMAKE_CXX_COMPILER_ID}")
+        "Monarc supports: ${MONARC_SUPPORTED_COMPILERS}. Found: ${CMAKE_CXX_COMPILER_ID}")
 endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/CMake")
@@ -776,10 +782,15 @@ In `CMakeLists.txt`, insert immediately after the `include(MonarcModule)` line:
 ```cmake
 if(MONARC_BUILD_TESTS)
     include(FetchContent)
+    # v2.4.12 is the first tag declaring cmake_minimum_required(VERSION 3.5); CMake 4.x
+    # hard-rejects anything lower. SYSTEM marks doctest's headers as system headers --
+    # third-party warnings are not ours, and Monarc builds at /W4 /WX.
+    set(DOCTEST_NO_INSTALL ON CACHE BOOL "" FORCE)
     FetchContent_Declare(doctest
         GIT_REPOSITORY https://github.com/doctest/doctest.git
-        GIT_TAG        v2.4.11
-        GIT_SHALLOW    TRUE)
+        GIT_TAG        v2.4.12
+        GIT_SHALLOW    TRUE
+        SYSTEM)
     FetchContent_MakeAvailable(doctest)
     include(MonarcTest)
 endif()
@@ -811,6 +822,11 @@ function(monarc_test_module module)
     set(_target "${module}.Tests")
     add_executable(${_target} ${_test_sources})
     target_link_libraries(${_target} PRIVATE ${module} doctest::doctest)
+
+    # doctest forward-declares std::tuple as a compile-speed trick, which MSVC rejects
+    # under /W4 /WX (C5285). This is doctest's own documented escape hatch.
+    target_compile_definitions(${_target} PRIVATE DOCTEST_CONFIG_USE_STD_HEADERS)
+
     monarc_set_target_options(${_target})
     set_target_properties(${_target} PROPERTIES FOLDER "Tests")
 
@@ -1052,7 +1068,7 @@ bool OnAssertFailed(const char* expression, const char* file, int line, const ch
 #if MONARC_ENABLE_ASSERTS
 #    define MONARC_ASSERT(expression, message) MONARC_CHECK(expression, message)
 #else
-#    define MONARC_ASSERT(expression, message) ((void)sizeof(!(expression)))
+#    define MONARC_ASSERT(expression, message)                                                    do {                                                                                          (void)sizeof(!(expression));                                                              (void)sizeof(message);                                                                } while (false)
 #endif
 ```
 
@@ -1581,6 +1597,9 @@ using Monarc::ArenaAllocator;
 using Monarc::uptr;
 using Monarc::usize;
 
+// IAllocator::Allocate is [[nodiscard]], so calls made purely for their side effect on the
+// cursor must discard explicitly or the build fails under /WX.
+
 namespace {
 constexpr usize kCapacity = 1024;
 }
@@ -1603,7 +1622,7 @@ TEST_CASE("ArenaAllocator honours over-alignment") {
     std::vector<std::byte> backing(kCapacity);
     ArenaAllocator arena(backing.data(), backing.size(), "Test");
 
-    arena.Allocate(1, 1);                     // deliberately misalign the cursor
+    (void)arena.Allocate(1, 1);               // deliberately misalign the cursor
     void* aligned = arena.Allocate(8, 64);
     REQUIRE(aligned != nullptr);
     CHECK(reinterpret_cast<uptr>(aligned) % 64 == 0);
@@ -1639,11 +1658,11 @@ TEST_CASE("ArenaAllocator remembers its high-water mark across resets") {
     std::vector<std::byte> backing(kCapacity);
     ArenaAllocator arena(backing.data(), backing.size(), "Test");
 
-    arena.Allocate(500, 1);
+    (void)arena.Allocate(500, 1);
     CHECK(arena.HighWaterMark() == 500);
 
     arena.Reset();
-    arena.Allocate(100, 1);
+    (void)arena.Allocate(100, 1);
     CHECK(arena.BytesAllocated() == 100);
     CHECK(arena.HighWaterMark() == 500);      // budgeting needs the peak, not the current
 }

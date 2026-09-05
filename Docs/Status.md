@@ -7,8 +7,15 @@ _Last updated: 2026-09-05_
 
 ## Summary
 
-The architecture has been designed and recorded. **No engine code exists yet.** The next
-step is the implementation plan for [M0 — First Light](Milestones/M0-First-Light.md).
+The architecture is designed and recorded, and **Phase A1 is complete**: the build
+mechanically enforces the module graph, and `Monarc.Core` has its memory and diagnostics
+foundation under test on two compilers.
+
+Next is **Phase A2** — the rest of `Monarc.Core` (strings, hash maps, math, GUIDs, the
+platform layer) and `Monarc.Jobs`. See
+[M0 — First Light](Milestones/M0-First-Light.md) for how the phases fit together.
+
+Nothing renders yet. That is Phase A3 and A4.
 
 ## Verified environment
 
@@ -17,7 +24,7 @@ Confirmed by direct testing on the development machine, not assumed:
 | Component | Version | Notes |
 |---|---|---|
 | Compiler | MSVC 19.51 (toolset 14.51, VS 2026 Community) | Compiles C++23 language features cleanly at `/W4` — verified: deducing `this`, `static operator()`, multidimensional `operator[]`, `if consteval`, `auto(x)`, `[[assume]]`, `std::expected` |
-| Second compiler | Clang 22.1.8 (`clang-cl`, standalone LLVM) | **Verified**: builds the same C++23 feature test through CMake with `CXX_STANDARD 23` and produces output identical to MSVC. This satisfies [ADR-0003](Architecture/Decisions/ADR-0003-cpp23-baseline.md)'s condition |
+| Second compiler | Clang 22.1.8 (`clang-cl`, standalone LLVM) | Builds the whole project and full test suite warning-free at `/WX`, output identical to MSVC. **ADR-0003's condition is only partly met**: it requires Clang *in CI*, and no CI exists — the Clang build is run by hand. See [Known gaps](#known-gaps) |
 | Build | CMake 4.2.1 + Ninja (bundled with VS) | Configure and build verified end to end |
 | Vulkan | SDK 1.4.357.0 | Found automatically by CMake's `find_package(Vulkan)`. Validation layers, gfxreconstruct, SPIRV-Tools present |
 | Shaders | Slang 2026.13.1 (in the Vulkan SDK), DXC 1.9, glslang | |
@@ -34,6 +41,11 @@ Confirmed by direct testing on the development machine, not assumed:
 
 ### Known gaps
 
+- **No CI, so [ADR-0003](Architecture/Decisions/ADR-0003-cpp23-baseline.md)'s condition
+  remains open.** That ADR accepts the C++23 baseline *conditionally* on a second compiler
+  building the project **in CI**. Clang does build it, warning-free, and divergence has been
+  checked at every step — but by hand, which depends on somebody remembering. The condition
+  is not met until it is automatic.
 - **No macOS machine.** Metal is designed for but unimplemented and unproven. Expected
   within a year — see [ADR-0012](Architecture/Decisions/ADR-0012-backend-rollout.md).
 - **No graphics debugger.** NVIDIA Nsight Graphics is installed, but it is NVIDIA-only and
@@ -49,6 +61,19 @@ Confirmed by direct testing on the development machine, not assumed:
 ## Toolchain quirks worth remembering
 
 - MSVC reports `__cplusplus == 199711` unless built with `/Zc:__cplusplus`. Set it globally.
+- **MSVC 19.51 does not accept `/std:c++23` at all.** Passed explicitly it warns
+  `D9002: ignoring unknown option` and silently drops to C++14. CMake's `CXX_STANDARD 23`
+  therefore falls back to `/std:c++latest`, under which `__cplusplus` reports `202400L` —
+  a value *beyond* C++23. `clang-cl` reports exactly `202302L`.
+
+  The consequence is worth stating plainly: **a successful MSVC build is not evidence that
+  code is C++23-conforming.** MSVC will happily accept post-C++23 features that Clang
+  rejects. This is precisely the divergence
+  [ADR-0003](Architecture/Decisions/ADR-0003-cpp23-baseline.md) makes the Clang build
+  conditional on catching, and it means that build is load-bearing rather than belt-and-braces.
+- `/MP` is inert under Ninja and is deliberately absent from the compiler flags. It
+  parallelises multiple sources within a single `cl.exe` invocation, and Ninja invokes
+  `cl.exe` once per file. Build parallelism comes from Ninja's scheduler.
 - CMake 4.2 enables C++20 module dependency scanning by default at C++23. We do not use
   modules ([ADR-0003](Architecture/Decisions/ADR-0003-cpp23-baseline.md)), so
   `CXX_SCAN_FOR_MODULES OFF` is free build time.
@@ -64,19 +89,56 @@ Confirmed by direct testing on the development machine, not assumed:
 
 ## Implementation progress
 
-Nothing implemented. The table below is the M0 phase list; it is the progress tracker.
-
 | Phase | Contents | State |
 |---|---|---|
-| A | Core, Jobs, RHI, Vulkan backend, Host.Windowed, minimal render graph | Not started |
+| A1 | Build system, module gates, Core memory + diagnostics | **Complete** |
+| A2 | Rest of Core (String, HashMap, math, GUID, platform), Jobs | Not started |
+| A3 | RHI, Vulkan backend, Host.Windowed | Not started |
+| A4 | Minimal render graph | Not started |
 | B | ShaderCompiler, Shaders, Render | Not started |
 | C | Reflect, Serialize, Assets, Cook | Not started |
 | D | World, Engine | Not started |
 | E | Editor | Not started |
 | F | Hub, Build and export | Not started |
 
+### A1 delivered
+
+- `monarc_module()` enforcing kind and tier rules at configure time, and rejecting
+  unrecognised arguments so a typo cannot silently drop a dependency edge
+- `module-graph.json` emitted as a build artifact
+- Four architecture gates running under CTest, each verified to fail when violated
+- `Monarc.Core`: `Types`, `Assert` (replaceable handler), `Error`/`Result`/`Status`,
+  `IAllocator`, `SystemAllocator`, `ArenaAllocator`, `Array<T>`, categorised logging
+- Verified under MSVC Debug, MSVC RelWithDebInfo, and Clang Debug, warnings-as-errors
+  — 43 doctest cases (126 assertions) plus the 4 architecture gates, 100% passing on a
+  clean rebuild of all three presets
+
+### Known gaps in A1, carried into A2
+
+A cross-cutting review at the end of A1 found no live defects, but three things worth
+carrying forward rather than rediscovering:
+
+- **`Tools/check_architecture.py` has no tests of its own.** It is the mechanism this whole
+  phase exists to prove works, and it has already needed two non-obvious fixes — a bare
+  prefix match that would have exempted a sibling `Private/PlatformUtils/`, and a regex
+  defeated by a backslash-continued `#if`. It is string-matching over source trees, which is
+  exactly the code that regresses silently.
+- **`Array<T>`'s abort-on-allocation-failure contract is untested.** Its most important
+  safety property is the one thing no test exercises, because triggering it kills the test
+  process. Making it testable means routing through a replaceable fatal handler, the way
+  `Assert.h` already does — worth doing when a second container needs the same treatment.
+- **`MONARC_ASSERT` has no production call sites yet.** Everything real uses `MONARC_CHECK`.
+  Not a misuse — A1 has no expensive invariant to check — but the distinction will quietly
+  erode unless A2's hash tables and job graphs actually use it.
+
 ## Verification gates
 
-None are implemented yet. They are specified in
-[M0 — First Light](Milestones/M0-First-Light.md) and are intended to go red-green early
-rather than be added once they would already fail.
+Four of M0's eleven gates are implemented and running under CTest as
+`Architecture.Gates`: acyclicity (2), renderer package boundary (3), module layout (7), and
+platform containment (10). Gate 3 currently passes vacuously — no tier 2 module exists yet —
+which is the intended state: it will go red the first time the boundary is crossed.
+
+The remaining gates need modules that do not exist yet and are added against this same
+harness: export purity (1), cook determinism (4), cook incrementality (5), asset identity
+across rename (6), world-kind parity, export explainability (8), headless purity (9), and
+schema migration (11).

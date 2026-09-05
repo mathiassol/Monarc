@@ -43,6 +43,33 @@ and frees per second for no reason.
 This is also why [ADR-0009](../Architecture/Decisions/ADR-0009-render-extraction.md)'s snapshot
 cost is acceptable at all. The two decisions depend on each other.
 
+## What happens when allocation fails
+
+Three idioms coexist, deliberately, one per layer. Writing this down because the next
+containers — strings, hash maps — will each face the same fork, and the reasoning otherwise
+lives only in one function's comment.
+
+| Layer | On failure | Why |
+|---|---|---|
+| `IAllocator::Allocate` | Returns `nullptr` | The raw allocator has no policy of its own. It reports, the caller decides — the `malloc` convention, and the only option that lets an arena's caller treat exhaustion as ordinary |
+| Containers (`Array<T>`, and its successors) | **Fatal** — assert, then abort | There is no correct partial answer. Returning without growing leaves the caller writing past the end, which is silent heap corruption. Stopping is strictly better than continuing wrong |
+| Everything above | `Result<T>` / `Status` | Callers at this level can genuinely recover — fall back, retry at lower quality, report to the user |
+
+The container row is the one that looks harsh, so: it is a consequence of the API, not a
+belief that memory never runs out. `Array<T>::Push` returns `T&`; there is no value it could
+return on failure. The fix, when a caller appears that can actually recover, is a fallible
+API alongside it — `TryReserve` returning `Status` — not a quiet failure inside the
+infallible one.
+
+**Arena caveats.** Two behaviours of `ArenaAllocator` are contracts rather than guarantees,
+and both have been measured rather than assumed:
+
+- `Reset()` runs no destructors. Anything non-trivially destructible placed in an arena
+  leaks what it owns. `IAllocator` is type-erased, so nothing can detect this for you.
+- `Deallocate` is a no-op, so a container that reallocates strands every superseded buffer.
+  An `Array` grown one element at a time consumes exactly twice its live size. Reserve up
+  front, or use a different allocator.
+
 ## GPU memory is separate
 
 GPU memory has its own budgets, its own residency concerns, and failure modes CPU memory does
