@@ -77,19 +77,38 @@ Confirmed by direct testing on the development machine, not assumed:
 
 ## Implementation progress
 
-Nothing implemented. The table below is the M0 phase list; it is the progress tracker.
-
 | Phase | Contents | State |
 |---|---|---|
-| A | Core, Jobs, RHI, Vulkan backend, Host.Windowed, minimal render graph | Not started |
+| A1 | Build system, module gates, Core memory + diagnostics | **Complete** |
+| A2 | Rest of Core (String, HashMap, math, GUID, platform), Jobs | Not started |
+| A3 | RHI, Vulkan backend, Host.Windowed | Not started |
+| A4 | Minimal render graph | Not started |
 | B | ShaderCompiler, Shaders, Render | Not started |
 | C | Reflect, Serialize, Assets, Cook | Not started |
 | D | World, Engine | Not started |
 | E | Editor | Not started |
 | F | Hub, Build and export | Not started |
 
+### A1 delivered
+
+- `monarc_module()` enforcing kind and tier rules at configure time, and rejecting
+  unrecognised arguments so a typo cannot silently drop a dependency edge
+- `module-graph.json` emitted as a build artifact
+- Four architecture gates running under CTest, each verified to fail when violated
+- `Monarc.Core`: `Types`, `Assert` (replaceable handler), `Error`/`Result`/`Status`,
+  `IAllocator`, `SystemAllocator`, `ArenaAllocator`, `Array<T>`, categorised logging
+- Verified under MSVC Debug, MSVC RelWithDebInfo, and Clang Debug, warnings-as-errors
+  — 43 doctest cases (126 assertions) plus the 4 architecture gates, 100% passing on a
+  clean rebuild of all three presets
+
 ## Verification gates
 
-None are implemented yet. They are specified in
-[M0 — First Light](Milestones/M0-First-Light.md) and are intended to go red-green early
-rather than be added once they would already fail.
+Four of M0's eleven gates are implemented and running under CTest as
+`Architecture.Gates`: acyclicity (2), renderer package boundary (3), module layout (7), and
+platform containment (10). Gate 3 currently passes vacuously — no tier 2 module exists yet —
+which is the intended state: it will go red the first time the boundary is crossed.
+
+The remaining gates need modules that do not exist yet and are added against this same
+harness: export purity (1), cook determinism (4), cook incrementality (5), asset identity
+across rename (6), world-kind parity, export explainability (8), headless purity (9), and
+schema migration (11).
