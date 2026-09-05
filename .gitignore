@@ -32,6 +32,7 @@ CMakeFiles/
 # ---- Editors / OS / tooling ----
 .vs/
 .claudian/
+.agents/
 .vscode/
 .idea/
 Thumbs.db

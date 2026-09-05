@@ -15,12 +15,28 @@ define_property(GLOBAL PROPERTY MONARC_ALL_MODULES
 function(monarc_module)
     cmake_parse_arguments(ARG "" "NAME;KIND;TIER" "PUBLIC_DEPS;PRIVATE_DEPS" ${ARGN})
 
+    # Reject anything cmake_parse_arguments did not recognise. Without this, a typo such
+    # as PUBLIC_DEP silently lands in ARG_UNPARSED_ARGUMENTS, the dependency is dropped,
+    # and the graph reports "rules satisfied" while missing an edge -- which would make
+    # every guarantee in ADR-0001 unreliable for the sake of one character.
+    if(ARG_UNPARSED_ARGUMENTS)
+        list(JOIN ARG_UNPARSED_ARGUMENTS " " _unparsed)
+        message(FATAL_ERROR
+            "monarc_module(${ARG_NAME}): unrecognised arguments: ${_unparsed}")
+    endif()
+    if(ARG_KEYWORDS_MISSING_VALUES)
+        list(JOIN ARG_KEYWORDS_MISSING_VALUES ", " _empty_keywords)
+        message(FATAL_ERROR
+            "monarc_module(${ARG_NAME}): keywords given with no value: ${_empty_keywords}")
+    endif()
+
     if(NOT ARG_NAME)
         message(FATAL_ERROR "monarc_module: NAME is required")
     endif()
     if(NOT ARG_KIND IN_LIST MONARC_VALID_KINDS)
+        list(JOIN MONARC_VALID_KINDS ", " _valid_kinds)
         message(FATAL_ERROR
-            "monarc_module(${ARG_NAME}): KIND '${ARG_KIND}' must be one of: ${MONARC_VALID_KINDS}")
+            "monarc_module(${ARG_NAME}): KIND '${ARG_KIND}' must be one of: ${_valid_kinds}")
     endif()
     if(NOT DEFINED ARG_TIER)
         message(FATAL_ERROR "monarc_module(${ARG_NAME}): TIER is required")
@@ -110,5 +126,15 @@ function(monarc_validate_modules)
     endif()
 
     list(LENGTH _modules _count)
-    message(STATUS "Module graph: ${_count} modules, rules satisfied")
+    if(_count EQUAL 0)
+        message(WARNING
+            "monarc_validate_modules(): no modules were declared. "
+            "Is an add_subdirectory() missing?")
+        return()
+    endif()
+    set(_noun "modules")
+    if(_count EQUAL 1)
+        set(_noun "module")
+    endif()
+    message(STATUS "Module graph: ${_count} ${_noun}, rules satisfied")
 endfunction()

@@ -10,9 +10,14 @@ project(Monarc
 # unanchored regex that accepted AppleClang by accident rather than by intent.
 set(MONARC_SUPPORTED_COMPILERS MSVC Clang AppleClang)
 if(NOT CMAKE_CXX_COMPILER_ID IN_LIST MONARC_SUPPORTED_COMPILERS)
+    list(JOIN MONARC_SUPPORTED_COMPILERS ", " MONARC_SUPPORTED_COMPILERS_TEXT)
     message(FATAL_ERROR
-        "Monarc supports: ${MONARC_SUPPORTED_COMPILERS}. Found: ${CMAKE_CXX_COMPILER_ID}")
+        "Monarc supports: ${MONARC_SUPPORTED_COMPILERS_TEXT}. "
+        "Found: ${CMAKE_CXX_COMPILER_ID}")
 endif()
+
+# monarc_module() sets a FOLDER property per tier; without this it is inert.
+set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/CMake")
 include(MonarcTargetOptions)
