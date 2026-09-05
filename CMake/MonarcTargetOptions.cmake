@@ -19,8 +19,10 @@ function(monarc_set_target_options target)
             /Zc:__cplusplus     # otherwise __cplusplus reports 199711
             /Zc:preprocessor    # conforming preprocessor
             /utf-8
-            /EHsc
-            /MP)
+            /EHsc)
+        # No /MP: it parallelises multiple sources within a single cl.exe invocation,
+        # but Ninja invokes cl.exe once per source file, so it never has anything to
+        # do. Build parallelism comes from Ninja's own scheduler.
         # clang-cl accepts the MSVC flags above but warns about a few it ignores.
         if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
             target_compile_options(${target} PRIVATE

@@ -5,9 +5,13 @@ project(Monarc
     DESCRIPTION "Monarc game engine"
     LANGUAGES CXX)
 
-if(NOT CMAKE_CXX_COMPILER_ID MATCHES "MSVC|Clang")
+# AppleClang is listed deliberately: ADR-0012 schedules a Metal backend once macOS
+# hardware is available, and that build reports AppleClang. The previous form was an
+# unanchored regex that accepted AppleClang by accident rather than by intent.
+set(MONARC_SUPPORTED_COMPILERS MSVC Clang AppleClang)
+if(NOT CMAKE_CXX_COMPILER_ID IN_LIST MONARC_SUPPORTED_COMPILERS)
     message(FATAL_ERROR
-        "Monarc supports MSVC and Clang. Found: ${CMAKE_CXX_COMPILER_ID}")
+        "Monarc supports: ${MONARC_SUPPORTED_COMPILERS}. Found: ${CMAKE_CXX_COMPILER_ID}")
 endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/CMake")
