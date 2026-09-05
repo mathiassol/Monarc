@@ -125,6 +125,51 @@ function(monarc_validate_modules)
         message(FATAL_ERROR "Module graph violations:\n  - ${_joined}")
     endif()
 
+    # Emit module-graph.json. Built as a string because CMake's string(JSON ...)
+    # can read JSON but cannot construct it.
+    set(_entries "")
+    foreach(_m IN LISTS _modules)
+        get_property(_kind GLOBAL PROPERTY MONARC_MOD_${_m}_KIND)
+        get_property(_tier GLOBAL PROPERTY MONARC_MOD_${_m}_TIER)
+        get_property(_pub  GLOBAL PROPERTY MONARC_MOD_${_m}_PUBLIC)
+        get_property(_priv GLOBAL PROPERTY MONARC_MOD_${_m}_PRIVATE)
+        get_property(_dir  GLOBAL PROPERTY MONARC_MOD_${_m}_DIR)
+        file(RELATIVE_PATH _reldir "${CMAKE_SOURCE_DIR}" "${_dir}")
+
+        set(_pubjson "")
+        foreach(_d IN LISTS _pub)
+            list(APPEND _pubjson "\"${_d}\"")
+        endforeach()
+        list(JOIN _pubjson ", " _pubjson)
+
+        set(_privjson "")
+        foreach(_d IN LISTS _priv)
+            list(APPEND _privjson "\"${_d}\"")
+        endforeach()
+        list(JOIN _privjson ", " _privjson)
+
+        list(APPEND _entries
+"    {
+      \"name\": \"${_m}\",
+      \"kind\": \"${_kind}\",
+      \"tier\": ${_tier},
+      \"directory\": \"${_reldir}\",
+      \"publicDeps\": [${_pubjson}],
+      \"privateDeps\": [${_privjson}]
+    }")
+    endforeach()
+    list(JOIN _entries ",\n" _entries)
+
+    file(WRITE "${CMAKE_BINARY_DIR}/module-graph.json"
+"{
+  \"engineVersion\": \"${PROJECT_VERSION}\",
+  \"generator\": \"monarc_validate_modules\",
+  \"modules\": [
+${_entries}
+  ]
+}
+")
+
     list(LENGTH _modules _count)
     if(_count EQUAL 0)
         message(WARNING
