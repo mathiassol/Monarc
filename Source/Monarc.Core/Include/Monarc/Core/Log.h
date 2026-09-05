@@ -41,7 +41,9 @@ struct LogRecord {
 
 using LogSink = void (*)(const LogRecord& record);
 
-/// Installs a sink and returns the previous one.
+/// Installs a sink and returns the previous one. Not thread-safe; intended for process
+/// start-up and for tests. Emitting through the installed sink is likewise unsynchronised,
+/// which will need revisiting when `Monarc.Jobs` arrives in Phase A2.
 LogSink SetLogSink(LogSink sink);
 
 namespace Detail {

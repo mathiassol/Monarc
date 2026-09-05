@@ -7,8 +7,15 @@ _Last updated: 2026-09-05_
 
 ## Summary
 
-The architecture has been designed and recorded. **No engine code exists yet.** The next
-step is the implementation plan for [M0 — First Light](Milestones/M0-First-Light.md).
+The architecture is designed and recorded, and **Phase A1 is complete**: the build
+mechanically enforces the module graph, and `Monarc.Core` has its memory and diagnostics
+foundation under test on two compilers.
+
+Next is **Phase A2** — the rest of `Monarc.Core` (strings, hash maps, math, GUIDs, the
+platform layer) and `Monarc.Jobs`. See
+[M0 — First Light](Milestones/M0-First-Light.md) for how the phases fit together.
+
+Nothing renders yet. That is Phase A3 and A4.
 
 ## Verified environment
 

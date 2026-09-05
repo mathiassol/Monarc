@@ -1597,6 +1597,9 @@ using Monarc::ArenaAllocator;
 using Monarc::uptr;
 using Monarc::usize;
 
+// IAllocator::Allocate is [[nodiscard]], so calls made purely for their side effect on the
+// cursor must discard explicitly or the build fails under /WX.
+
 namespace {
 constexpr usize kCapacity = 1024;
 }
@@ -1619,7 +1622,7 @@ TEST_CASE("ArenaAllocator honours over-alignment") {
     std::vector<std::byte> backing(kCapacity);
     ArenaAllocator arena(backing.data(), backing.size(), "Test");
 
-    arena.Allocate(1, 1);                     // deliberately misalign the cursor
+    (void)arena.Allocate(1, 1);               // deliberately misalign the cursor
     void* aligned = arena.Allocate(8, 64);
     REQUIRE(aligned != nullptr);
     CHECK(reinterpret_cast<uptr>(aligned) % 64 == 0);
@@ -1655,11 +1658,11 @@ TEST_CASE("ArenaAllocator remembers its high-water mark across resets") {
     std::vector<std::byte> backing(kCapacity);
     ArenaAllocator arena(backing.data(), backing.size(), "Test");
 
-    arena.Allocate(500, 1);
+    (void)arena.Allocate(500, 1);
     CHECK(arena.HighWaterMark() == 500);
 
     arena.Reset();
-    arena.Allocate(100, 1);
+    (void)arena.Allocate(100, 1);
     CHECK(arena.BytesAllocated() == 100);
     CHECK(arena.HighWaterMark() == 500);      // budgeting needs the peak, not the current
 }
