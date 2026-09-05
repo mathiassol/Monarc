@@ -163,3 +163,46 @@ TEST_CASE("Array frees everything it allocated") {
     }
     CHECK(allocator.BytesAllocated() == 0);
 }
+
+TEST_CASE("pushing an existing element survives the grow it triggers") {
+    // array.Push(array[0]) is legal, and when it forces a reallocation the argument
+    // aliases memory the grow is about to free. Constructing the new element after the
+    // move would read freed storage -- previously observed as MSVC's 0xDDDDDDDD poison.
+    SystemAllocator allocator;
+    Array<int> array(allocator);
+    array.Reserve(1);
+    array.Push(42);
+    REQUIRE(array.Size() == array.Capacity());   // the next push must reallocate
+
+    array.Push(array[0]);
+
+    REQUIRE(array.Size() == 2);
+    CHECK(array[0] == 42);
+    CHECK(array[1] == 42);
+}
+
+TEST_CASE("self-push survives a grow for non-trivial element types too") {
+    SystemAllocator allocator;
+    Array<Tracked> array(allocator);
+    array.Reserve(1);
+    array.Emplace(7);
+    REQUIRE(array.Size() == array.Capacity());
+
+    array.Push(array[0]);
+
+    REQUIRE(array.Size() == 2);
+    CHECK(array[0].value == 7);
+    CHECK(array[1].value == 7);
+}
+
+TEST_CASE("capacity is bounded so the byte size cannot overflow") {
+    // Reserve of a count whose byte size wraps used to "succeed" with a tiny buffer while
+    // Capacity() reported room for ~1e18 elements.
+    SystemAllocator allocator;
+    Array<int> array(allocator);
+    CHECK(Array<int>::MaxCapacity() == static_cast<Monarc::usize>(-1) / sizeof(int));
+    CHECK(Array<int>::MaxCapacity() < static_cast<Monarc::usize>(-1));
+    // A request above the ceiling is fatal by contract, so it is not exercised here;
+    // the bound itself is what stops the wrap.
+    CHECK(array.Capacity() == 0);
+}
