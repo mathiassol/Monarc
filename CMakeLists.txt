@@ -24,3 +24,9 @@ if(MONARC_BUILD_TESTS)
 endif()
 
 message(STATUS "Monarc ${PROJECT_VERSION} | ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
+
+include(MonarcModule)
+
+add_subdirectory(Source/Monarc.Core)
+
+monarc_validate_modules()
