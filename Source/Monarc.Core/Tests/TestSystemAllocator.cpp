@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <Monarc/Core/Assert.h>
 #include <Monarc/Core/Memory/SystemAllocator.h>
 
 #include <cstring>
@@ -59,4 +60,28 @@ TEST_CASE("a SystemAllocator is usable through the IAllocator interface") {
     CHECK(allocator.BytesAllocated() == 32);
     allocator.Deallocate(block, 32, alignof(double));
     CHECK(allocator.BytesAllocated() == 0);
+}
+
+TEST_CASE("Deallocate reports a size mismatch instead of wrapping the counter") {
+    // usize is unsigned, so releasing more than is outstanding would wrap BytesAllocated()
+    // to near SIZE_MAX and quietly poison every budget built on it.
+    struct Captured {
+        bool fired = false;
+    } captured;
+    static Captured* s_captured = nullptr;
+    s_captured = &captured;
+
+    Monarc::AssertHandler previous = Monarc::SetAssertHandler(
+        [](const char*, const char*, int, const char*) {
+            s_captured->fired = true;
+            return false;   // do not break into the debugger
+        });
+
+    SystemAllocator allocator;
+    void*           block = allocator.Allocate(64, 16);
+    REQUIRE(block != nullptr);
+    allocator.Deallocate(block, 999, 16);   // deliberately wrong size
+
+    Monarc::SetAssertHandler(previous);
+    CHECK(captured.fired);
 }

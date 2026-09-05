@@ -17,6 +17,11 @@ public:
     IAllocator& operator=(const IAllocator&) = delete;
 
     /// Returns nullptr on failure. `alignment` must be a power of two.
+    ///
+    /// A zero-size request also returns nullptr. Callers cannot therefore distinguish
+    /// "asked for nothing" from "out of memory" by the return value alone — check the
+    /// size first if that distinction matters. Pairing that nullptr with
+    /// `Deallocate(nullptr, 0, alignment)` is safe.
     [[nodiscard]] virtual void* Allocate(usize size, usize alignment) = 0;
 
     /// `size` and `alignment` must match the original call. Passing nullptr is a no-op.
