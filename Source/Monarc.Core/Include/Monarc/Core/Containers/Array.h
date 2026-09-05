@@ -15,6 +15,12 @@ namespace Monarc {
 ///
 /// Copying is deleted: an allocating copy should be deliberate and visible. Duplicate
 /// through an explicit Clone when one is needed.
+///
+/// Over an `ArenaAllocator`, prefer `Reserve` to the final size before pushing. Arenas
+/// ignore `Deallocate`, so each growth strands the previous buffer: growing one element at
+/// a time consumes twice the live size. Note also that an `Array` whose *control block*
+/// sits in an arena is not destroyed by `Reset`, so its element storage leaks out of
+/// whichever allocator owns it.
 template <typename T>
 class Array {
     /// Largest element count whose byte size still fits in usize. Beyond this,
