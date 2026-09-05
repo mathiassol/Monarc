@@ -12,6 +12,10 @@ function(monarc_set_target_options target)
         # scanning by default at C++23; turning it off is free build time.
         CXX_SCAN_FOR_MODULES OFF)
 
+    target_compile_definitions(${target} PUBLIC
+        $<$<CONFIG:Debug>:MONARC_ENABLE_ASSERTS=1>
+        $<$<NOT:$<CONFIG:Debug>>:MONARC_ENABLE_ASSERTS=0>)
+
     if(MSVC)
         target_compile_options(${target} PRIVATE
             /W4 /WX
