@@ -35,3 +35,14 @@ include(MonarcModule)
 add_subdirectory(Source/Monarc.Core)
 
 monarc_validate_modules()
+
+if(MONARC_BUILD_TESTS)
+    find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
+    add_test(
+        NAME Architecture.Gates
+        COMMAND ${Python3_EXECUTABLE}
+                "${CMAKE_SOURCE_DIR}/Tools/check_architecture.py"
+                "${CMAKE_BINARY_DIR}/module-graph.json"
+                "${CMAKE_SOURCE_DIR}")
+    set_tests_properties(Architecture.Gates PROPERTIES LABELS "architecture")
+endif()
