@@ -44,8 +44,13 @@ If you are new to the project, read in this order:
 - [Editor](Product/Editor.md) — the authoring environment
 - [Build and Export](Product/Build-And-Export.md) — packaging, stripping, explainability
 
-### Milestones
+### Milestones and plans
 - [M0 — First Light](Milestones/M0-First-Light.md) — the first end-to-end proof
+- [Plans](Plans/) — task-by-task implementation plans, one per phase
+  - [Phase A1 — Foundation and the Build Gates](Plans/2026-09-05-phase-a1-foundation.md)
+
+A milestone says *what* and *why*; a plan says *how*, in executable steps. Plans are written
+one phase ahead, not all at once, because later phases are shaped by what earlier ones teach.
 
 ## Conventions in these documents
 

@@ -47,7 +47,10 @@ stalling — there is always a working thing, and always a place to redirect.
 
 | Phase | Contents | Runnable proof |
 |---|---|---|
-| **A** | `Core`, `Jobs`, `RHI`, `RHI.Vulkan`, `Host.Windowed`, minimal render graph | A window opens and the screen clears through the real render graph |
+| **A1** | Build system, `monarc_module`, architecture gates, Core's memory and diagnostics foundation | A build that enforces the architecture, and a tested `Monarc.Core` — [plan](../Plans/2026-09-05-phase-a1-foundation.md) |
+| **A2** | Rest of `Core` (String, HashMap, math, GUID, platform IO/time/threads) and `Jobs` | A parallel job graph with dependencies, under test |
+| **A3** | `RHI`, `RHI.Vulkan`, `Host.Windowed` | A window with a cleared screen, via the RHI directly |
+| **A4** | Minimal render graph | A window opens and the screen clears **through the real render graph** |
 | **B** | `ShaderCompiler`, `Shaders`, `Render` | A cube renders from in-memory data via `RenderScene` and a Slang shader |
 | **C** | `Reflect`, `Serialize`, `Assets`, `Cook` | A glTF mesh and texture are imported, cooked, loaded by handle, and rendered |
 | **D** | `World`, `Engine` | An Actor with a `StaticMeshComponent` and a camera, in a saved scene |
