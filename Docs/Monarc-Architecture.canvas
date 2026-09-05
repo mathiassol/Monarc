@@ -1,0 +1,513 @@
+{
+  "nodes": [
+    {
+      "id": "00000001",
+      "type": "group",
+      "x": -60,
+      "y": 0,
+      "width": 2160,
+      "height": 420,
+      "label": "Tier 4  \u2014  Tools   \u00b7   never linked into a game",
+      "color": "2"
+    },
+    {
+      "id": "00000002",
+      "type": "group",
+      "x": -60,
+      "y": 500,
+      "width": 2160,
+      "height": 420,
+      "label": "Tier 3  \u2014  Runtime",
+      "color": "3"
+    },
+    {
+      "id": "00000003",
+      "type": "group",
+      "x": -60,
+      "y": 1000,
+      "width": 2160,
+      "height": 420,
+      "label": "Tier 2  \u2014  Rendering   \u00b7   the reusable package",
+      "color": "5"
+    },
+    {
+      "id": "00000004",
+      "type": "group",
+      "x": -60,
+      "y": 1500,
+      "width": 2160,
+      "height": 420,
+      "label": "Tier 1  \u2014  Data",
+      "color": "6"
+    },
+    {
+      "id": "00000005",
+      "type": "group",
+      "x": -60,
+      "y": 2000,
+      "width": 2160,
+      "height": 220,
+      "label": "Tier 0  \u2014  Foundation   \u00b7   no engine concepts",
+      "color": "4"
+    },
+    {
+      "id": "00000006",
+      "type": "text",
+      "x": 0,
+      "y": 60,
+      "width": 260,
+      "height": 92,
+      "text": "**Monarc.ShaderCompiler**\n`Tool`",
+      "color": "2"
+    },
+    {
+      "id": "00000007",
+      "type": "text",
+      "x": 340,
+      "y": 60,
+      "width": 260,
+      "height": 92,
+      "text": "**Monarc.Cook**\n`Tool`",
+      "color": "2"
+    },
+    {
+      "id": "00000008",
+      "type": "text",
+      "x": 680,
+      "y": 60,
+      "width": 260,
+      "height": 92,
+      "text": "**Monarc.Build**\n`Tool`",
+      "color": "2"
+    },
+    {
+      "id": "00000009",
+      "type": "text",
+      "x": 1020,
+      "y": 60,
+      "width": 260,
+      "height": 92,
+      "text": "**Monarc.Editor**\n`Editor`",
+      "color": "2"
+    },
+    {
+      "id": "0000000a",
+      "type": "text",
+      "x": 1360,
+      "y": 60,
+      "width": 260,
+      "height": 92,
+      "text": "**Monarc.Hub**\n`Editor`",
+      "color": "2"
+    },
+    {
+      "id": "0000000b",
+      "type": "text",
+      "x": 0,
+      "y": 270,
+      "width": 560,
+      "height": 86,
+      "text": "**Docs**\n[[Docs/Product/Editor|Editor]]  \u00b7  [[Docs/Product/Hub|Hub]]  \u00b7  [[Docs/Product/Build-And-Export|Build & Export]]"
+    },
+    {
+      "id": "0000000c",
+      "type": "text",
+      "x": 0,
+      "y": 560,
+      "width": 260,
+      "height": 92,
+      "text": "**Monarc.World**\nActors, Components",
+      "color": "3"
+    },
+    {
+      "id": "0000000d",
+      "type": "text",
+      "x": 340,
+      "y": 560,
+      "width": 260,
+      "height": 92,
+      "text": "**Monarc.Engine**\nframe loop, extraction",
+      "color": "3"
+    },
+    {
+      "id": "0000000e",
+      "type": "text",
+      "x": 680,
+      "y": 560,
+      "width": 260,
+      "height": 92,
+      "text": "**Monarc.Host.Windowed**\nwindow, input",
+      "color": "3"
+    },
+    {
+      "id": "0000000f",
+      "type": "text",
+      "x": 1020,
+      "y": 560,
+      "width": 260,
+      "height": 92,
+      "text": "**Monarc.Host.Headless**\nno Tier 2 linked",
+      "color": "3"
+    },
+    {
+      "id": "00000010",
+      "type": "text",
+      "x": 0,
+      "y": 770,
+      "width": 560,
+      "height": 86,
+      "text": "**Docs**\n[[Docs/Runtime/World-Model|World Model]]  \u00b7  [[Docs/Runtime/Frame-Model|Frame Model]]  \u00b7  [[Docs/Runtime/Threading|Threading]]  \u00b7  [[Docs/Runtime/Memory|Memory]]"
+    },
+    {
+      "id": "00000011",
+      "type": "text",
+      "x": 0,
+      "y": 1060,
+      "width": 260,
+      "height": 92,
+      "text": "**Monarc.RHI**\nbarriers, caps tiers",
+      "color": "5"
+    },
+    {
+      "id": "00000012",
+      "type": "text",
+      "x": 340,
+      "y": 1060,
+      "width": 260,
+      "height": 92,
+      "text": "**Monarc.RHI.Vulkan**\nM0",
+      "color": "5"
+    },
+    {
+      "id": "00000013",
+      "type": "text",
+      "x": 680,
+      "y": 1060,
+      "width": 260,
+      "height": 92,
+      "text": "**Monarc.RHI.D3D12**\nM1",
+      "color": "5"
+    },
+    {
+      "id": "00000014",
+      "type": "text",
+      "x": 1020,
+      "y": 1060,
+      "width": 260,
+      "height": 92,
+      "text": "**Monarc.RHI.Metal**\nM2",
+      "color": "5"
+    },
+    {
+      "id": "00000015",
+      "type": "text",
+      "x": 1360,
+      "y": 1060,
+      "width": 260,
+      "height": 92,
+      "text": "**Monarc.Shaders**\npipelines, cache",
+      "color": "5"
+    },
+    {
+      "id": "00000016",
+      "type": "text",
+      "x": 1700,
+      "y": 1060,
+      "width": 260,
+      "height": 92,
+      "text": "**Monarc.Render**\nrender graph",
+      "color": "5"
+    },
+    {
+      "id": "00000017",
+      "type": "text",
+      "x": 0,
+      "y": 1270,
+      "width": 560,
+      "height": 86,
+      "text": "**Docs**\n[[Docs/Rendering/RHI|RHI]]  \u00b7  [[Docs/Rendering/Render-Graph|Render Graph]]  \u00b7  [[Docs/Rendering/Shaders|Shaders]]"
+    },
+    {
+      "id": "00000018",
+      "type": "text",
+      "x": 0,
+      "y": 1560,
+      "width": 260,
+      "height": 92,
+      "text": "**Monarc.Reflect**\ntype registry",
+      "color": "6"
+    },
+    {
+      "id": "00000019",
+      "type": "text",
+      "x": 340,
+      "y": 1560,
+      "width": 260,
+      "height": 92,
+      "text": "**Monarc.Serialize**\nschemas, migration",
+      "color": "6"
+    },
+    {
+      "id": "0000001a",
+      "type": "text",
+      "x": 680,
+      "y": 1560,
+      "width": 260,
+      "height": 92,
+      "text": "**Monarc.Assets**\nGUIDs, handles",
+      "color": "6"
+    },
+    {
+      "id": "0000001b",
+      "type": "text",
+      "x": 0,
+      "y": 1770,
+      "width": 560,
+      "height": 86,
+      "text": "**Docs**\n[[Docs/Content/Asset-Pipeline|Asset Pipeline]]  \u00b7  [[Docs/Content/Serialization|Serialization]]"
+    },
+    {
+      "id": "0000001c",
+      "type": "text",
+      "x": 0,
+      "y": 2060,
+      "width": 260,
+      "height": 92,
+      "text": "**Monarc.Core**\nplatform, memory, math",
+      "color": "4"
+    },
+    {
+      "id": "0000001d",
+      "type": "text",
+      "x": 340,
+      "y": 2060,
+      "width": 260,
+      "height": 92,
+      "text": "**Monarc.Jobs**\nscheduler, deps",
+      "color": "4"
+    },
+    {
+      "id": "0000001e",
+      "type": "text",
+      "x": -60,
+      "y": -330,
+      "width": 620,
+      "height": 143,
+      "text": "# Monarc\nModule tiers, and the boundaries the build enforces.\n\n[[Docs/README|Docs index]]  \u00b7  [[Docs/Architecture/Overview|Overview]]  \u00b7  [[Docs/Architecture/Decisions/README|Decisions]]  \u00b7  [[Docs/Milestones/M0-First-Light|M0]]"
+    },
+    {
+      "id": "0000001f",
+      "type": "text",
+      "x": 600,
+      "y": -330,
+      "width": 620,
+      "height": 208,
+      "text": "## Enforced by the build\n1. Downward only, no cycles\n2. `Runtime` never depends on `Tool`/`Editor`\n3. Tier 2 never includes Tier 1 or Tier 3\n4. Headless binary: no graphics symbols\n5. Platform `#ifdef`s only in `Core/Platform`",
+      "color": "1"
+    }
+  ],
+  "edges": [
+    {
+      "id": "00000020",
+      "fromNode": "0000001d",
+      "toNode": "0000001c",
+      "fromSide": "left",
+      "toSide": "right",
+      "toEnd": "arrow"
+    },
+    {
+      "id": "00000021",
+      "fromNode": "00000018",
+      "toNode": "0000001c",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "toEnd": "arrow"
+    },
+    {
+      "id": "00000022",
+      "fromNode": "00000019",
+      "toNode": "00000018",
+      "fromSide": "left",
+      "toSide": "right",
+      "toEnd": "arrow"
+    },
+    {
+      "id": "00000023",
+      "fromNode": "0000001a",
+      "toNode": "00000019",
+      "fromSide": "left",
+      "toSide": "right",
+      "toEnd": "arrow"
+    },
+    {
+      "id": "00000024",
+      "fromNode": "00000011",
+      "toNode": "0000001c",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "toEnd": "arrow",
+      "label": "Tier 2 skips Tier 1 entirely",
+      "color": "1"
+    },
+    {
+      "id": "00000025",
+      "fromNode": "00000016",
+      "toNode": "0000001d",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "toEnd": "arrow",
+      "label": "no World, no Assets",
+      "color": "1"
+    },
+    {
+      "id": "00000026",
+      "fromNode": "00000012",
+      "toNode": "00000011",
+      "fromSide": "left",
+      "toSide": "right",
+      "toEnd": "arrow",
+      "color": "5"
+    },
+    {
+      "id": "00000027",
+      "fromNode": "00000013",
+      "toNode": "00000011",
+      "fromSide": "left",
+      "toSide": "right",
+      "toEnd": "arrow",
+      "color": "5"
+    },
+    {
+      "id": "00000028",
+      "fromNode": "00000014",
+      "toNode": "00000011",
+      "fromSide": "left",
+      "toSide": "right",
+      "toEnd": "arrow",
+      "color": "5"
+    },
+    {
+      "id": "00000029",
+      "fromNode": "00000015",
+      "toNode": "00000011",
+      "fromSide": "left",
+      "toSide": "right",
+      "toEnd": "arrow"
+    },
+    {
+      "id": "0000002a",
+      "fromNode": "00000016",
+      "toNode": "00000015",
+      "fromSide": "left",
+      "toSide": "right",
+      "toEnd": "arrow"
+    },
+    {
+      "id": "0000002b",
+      "fromNode": "0000000c",
+      "toNode": "0000001a",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "toEnd": "arrow"
+    },
+    {
+      "id": "0000002c",
+      "fromNode": "0000000d",
+      "toNode": "0000000c",
+      "fromSide": "left",
+      "toSide": "right",
+      "toEnd": "arrow"
+    },
+    {
+      "id": "0000002d",
+      "fromNode": "0000000d",
+      "toNode": "00000016",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "toEnd": "arrow",
+      "label": "extraction boundary",
+      "color": "6"
+    },
+    {
+      "id": "0000002e",
+      "fromNode": "0000000e",
+      "toNode": "0000000d",
+      "fromSide": "left",
+      "toSide": "right",
+      "toEnd": "arrow"
+    },
+    {
+      "id": "0000002f",
+      "fromNode": "0000000f",
+      "toNode": "0000000d",
+      "fromSide": "left",
+      "toSide": "right",
+      "toEnd": "arrow",
+      "label": "links no Tier 2",
+      "color": "1"
+    },
+    {
+      "id": "00000030",
+      "fromNode": "00000006",
+      "toNode": "00000015",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "toEnd": "arrow",
+      "label": "cooks shaders for",
+      "color": "2"
+    },
+    {
+      "id": "00000031",
+      "fromNode": "00000007",
+      "toNode": "0000001a",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "toEnd": "arrow",
+      "label": "cooks assets for",
+      "color": "2"
+    },
+    {
+      "id": "00000032",
+      "fromNode": "00000008",
+      "toNode": "00000007",
+      "fromSide": "left",
+      "toSide": "right",
+      "toEnd": "arrow"
+    },
+    {
+      "id": "00000033",
+      "fromNode": "0000000a",
+      "toNode": "00000008",
+      "fromSide": "left",
+      "toSide": "right",
+      "toEnd": "arrow",
+      "label": "creates + launches"
+    },
+    {
+      "id": "00000034",
+      "fromNode": "00000009",
+      "toNode": "0000000d",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "toEnd": "arrow",
+      "label": "hosts an Editor world"
+    },
+    {
+      "id": "00000035",
+      "fromNode": "0000001e",
+      "toNode": "00000001",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "toEnd": "arrow"
+    },
+    {
+      "id": "00000036",
+      "fromNode": "0000001f",
+      "toNode": "00000009",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "toEnd": "arrow",
+      "color": "1"
+    }
+  ]
+}

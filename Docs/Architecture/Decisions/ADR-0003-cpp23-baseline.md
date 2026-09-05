@@ -1,0 +1,75 @@
+# ADR-0003: C++23 baseline, library restricted by module kind
+
+**Status:** Accepted, **conditional** — 2026-09-05
+
+The condition: a second compiler (Clang) must build the project in CI. Until that exists,
+this decision is unverified. See [Status.md](../../Status.md#known-gaps).
+
+## Context
+
+Common advice for a long-lived engine is to hold at C++20. That advice usually conflates two
+things with very different portability profiles:
+
+- **C++23 language features** are broadly implemented: MSVC 19.4x+, Clang 17+, GCC 13+.
+- **C++23 library features** are fragmented, and worst on the platform we are heading for.
+  `std::print`, `std::generator`, `std::flat_map`, `std::stacktrace` and the C++23 ranges
+  adaptors lag badly in libc++ and therefore in AppleClang. Metal is expected within a year.
+
+The advice to hold at C++20 is really a warning about the second column. It is aimed at
+codebases that lean on the standard library, or teams shipping to consoles today.
+
+Monarc is not that codebase. [ADR-0014](ADR-0014-dependency-policy.md) commits us to owning
+containers, strings, allocators and math, because std's allocator model and debug-build
+performance are not acceptable in an engine anyway. The fragmented half of C++23 is a half
+we were never going to use.
+
+**Verified on this machine:** MSVC 19.51 compiles deducing `this`, `static operator()`,
+multidimensional `operator[]`, `if consteval`, `auto(x)`, `[[assume]]`, and `std::expected`
+cleanly at `/W4`.
+
+## Decision
+
+**C++23 is the baseline** for all modules. The restriction applies to the *library*, not the
+language, and it differs by module kind — which the build system already knows:
+
+| Kind | Language | Standard library |
+|---|---|---|
+| `Runtime` | Full C++23 | Restricted to the universally-available header-only subset: `<type_traits>`, `<concepts>`, `<utility>`, `<expected>`, `<span>`, `<bit>`, `<atomic>`, `<cstdint>`, and similar. **Banned:** `<iostream>`, `<regex>`, `<generator>`, `<flat_map>`, `<stacktrace>`, C++23 ranges adaptors, and `std::print`/`std::format` in runtime paths |
+| `Tool`, `Editor`, `Test` | Full C++23 | Unrestricted. These build only on developer machines with current toolchains |
+
+Additionally:
+
+- **No C++20 modules.** Strict header hygiene and optional unity builds instead. CMake's
+  module dependency scanning is disabled (`CXX_SCAN_FOR_MODULES OFF`), which is free build
+  time on a six-core machine.
+- `/Zc:__cplusplus` is set globally on MSVC.
+- **C++26 is not adopted**, but static reflection (P2996) is watched — see
+  [ADR-0010](ADR-0010-reflection.md), which is deliberately shaped to accept it later.
+
+## Consequences
+
+**Good.** Deducing `this` removes the CRTP boilerplate that [handle types](ADR-0002-handles-not-pointers.md)
+and RHI resource wrappers would otherwise need — const, non-const and rvalue overloads
+collapse into one. `std::expected` is the `Result` type directly. `[[assume]]` serves hot
+loops; multidimensional `operator[]` serves grid and texture addressing; `static operator()`
+serves stateless job functors. The policy is *enforceable*, which "C++20 with selective
+C++23" was not — nobody can tell by inspection whether a line is C++20-legal.
+
+**Costs.** We are currently satisfying exactly one compiler, which is a thin basis for a
+portability claim. Console toolchains, if Monarc ever targets them, lag; a future downgrade
+would be a mechanical port of a handful of language constructs, which is bounded but real.
+
+**The asymmetry that decided it:** choosing C++23 and later needing C++20 is a mechanical
+port. Choosing C++20 and later wishing for C++23 means the whole codebase is written in the
+more verbose style permanently, because nobody goes back and rewrites working code.
+
+## Alternatives considered
+
+**C++20 baseline.** The defensible choice *if* we do not add a second compiler to CI. The
+two decisions are linked, and that trade is recorded here rather than left implicit.
+
+**C++20 floor with opportunistic C++23.** Rejected as unenforceable. It fails at an
+unpredictable moment on a compiler nobody ran.
+
+**C++26 with an experimental Clang for reflection.** Rejected: no shipping compiler has
+usable P2996, and betting the type system on a fork is not a foundation.

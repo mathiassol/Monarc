@@ -1,0 +1,59 @@
+# Normalise line endings in the repository to LF, and check out LF everywhere.
+#
+# This matters more than usual here: `core.autocrlf` is currently true on this machine,
+# which rewrites line endings on checkout and commit. That produces spurious diffs, and it
+# breaks once macOS joins the project (ADR-0012). An explicit .gitattributes overrides
+# autocrlf, so behaviour no longer depends on each developer's git config.
+* text=auto eol=lf
+
+# ---- Scripts whose line endings are load-bearing ----
+*.sh    text eol=lf
+*.bash  text eol=lf
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# ---- Source and build files (explicit for clarity) ----
+*.c      text
+*.h      text
+*.cpp    text
+*.hpp    text
+*.inl    text
+*.slang  text
+*.cmake  text
+CMakeLists.txt   text
+CMakePresets.json text
+*.json   text
+*.md     text
+*.toml   text
+*.yml    text
+*.yaml   text
+
+# Obsidian Canvas is JSON, and should diff as text
+*.canvas text
+
+# ---- Binary: never diff, never munge ----
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.tga  binary
+*.dds  binary
+*.ktx  binary
+*.ktx2 binary
+*.hdr  binary
+*.exr  binary
+*.glb  binary
+*.fbx  binary
+*.ttf  binary
+*.otf  binary
+*.wav  binary
+*.ogg  binary
+*.spv  binary
+*.pdb  binary
+*.lib  binary
+*.dll  binary
+*.exe  binary
+
+# Note: .gltf is JSON and is intentionally treated as text.
+# When binary test content lands in Phase C, consider Git LFS for *.glb, *.ktx2 and
+# large textures — git-lfs is already installed, but not yet initialised for this repo.

@@ -1,0 +1,82 @@
+# Status
+
+**What is actually true right now.** Intent lives in the other documents; this file is the
+honest account. Update it when reality changes, not when a plan is written.
+
+_Last updated: 2026-09-05_
+
+## Summary
+
+The architecture has been designed and recorded. **No engine code exists yet.** The next
+step is the implementation plan for [M0 — First Light](Milestones/M0-First-Light.md).
+
+## Verified environment
+
+Confirmed by direct testing on the development machine, not assumed:
+
+| Component | Version | Notes |
+|---|---|---|
+| Compiler | MSVC 19.51 (toolset 14.51, VS 2026 Community) | Compiles C++23 language features cleanly at `/W4` — verified: deducing `this`, `static operator()`, multidimensional `operator[]`, `if consteval`, `auto(x)`, `[[assume]]`, `std::expected` |
+| Second compiler | Clang 22.1.8 (`clang-cl`, standalone LLVM) | **Verified**: builds the same C++23 feature test through CMake with `CXX_STANDARD 23` and produces output identical to MSVC. This satisfies [ADR-0003](Architecture/Decisions/ADR-0003-cpp23-baseline.md)'s condition |
+| Build | CMake 4.2.1 + Ninja (bundled with VS) | Configure and build verified end to end |
+| Vulkan | SDK 1.4.357.0 | Found automatically by CMake's `find_package(Vulkan)`. Validation layers, gfxreconstruct, SPIRV-Tools present |
+| Shaders | Slang 2026.13.1 (in the Vulkan SDK), DXC 1.9, glslang | |
+| Windows SDK | 10.0.26100.0 | D3D12 headers present |
+| Other | Python 3.14.7, Node 22.15, .NET 9 + 10 | |
+
+### Hardware
+
+- **NVIDIA RTX 3070 Ti** (Ampere) — high capability tier: bindless, mesh shaders, ray tracing
+- **Intel UHD 730** (Xe-LP, integrated) — a genuinely useful *second vendor and lower tier*
+  on the same machine, for keeping capability tiers honest rather than theoretical
+- Intel i5-11400, 6 cores / 12 threads, 32 GB RAM — modest, so **compile-time discipline is
+  a design constraint, not a virtue**
+
+### Known gaps
+
+- **No macOS machine.** Metal is designed for but unimplemented and unproven. Expected
+  within a year — see [ADR-0012](Architecture/Decisions/ADR-0012-backend-rollout.md).
+- **No graphics debugger.** NVIDIA Nsight Graphics is installed, but it is NVIDIA-only and
+  so cannot inspect frames on the Intel UHD 730 — the device that keeps the capability
+  tiers honest. RenderDoc is needed before Phase A rendering work begins.
+- **No compiler cache.** Neither `sccache` nor `ccache` is present. On six cores this is
+  worth having before the module count grows.
+- **Clang is not on `PATH`.** The LLVM installer did not register it (machine or user).
+  Builds are unaffected because CMake presets pin toolchain paths
+  ([ADR-0011](Architecture/Decisions/ADR-0011-build-system.md)), but `clang-tidy` and
+  `clang-format` will not resolve from a terminal until it is added.
+
+## Toolchain quirks worth remembering
+
+- MSVC reports `__cplusplus == 199711` unless built with `/Zc:__cplusplus`. Set it globally.
+- CMake 4.2 enables C++20 module dependency scanning by default at C++23. We do not use
+  modules ([ADR-0003](Architecture/Decisions/ADR-0003-cpp23-baseline.md)), so
+  `CXX_SCAN_FOR_MODULES OFF` is free build time.
+- Git Bash puts MSYS2's `g++` ahead of MSVC on `PATH`. Builds must run from a VS developer
+  environment (`vcvars64.bat`) or via CMake presets that pin the toolchain.
+- **`clang-cl` does not accept `/std:c++23`** — it silently ignores the flag (emitting only
+  an "argument unused" warning) and falls back to C++17, which then fails with a wall of
+  confusing errors. Use `/std:c++latest`, or let CMake's `CXX_STANDARD 23` pick the flag.
+- `core.autocrlf` is `true` on this machine. `.gitattributes` overrides it with
+  `text=auto eol=lf` so line-ending behaviour does not depend on developer config.
+- Windows long paths are **not** enabled (`LongPathsEnabled=0`, `core.longpaths` unset).
+  Deep module trees plus Ninja build directories approach the 260-character limit.
+
+## Implementation progress
+
+Nothing implemented. The table below is the M0 phase list; it is the progress tracker.
+
+| Phase | Contents | State |
+|---|---|---|
+| A | Core, Jobs, RHI, Vulkan backend, Host.Windowed, minimal render graph | Not started |
+| B | ShaderCompiler, Shaders, Render | Not started |
+| C | Reflect, Serialize, Assets, Cook | Not started |
+| D | World, Engine | Not started |
+| E | Editor | Not started |
+| F | Hub, Build and export | Not started |
+
+## Verification gates
+
+None are implemented yet. They are specified in
+[M0 — First Light](Milestones/M0-First-Light.md) and are intended to go red-green early
+rather than be added once they would already fail.

@@ -1,0 +1,39 @@
+# ---- Build output ----
+/Build/
+/build/
+/out/
+/Intermediate/
+/Binaries/
+CMakeUserPresets.json
+CMakeCache.txt
+CMakeFiles/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.exe
+
+# ---- Generated engine data ----
+/DerivedData/
+/Saved/
+/.monarc-cache/
+
+# ---- Obsidian: keep shared vault config, drop per-machine UI state ----
+# Plugin code is installed by Obsidian per-machine, and includes binaries.
+# community-plugins.json still records which plugins the vault uses.
+.obsidian/plugins/
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+.obsidian/cache
+.obsidian/plugins/*/data.json
+
+# ---- Editors / OS / tooling ----
+.vs/
+.claudian/
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+.DS_Store
