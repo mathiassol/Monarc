@@ -68,3 +68,13 @@ TEST_CASE("MONARC_ASSERT keeps its expression type-checked when disabled") {
     MONARC_ASSERT(unusedOutsideAssert == 42, "type-checked either way");
     CHECK(true);
 }
+
+TEST_CASE("a disabled MONARC_ASSERT still counts both operands as used") {
+    // Both operands come from locals referenced nowhere else. With MONARC_ENABLE_ASSERTS=0
+    // the macro expands to unevaluated sizeof, which must still mark them used -- otherwise
+    // this fails /WX in Release only, while Debug stays green.
+    const int   expected = 42;
+    const char* reason   = "message built from a local, not a literal";
+    MONARC_ASSERT(expected == 42, reason);
+    CHECK(true);
+}

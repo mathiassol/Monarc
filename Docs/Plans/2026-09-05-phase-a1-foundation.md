@@ -1068,7 +1068,7 @@ bool OnAssertFailed(const char* expression, const char* file, int line, const ch
 #if MONARC_ENABLE_ASSERTS
 #    define MONARC_ASSERT(expression, message) MONARC_CHECK(expression, message)
 #else
-#    define MONARC_ASSERT(expression, message) ((void)sizeof(!(expression)))
+#    define MONARC_ASSERT(expression, message)                                                    do {                                                                                          (void)sizeof(!(expression));                                                              (void)sizeof(message);                                                                } while (false)
 #endif
 ```
 

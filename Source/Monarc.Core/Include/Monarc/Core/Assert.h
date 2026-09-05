@@ -40,8 +40,21 @@ bool OnAssertFailed(const char* expression, const char* file, int line, const ch
     } while (false)
 
 /// Checked only when MONARC_ENABLE_ASSERTS is on. Use for expensive invariants.
+///
+/// When disabled, both operands are still referenced inside `sizeof`, which is
+/// unevaluated. That keeps `expression` type-checked, and — just as importantly — keeps
+/// anything either operand mentions "used". Dropping `message` would mean a diagnostic
+/// built from a local variable turned that local into an unreferenced one, failing /WX
+/// in Release while Debug stayed green: the worst shape a build error can have.
+///
+/// Note: like the standard `assert`, a top-level comma in `expression` splits the macro
+/// call. Parenthesise such expressions — MONARC_ASSERT((is_same<A, B>::value), "...").
 #if MONARC_ENABLE_ASSERTS
 #    define MONARC_ASSERT(expression, message) MONARC_CHECK(expression, message)
 #else
-#    define MONARC_ASSERT(expression, message) ((void)sizeof(!(expression)))
+#    define MONARC_ASSERT(expression, message)                                            \
+        do {                                                                              \
+            (void)sizeof(!(expression));                                                  \
+            (void)sizeof(message);                                                        \
+        } while (false)
 #endif
