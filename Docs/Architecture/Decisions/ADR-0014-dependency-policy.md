@@ -31,6 +31,7 @@ Third-party code is acceptable for:
 |---|---|---|
 | Shader compilation | Slang | Khronos-adopted, and a compiler is its own multi-year project ([ADR-0004](ADR-0004-slang-shading-language.md)) |
 | Editor UI scaffolding | Dear ImGui | Explicitly transitional ([ADR-0013](ADR-0013-editor-ui.md)) |
+| Unit testing | doctest | Single-header MIT framework; compiles far faster than Catch2, which matters on six cores. Test-only, never linked into a shipped target |
 | Physics | Jolt | Deep specialist domain; correctness and stability take years |
 | Image and font decoding | To be chosen | Format-compliance work with no architectural content |
 | Mesh optimisation | meshoptimizer | Well-studied algorithms, no architectural content |

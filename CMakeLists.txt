@@ -32,6 +32,25 @@ message(STATUS "Monarc ${PROJECT_VERSION} | ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX
 
 include(MonarcModule)
 
+if(MONARC_BUILD_TESTS)
+    include(FetchContent)
+    # v2.4.12 is the first tag declaring cmake_minimum_required(VERSION 3.5); CMake 4.x
+    # hard-rejects anything lower, so v2.4.11 cannot configure here. Fixing it by tag
+    # rather than by CMAKE_POLICY_VERSION_MINIMUM, which would be a blanket escape hatch
+    # masking the same failure for every future dependency.
+    #
+    # SYSTEM marks doctest's headers as system headers: third-party warnings are not our
+    # warnings, and Monarc builds at /W4 /WX. Standing policy for third-party deps.
+    set(DOCTEST_NO_INSTALL ON CACHE BOOL "" FORCE)
+    FetchContent_Declare(doctest
+        GIT_REPOSITORY https://github.com/doctest/doctest.git
+        GIT_TAG        v2.4.12
+        GIT_SHALLOW    TRUE
+        SYSTEM)
+    FetchContent_MakeAvailable(doctest)
+    include(MonarcTest)
+endif()
+
 add_subdirectory(Source/Monarc.Core)
 
 monarc_validate_modules()

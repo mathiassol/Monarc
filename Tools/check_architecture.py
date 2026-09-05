@@ -80,13 +80,24 @@ def logical_lines(text: str):
         yield start, " ".join(part.strip() for part in pending)
 
 
+# A module's own code lives in these subdirectories. Tests/ is deliberately excluded:
+# test targets are not modules, nothing may depend on them, and they are entitled to do
+# things module code may not -- exercise a platform #ifdef, or reach across a tier to
+# test a boundary. Scanning them would apply module rules to code outside the graph.
+MODULE_SOURCE_DIRS = ("Include", "Private")
+
+
 def iter_sources(root: pathlib.Path, module_dir: str):
     base = root / module_dir
     if not base.is_dir():
         return
-    for path in base.rglob("*"):
-        if path.suffix in SOURCE_SUFFIXES and path.is_file():
-            yield path
+    for subdir in MODULE_SOURCE_DIRS:
+        source_root = base / subdir
+        if not source_root.is_dir():
+            continue
+        for path in source_root.rglob("*"):
+            if path.suffix in SOURCE_SUFFIXES and path.is_file():
+                yield path
 
 
 def gate_acyclic(modules: dict) -> Gate:
