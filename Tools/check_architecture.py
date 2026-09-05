@@ -31,8 +31,10 @@ PLATFORM_MACROS = re.compile(
     r"_WIN32|_WIN64|__APPLE__|__linux__|__ANDROID__|TARGET_OS_[A-Z]+"
     r")\b"
 )
-PLATFORM_EXEMPT_DIRS = ("Source/Monarc.Core/Include/Monarc/Core/Platform",
-                        "Source/Monarc.Core/Private/Platform")
+# Trailing slashes are load-bearing: without them a bare prefix match would also exempt
+# a sibling such as Private/PlatformUtils/, which is a different directory and must not be.
+PLATFORM_EXEMPT_DIRS = ("Source/Monarc.Core/Include/Monarc/Core/Platform/",
+                        "Source/Monarc.Core/Private/Platform/")
 
 
 class Gate:
@@ -48,6 +50,34 @@ class Gate:
         for f in self.failures:
             print(f"         {f}")
         return not self.failures
+
+
+def logical_lines(text: str):
+    """Yield (line_number, joined_text) with backslash continuations merged.
+
+    A preprocessor conditional split across lines for readability, e.g.
+
+        #if defined(FEATURE) || \\
+            defined(_WIN32)
+
+    would otherwise defeat a single-line regex: the first line carries the `#if` but
+    no platform token, and the second carries the token but no `#`. Merging first
+    means the gate sees one logical directive.
+    """
+    pending: list[str] = []
+    start = 1
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if not pending:
+            start = lineno
+        stripped = line.rstrip()
+        if stripped.endswith("\\"):
+            pending.append(stripped[:-1])
+            continue
+        pending.append(stripped)
+        yield start, " ".join(part.strip() for part in pending)
+        pending = []
+    if pending:
+        yield start, " ".join(part.strip() for part in pending)
 
 
 def iter_sources(root: pathlib.Path, module_dir: str):
@@ -107,8 +137,8 @@ def gate_platform_containment(modules: dict, root: pathlib.Path) -> Gate:
             rel = path.relative_to(root).as_posix()
             if any(rel.startswith(d) for d in PLATFORM_EXEMPT_DIRS):
                 continue
-            for lineno, line in enumerate(
-                    path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            text = path.read_text(encoding="utf-8", errors="replace")
+            for lineno, line in logical_lines(text):
                 if PLATFORM_MACROS.match(line):
                     gate.fail(f"{rel}:{lineno} {line.strip()}")
     return gate
