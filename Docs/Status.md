@@ -273,10 +273,12 @@ tests pin that scope.
 - **One mutex guards the entire scheduler**, with no atomics and no per-queue or per-slot
   locking — see [Threading.md](Runtime/Threading.md) for why that is the right trade with
   no ThreadSanitizer available on this platform to verify anything cleverer
-- `Wait` rejects being called from one of the pool's own worker threads via
-  `MONARC_CHECK` — verified, under a non-breaking assert handler, to report the violation
-  and then deadlock the pool exactly as the design predicts, rather than silently
-  recovering; see [Threading.md](Runtime/Threading.md#wait-is-for-the-owning-thread-not-a-worker)
+- `Wait` rejects being called from one of the pool's own worker threads via `MONARC_CHECK`
+  **backed by an unconditional abort**. The check alone was not enough: verified under a
+  non-breaking assert handler, it reported the violation and then fell through into the
+  blocking wait loop, deadlocking the pool for real. Re-verified after the fix — the
+  handler fires and the process stops at the guard (`0x80000003`), never reaching the wait
+  loop; see [Threading.md](Runtime/Threading.md#wait-is-for-the-owning-thread-not-a-worker)
 - 21 doctest cases, 8939 assertions, green on all six presets, plus the job test binary
   run 200+ consecutive times standalone with zero failures
 

@@ -71,18 +71,21 @@ itself to deadlock the whole pool: job A, running on the only worker able to run
 calls `Wait` on B — B sits in the ready queue forever, because the one worker that could
 run it is the one now blocked waiting for it.
 
-That guard is diagnostic, not preventive, in exactly the configuration where it matters
-most: Shipping, or any other build running a non-breaking assert handler.
+The check alone would not have been enough, and the reason is worth recording.
 `MONARC_CHECK`'s contract is to report and optionally break, never to alter control flow
-on its own, so when the handler declines to break, the check has already done everything
-it is ever going to do — the next line runs regardless of whether the condition held.
-Verified directly for A2d: with a non-breaking handler installed, a worker calling `Wait`
-fires the handler (confirming the violation is detected and reported) and then falls
-straight through into the blocking wait loop exactly as if nothing had checked anything,
-deadlocking the pool for real, with no timeout and no recovery. `Wait`'s implementation
-contains no code path that inspects the check's own outcome — there is nothing to catch
-the case where the handler chose not to break. The discipline this depends on is
-absolute: **express ordering with `SubmitAfter`'s dependencies; never wait inside a job.**
+on its own, so under a handler that declines to break — Shipping, or any test harness —
+the check has already done everything it is ever going to do, and the next line runs
+regardless of whether the condition held. Verified directly for A2d: with a non-breaking
+handler installed, a worker calling `Wait` fired the handler, confirming the violation was
+detected and reported, and then fell straight through into the blocking wait loop exactly
+as if nothing had checked anything — deadlocking the pool for real, with no timeout and no
+recovery. So `Wait` re-tests the condition itself and calls `std::abort()`, the same
+pattern `Array<T>`, `HashMap<K,V>` and `Guid::Generate` use to back their own checks: the
+pool is unrecoverable either way, and stopping with a message and a stack beats a hang that
+has to be attached to with a debugger before anyone can tell what went wrong. The
+discipline this rests on is unchanged — **express ordering with `SubmitAfter`'s
+dependencies; never wait inside a job** — but breaking it now fails loudly rather than
+silently.
 
 The capable alternative is helping-while-waiting: a worker that blocks runs other ready
 jobs instead of merely sleeping, so one self-wait cannot starve the pool. It is deferred,

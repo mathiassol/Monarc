@@ -143,6 +143,19 @@ void JobSystem::Wait(JobHandle handle) {
         "that blocks here removes itself from the pool, and enough of them doing it "
         "deadlocks the rest. Express ordering between jobs with SubmitAfter's dependencies "
         "instead of waiting inside a job.");
+    if (t_isJobWorkerThread) {
+        // Unconditional, matching Array<T>, HashMap and Guid::Generate. MONARC_CHECK reports
+        // and optionally breaks; it never alters control flow, so under a handler that
+        // declines to break -- Shipping, or any test harness -- execution would fall through
+        // into the wait loop below and deadlock the pool with no timeout and no recovery.
+        // Verified: it really does hang, not merely slow down.
+        //
+        // Stopping loudly is strictly better than hanging silently. A deadlocked pool is
+        // unrecoverable either way, and an abort leaves a message and a stack rather than a
+        // process that has to be attached to before anyone can tell what went wrong.
+        MONARC_DEBUG_BREAK();
+        std::abort();
+    }
 
     Platform::ScopedLock lock(m_mutex);
     while (!IsCompleteLocked(handle)) {
@@ -229,8 +242,12 @@ u32 JobSystem::PopQueueLocked() {
             return slotIndex;
         }
     }
+    // Same reasoning as Wait's guard: falling through here would return kNoSlot to a caller
+    // that has already established a job is ready, and the resulting behaviour is a silent
+    // wrong answer rather than a loud one.
     MONARC_CHECK(false, "JobSystem: PopQueueLocked called with every priority queue empty");
-    return kNoSlot;
+    MONARC_DEBUG_BREAK();
+    std::abort();
 }
 
 bool JobSystem::AnyQueuedLocked() const {
