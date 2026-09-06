@@ -1,9 +1,20 @@
 # ADR-0003: C++23 baseline, library restricted by module kind
 
-**Status:** Accepted, **conditional** — 2026-09-05
+**Status:** Accepted, **conditional** — 2026-09-05. Condition **configured but not yet
+observed passing** as of 2026-09-06.
 
-The condition: a second compiler (Clang) must build the project in CI. Until that exists,
-this decision is unverified. See [Status.md](../../Status.md#known-gaps).
+The condition is that a second compiler (Clang) must build the project in CI, because an
+MSVC-only build proves nothing about C++23 conformance — MSVC does not accept `/std:c++23`
+and silently falls back to `/std:c++latest`, which is *beyond* C++23.
+
+`.github/workflows/ci.yml` now builds and tests four configurations on every push and pull
+request — MSVC and Clang, Debug and Release — with `fail-fast` disabled so that when the two
+compilers disagree, both results are visible. Warnings are errors in all four.
+
+That workflow has been written and validated locally, but **has not yet run on a GitHub
+runner**. Until it has gone green once, this condition is configured rather than met — and
+CI's MSVC is an older toolset than the 19.51 used locally, so the first run is a genuine
+test rather than a formality. Update this line to **Accepted** when it passes.
 
 ## Context
 

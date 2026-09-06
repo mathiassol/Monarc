@@ -32,8 +32,15 @@ monarc_module(
 records the declaration, and the build emits **`module-graph.json`** as an artifact — the file
 that `monarc explain` and the export tooling read.
 
-Configuration is via CMake presets, which pins the toolchain rather than depending on ambient
-`PATH` (necessary here: Git Bash puts MSYS2's `g++` ahead of MSVC).
+Configuration is via CMake presets. Presets deliberately pin **no absolute tool paths**: one
+set has to serve developer machines, CI, and macOS later, and a preset naming
+`C:/Program Files/LLVM/bin/clang-cl.exe` serves exactly one of those. Ninja and `clang-cl`
+are expected on `PATH` instead; `CMakeUserPresets.json` (gitignored) is the escape hatch for
+a machine that needs overrides.
+
+One local caveat this creates: Git Bash puts MSYS2's `g++` ahead of MSVC on `PATH`, so builds
+must still run from a Visual Studio developer environment (`vcvars64.bat`). The presets choose
+the generator and build type; the environment chooses the compiler.
 
 Standing build settings: `/Zc:__cplusplus`, `CXX_SCAN_FOR_MODULES OFF`, C++23,
 warnings-as-errors, and unity builds available per module but off by default.

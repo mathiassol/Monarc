@@ -41,11 +41,11 @@ Confirmed by direct testing on the development machine, not assumed:
 
 ### Known gaps
 
-- **No CI, so [ADR-0003](Architecture/Decisions/ADR-0003-cpp23-baseline.md)'s condition
-  remains open.** That ADR accepts the C++23 baseline *conditionally* on a second compiler
-  building the project **in CI**. Clang does build it, warning-free, and divergence has been
-  checked at every step — but by hand, which depends on somebody remembering. The condition
-  is not met until it is automatic.
+- **CI is configured but has never run.** `.github/workflows/ci.yml` builds and tests
+  MSVC and Clang, Debug and Release, on every push and pull request. It is validated locally
+  but unproven on a runner, and CI's MSVC is an older toolset than the 19.51 used here — so
+  the first run is a real test. [ADR-0003](Architecture/Decisions/ADR-0003-cpp23-baseline.md)'s
+  condition counts as met once it goes green.
 - **No macOS machine.** Metal is designed for but unimplemented and unproven. Expected
   within a year — see [ADR-0012](Architecture/Decisions/ADR-0012-backend-rollout.md).
 - **No graphics debugger.** NVIDIA Nsight Graphics is installed, but it is NVIDIA-only and
@@ -53,10 +53,6 @@ Confirmed by direct testing on the development machine, not assumed:
   tiers honest. RenderDoc is needed before Phase A rendering work begins.
 - **No compiler cache.** Neither `sccache` nor `ccache` is present. On six cores this is
   worth having before the module count grows.
-- **Clang is not on `PATH`.** The LLVM installer did not register it (machine or user).
-  Builds are unaffected because CMake presets pin toolchain paths
-  ([ADR-0011](Architecture/Decisions/ADR-0011-build-system.md)), but `clang-tidy` and
-  `clang-format` will not resolve from a terminal until it is added.
 
 ## Toolchain quirks worth remembering
 
@@ -84,6 +80,13 @@ Confirmed by direct testing on the development machine, not assumed:
   confusing errors. Use `/std:c++latest`, or let CMake's `CXX_STANDARD 23` pick the flag.
 - `core.autocrlf` is `true` on this machine. `.gitattributes` overrides it with
   `text=auto eol=lf` so line-ending behaviour does not depend on developer config.
+- The only `python` on `PATH` is MSYS2's (3.14.7), and it ships **without `pip`**. Both
+  scripts in `Tools/` are therefore written against the standard library alone, and must
+  stay that way — `find_package(Python3)` resolves to this interpreter. A separate CPython
+  3.12 exists under `%LOCALAPPDATA%\Programs\Python` if a script ever genuinely needs a
+  package.
+- Ninja 1.13.2 and LLVM's `bin` are on `PATH` as of 2026-09-06, which is what lets
+  `CMakePresets.json` pin no absolute tool paths.
 - Windows long paths are **not** enabled (`LongPathsEnabled=0`, `core.longpaths` unset).
   Deep module trees plus Ninja build directories approach the 260-character limit.
 

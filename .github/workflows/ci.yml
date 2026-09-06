@@ -1,0 +1,121 @@
+name: CI
+
+# ADR-0003 accepts Monarc's C++23 baseline *conditionally* on a second compiler building
+# the project in CI. This workflow is that condition. It exists because MSVC does not
+# accept /std:c++23 and silently falls back to /std:c++latest, which is beyond C++23 --
+# so an MSVC-only build is not evidence that the code is C++23-conforming.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# A newer push to the same ref makes an in-flight run irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.preset }}
+    runs-on: windows-latest
+    strategy:
+      # Never cancel the other legs: when MSVC and Clang disagree, seeing *both*
+      # results is the entire point of running both.
+      fail-fast: false
+      matrix:
+        preset: [msvc-debug, msvc-release, clang-debug, clang-release]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preflight toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # Locate Visual Studio without a third-party action. vswhere ships with the
+          # VS Installer and is present on every GitHub Windows image.
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "vswhere not found at $vswhere" }
+          $vsRoot = & $vswhere -latest -products * `
+                      -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+                      -property installationPath
+          if (-not $vsRoot) { throw "no Visual Studio installation with the C++ toolset" }
+          $vcvars = Join-Path $vsRoot 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
+          "VCVARS=$vcvars" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Visual Studio: $vsRoot"
+
+          # Ninja and, for the Clang legs, clang-cl must be resolvable from PATH --
+          # the presets deliberately pin no absolute tool paths so that one set of
+          # presets serves developer machines, CI, and macOS later.
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+            Write-Host "ninja not on PATH; installing"
+            choco install ninja -y --no-progress
+          }
+          Write-Host "ninja: $((Get-Command ninja).Source)"
+
+          if ('${{ matrix.preset }}'.StartsWith('clang')) {
+            $llvmBin = "$env:ProgramFiles\LLVM\bin"
+            if ((Test-Path "$llvmBin\clang-cl.exe") -and
+                -not (Get-Command clang-cl -ErrorAction SilentlyContinue)) {
+              "$llvmBin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+              $env:PATH = "$llvmBin;$env:PATH"
+            }
+            if (-not (Get-Command clang-cl -ErrorAction SilentlyContinue)) {
+              Write-Host "clang-cl not found; installing LLVM"
+              choco install llvm -y --no-progress
+              "$llvmBin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+              $env:PATH = "$llvmBin;$env:PATH"
+            }
+            Write-Host "clang-cl: $((Get-Command clang-cl).Source)"
+            & clang-cl --version
+          }
+
+          cmake --version
+          python --version
+
+      - name: Configure
+        shell: cmd
+        run: |
+          call "%VCVARS%" >nul || exit /b 1
+          cmake --preset ${{ matrix.preset }} || exit /b 1
+
+      - name: Build
+        shell: cmd
+        run: |
+          call "%VCVARS%" >nul || exit /b 1
+          cmake --build --preset ${{ matrix.preset }} || exit /b 1
+
+      - name: Test
+        shell: cmd
+        run: |
+          call "%VCVARS%" >nul || exit /b 1
+          ctest --preset ${{ matrix.preset }} || exit /b 1
+
+      # The module graph is what the architecture gates and, later, `monarc explain`
+      # read. Publishing it makes a graph change visible in the run itself.
+      - name: Upload module graph
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: module-graph-${{ matrix.preset }}
+          path: Build/${{ matrix.preset }}/module-graph.json
+          if-no-files-found: warn
+
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Check documentation links
+        run: python Tools/check_doc_links.py Docs
