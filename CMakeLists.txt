@@ -52,6 +52,7 @@ if(MONARC_BUILD_TESTS)
 endif()
 
 add_subdirectory(Source/Monarc.Core)
+add_subdirectory(Source/Monarc.Jobs)
 
 monarc_validate_modules()
 
