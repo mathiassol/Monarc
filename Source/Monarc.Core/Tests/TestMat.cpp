@@ -139,3 +139,23 @@ TEST_CASE("Mat4 is 16-byte aligned for later SIMD") {
     static_assert(alignof(Mat4) == 16);
     CHECK(true);
 }
+
+TEST_CASE("a small but well-conditioned matrix still inverts") {
+    // A determinant is a cubed length, so a plain uniform scale of 0.01 has det = 1e-6 --
+    // below a tolerance tuned for unit-magnitude comparisons. Testing the threshold against
+    // kEpsilon declares this perfectly invertible matrix singular and silently returns
+    // identity: a wrong answer with no diagnostic, which is the worst kind.
+    const Mat4 m   = Mat4::Scale(Vec3{0.01f, 0.01f, 0.01f});
+    const Mat4 inv = Inverse(m);
+    CHECK(Approx(m * inv, Mat4::Identity()));
+    CHECK(Approx(TransformPoint(inv, Vec3{1.0f, 2.0f, 3.0f}),
+                 Vec3{100.0f, 200.0f, 300.0f}, 1e-2f));
+}
+
+TEST_CASE("a short but nonzero vector still normalizes to a unit direction") {
+    // Same class of error on the vector side: a length floor tuned for unit magnitudes
+    // discards the direction of a legitimately small vector.
+    const Vec3 tiny = Normalize(Vec3{1e-5f, 0.0f, 0.0f});
+    CHECK(ApproxEqual(tiny.x, 1.0f, 1e-4f));
+    CHECK(ApproxEqual(Monarc::Length(tiny), 1.0f, 1e-4f));
+}

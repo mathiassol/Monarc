@@ -179,7 +179,7 @@ struct alignas(16) Mat4 {
     /// Right-handed orthographic projection, depth range 0..1. See Perspective for the
     /// depth-range rationale. There is no perspective divide in an orthographic projection --
     /// w stays 1 -- so the 0..1 mapping is exact, not merely after a divide.
-    [[nodiscard]] static Mat4 Orthographic(f32 left, f32 right, f32 bottom, f32 top,
+    [[nodiscard]] static constexpr Mat4 Orthographic(f32 left, f32 right, f32 bottom, f32 top,
                                            f32 nearZ, f32 farZ) {
         MONARC_CHECK(right != left, "Orthographic: right must differ from left");
         MONARC_CHECK(top != bottom, "Orthographic: top must differ from bottom");

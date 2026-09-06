@@ -96,6 +96,13 @@ was expected and did not materialise.
   `CXX_SCAN_FOR_MODULES OFF` is free build time.
 - Git Bash puts MSYS2's `g++` ahead of MSVC on `PATH`. Builds must run from a VS developer
   environment (`vcvars64.bat`) or via CMake presets that pin the toolchain.
+
+  The same `PATH` entry bites the Clang presets differently and more confusingly: MSYS2 also
+  ships `ld.exe` and `ar.exe`, which CMake picks up as the linker and archiver during
+  compiler detection, producing a link failure in the sanity check that looks nothing like a
+  `PATH` problem. `vcvars64.bat` alone does not cause this — it appears when composing a
+  `PATH` by hand from the Machine and User variables. **Filter `msys64` out when doing
+  that**, or configure from a plain developer prompt.
 - **`clang-cl` does not accept `/std:c++23`** — it silently ignores the flag (emitting only
   an "argument unused" warning) and falls back to C++17, which then fails with a wall of
   confusing errors. Use `/std:c++latest`, or let CMake's `CXX_STANDARD 23` pick the flag.
