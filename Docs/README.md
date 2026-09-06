@@ -50,6 +50,7 @@ If you are new to the project, read in this order:
   - [Phase A1 — Foundation and the Build Gates](Plans/2026-09-05-phase-a1-foundation.md)
   - [Phase A2a — Hash, String, and HashMap](Plans/2026-09-06-phase-a2a-strings-and-maps.md)
   - [Phase A2b — Math](Plans/2026-09-06-phase-a2b-math.md)
+  - [Phase A2c — The platform layer](Plans/2026-09-06-phase-a2c-platform.md)
 
 A milestone says *what* and *why*; a plan says *how*, in executable steps. Plans are written
 one phase ahead, not all at once, because later phases are shaped by what earlier ones teach.
