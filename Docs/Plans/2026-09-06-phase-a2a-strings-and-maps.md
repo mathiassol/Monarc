@@ -532,6 +532,11 @@ struct Monarc::Hasher<Collide> {
     u64 operator()(const Collide&) const { return 0; }
 };
 
+// Inside the anonymous namespace, not after it: this operator== must live in Collide's own
+// namespace to be found by ADL from HashMap<Collide, int>'s template code, which is
+// instantiated from namespace Monarc. Declared outside, it compiles under MSVC's lenient
+// two-phase lookup and is rejected by clang-cl -- the third MSVC/Clang divergence this
+// project has found, and the reason ADR-0003 requires the second compiler.
 static bool operator==(const Collide& a, const Collide& b) { return a.v == b.v; }
 
 TEST_CASE("a new map is empty and holds no memory") {
@@ -882,3 +887,18 @@ git commit -m "docs: record Phase A2a complete"
 - **No `Clone` for `String` or containers.** Copying stays deleted until a caller needs it,
   at which point it should be explicit.
 - **No stable iteration order.** Unspecified and documented as such.
+
+## Added during implementation, beyond this plan
+
+Three tests were added because implementation and review found the specified set left real
+paths uncovered. Recorded so the plan matches what shipped:
+
+- `String`: appending to itself **on the path that reallocates**. The specified aliasing case
+  fits inside its capacity, so it never grows — and growth-plus-aliasing is what was a
+  use-after-free in `Array<T>`.
+- `HashMap`: removal across the **array boundary**, using a key type that homes to the last
+  slot so probe chains wrap immediately. None of the specified tests reach a capacity where
+  insertion wraps, yet wraparound is exactly what a raw-index backward shift gets wrong.
+- `HashMap`: **replacing a key destroys the old value exactly once**, with a lifetime-counting
+  value type. The replace path was otherwise only exercised with `int`, where a leaked or
+  double-destroyed value is invisible.

@@ -43,11 +43,25 @@ struct Collide {
 // found by building both, which is what ADR-0003's second compiler is for.
 static bool operator==(const Collide& a, const Collide& b) { return a.v == b.v; }
 
+/// Home bucket is always the final slot, so any probe chain wraps to index 0 immediately.
+/// This is what exercises backward-shift deletion across the array boundary -- the case a
+/// raw-index comparison gets wrong while a masked-distance comparison gets right.
+struct WrapToEnd {
+    int v;
+};
+
+static bool operator==(const WrapToEnd& a, const WrapToEnd& b) { return a.v == b.v; }
+
 }  // namespace
 
 template <>
 struct Monarc::Hasher<Collide> {
     u64 operator()(const Collide&) const { return 0; }
+};
+
+template <>
+struct Monarc::Hasher<WrapToEnd> {
+    u64 operator()(const WrapToEnd&) const { return ~u64{0}; }
 };
 
 TEST_CASE("a new map is empty and holds no memory") {
@@ -228,4 +242,54 @@ TEST_CASE("a map releases everything it allocated") {
         }
     }
     CHECK(allocator.BytesAllocated() == 0);
+}
+
+TEST_CASE("removal across the array boundary does not strand a wrapped entry") {
+    // Every key homes to the last slot, so entries spill past the end into index 0 onward.
+    // Removing from the middle of that chain makes the backward-shift scan cross the
+    // boundary; comparing raw indices instead of masked distances strands the tail.
+    SystemAllocator allocator;
+    HashMap<WrapToEnd, int> map(allocator);
+    for (int i = 0; i < 12; ++i) {
+        map.Insert(WrapToEnd{i}, i);
+    }
+    REQUIRE(map.Size() == 12);
+
+    for (int i = 0; i < 12; i += 3) {
+        CHECK(map.Remove(WrapToEnd{i}));
+    }
+    CHECK(map.Size() == 8);
+
+    for (int i = 0; i < 12; ++i) {
+        if (i % 3 == 0) {
+            CHECK(map.Find(WrapToEnd{i}) == nullptr);
+        } else {
+            REQUIRE(map.Find(WrapToEnd{i}) != nullptr);
+            CHECK(*map.Find(WrapToEnd{i}) == i);
+        }
+    }
+}
+
+TEST_CASE("replacing a key destroys the old value exactly once") {
+    // The replace path is otherwise only exercised with int, so a leaked or double-destroyed
+    // value would go unnoticed -- silently, which is the worst kind of destructor bug.
+    SystemAllocator allocator;
+    CHECK(Tracked::s_alive == 0);
+    {
+        HashMap<int, Tracked> map(allocator);
+        map.Insert(1, Tracked{10});
+        CHECK(Tracked::s_alive == 1);
+
+        map.Insert(1, Tracked{20});
+        CHECK(map.Size() == 1);
+        CHECK(map.Find(1)->value == 20);
+        CHECK(Tracked::s_alive == 1);   // the old value went, the new one stayed
+
+        for (int i = 0; i < 5; ++i) {
+            map.Insert(1, Tracked{i});
+        }
+        CHECK(map.Size() == 1);
+        CHECK(Tracked::s_alive == 1);
+    }
+    CHECK(Tracked::s_alive == 0);
 }
