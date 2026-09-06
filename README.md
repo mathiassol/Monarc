@@ -71,5 +71,6 @@ reference the rest is measured against.
 
 ## Licence
 
-None yet, which means default copyright — all rights reserved. If you want others to be
-able to use, fork, or contribute to this, it needs an explicit licence.
+[MIT](LICENSE). Third-party dependencies are confined to a small, deliberately recorded set
+under permissive licences — see
+[ADR-0014](Docs/Architecture/Decisions/ADR-0014-dependency-policy.md).
