@@ -51,7 +51,7 @@ stalling — there is always a working thing, and always a place to redirect.
 | **A2a** | `Hash`, `String`, `HashMap` | The vocabulary types the rest of Core is written in — [plan](../Plans/2026-09-06-phase-a2a-strings-and-maps.md) |
 | **A2b** | Math — vectors, matrices, quaternions, transforms | Testable math with the conventions of [ADR-0015](../Architecture/Decisions/ADR-0015-math-conventions.md) locked in by tests — [plan](../Plans/2026-09-06-phase-a2b-math.md) |
 | **A2c** | Platform — files, paths, time, threads, dynamic libraries, GUID | The OS boundary, selected by directory rather than `#ifdef` ([ADR-0016](../Architecture/Decisions/ADR-0016-platform-code-selection.md)) — [plan](../Plans/2026-09-06-phase-a2c-platform.md) |
-| **A2d** | `Monarc.Jobs` | A parallel job graph with dependencies, under test |
+| **A2d** | `Monarc.Jobs` | A parallel job graph with dependencies, under test — the first module beyond `Monarc.Core` — [plan](../Plans/2026-09-06-phase-a2d-jobs.md) |
 | **A3** | `RHI`, `RHI.Vulkan`, `Host.Windowed` | A window with a cleared screen, via the RHI directly |
 | **A4** | Minimal render graph | A window opens and the screen clears **through the real render graph** |
 | **B** | `ShaderCompiler`, `Shaders`, `Render` | A cube renders from in-memory data via `RenderScene` and a Slang shader |
