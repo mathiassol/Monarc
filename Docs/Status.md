@@ -27,7 +27,8 @@ Confirmed by direct testing on the development machine, not assumed:
 | Compiler | MSVC 19.51 (toolset 14.51, VS 2026 Community) | Compiles C++23 language features cleanly at `/W4` — verified: deducing `this`, `static operator()`, multidimensional `operator[]`, `if consteval`, `auto(x)`, `[[assume]]`, `std::expected` |
 | Second compiler | Clang 22.1.8 (`clang-cl`, standalone LLVM) | Builds the whole project and test suite warning-free at `/WX`, output identical to MSVC. Runs in CI on every push, which is what [ADR-0003](Architecture/Decisions/ADR-0003-cpp23-baseline.md)'s condition required |
 | Build | CMake 4.2.1 + Ninja 1.13.2 (standalone, on `PATH`) | Presets pin no absolute tool paths, so one set serves this machine, CI, and macOS later |
-| Vulkan | SDK 1.4.357.0 | Found automatically by CMake's `find_package(Vulkan)`. Validation layers, gfxreconstruct, SPIRV-Tools present |
+| Vulkan | SDK 1.4.357.0, loader reports instance 1.4.357 | Found automatically by CMake's `find_package(Vulkan)`. Validation layers, gfxreconstruct, SPIRV-Tools present. Device support verified with `vulkaninfo` — see [Hardware](#hardware) |
+| Graphics debugger | RenderDoc 1.46 | Vendor-neutral, so it can capture on the Intel UHD 730 as well as the NVIDIA card. Nsight is also installed but is NVIDIA-only |
 | Shaders | Slang 2026.13.1 (in the Vulkan SDK), DXC 1.9, glslang | |
 | Windows SDK | 10.0.26100.0 | D3D12 headers present |
 | Other | Python (see quirks — three interpreters), Node 22.15, .NET 9 + 10 | |
@@ -74,21 +75,41 @@ was expected and did not materialise.
 
 ### Hardware
 
-- **NVIDIA RTX 3070 Ti** (Ampere) — high capability tier: bindless, mesh shaders, ray tracing
+- **NVIDIA RTX 3070 Ti** (Ampere) — high capability tier: bindless, mesh shaders, ray tracing.
+  Reports Vulkan **1.4.351**, driver 616.56
 - **Intel UHD 730** (Xe-LP, integrated) — a genuinely useful *second vendor and lower tier*
-  on the same machine, for keeping capability tiers honest rather than theoretical
+  on the same machine, for keeping capability tiers honest rather than theoretical. Reports
+  Vulkan **1.3.275**, driver 101.5334
 - Intel i5-11400, 6 cores / 12 threads, 32 GB RAM — modest, so **compile-time discipline is
   a design constraint, not a virtue**
+
+Two facts from this that constrain `Monarc.RHI.Vulkan` before a line of it is written:
+
+- **Vulkan 1.3 is the ceiling, not 1.4.** The Intel part caps at 1.3.275, so anything
+  requiring 1.4 silently drops the lower tier out of the test matrix — which would defeat
+  the whole reason for having it. [M0](Milestones/M0-First-Light.md) already targets 1.3;
+  this confirms it empirically rather than by intent.
+- **`vkEnumeratePhysicalDevices` returns the Intel GPU four times here.** All four report an
+  identical `deviceUUID` (`86808b4c-0400-…`) and `DRIVER_ID_INTEL_PROPRIETARY_WINDOWS`; the
+  duplicates come from the virtual display adapters on this machine (Parsec, USB Mobile
+  Monitor, LuminonCore IDDCX), each of which causes the Intel ICD to be registered again.
+  So adapter enumeration must **dedupe on `VkPhysicalDeviceIDProperties::deviceUUID`**, or
+  the adapter list a user sees will have four identical entries in it. This is exactly the
+  class of bug that normally surfaces only on someone else's machine.
 
 ### Known gaps
 
 - **No macOS machine.** Metal is designed for but unimplemented and unproven. Expected
   within a year — see [ADR-0012](Architecture/Decisions/ADR-0012-backend-rollout.md).
-- **No graphics debugger.** NVIDIA Nsight Graphics is installed, but it is NVIDIA-only and
-  so cannot inspect frames on the Intel UHD 730 — the device that keeps the capability
-  tiers honest. RenderDoc is needed before Phase A rendering work begins.
+- ~~**No graphics debugger.**~~ **Closed 2026-09-06.** RenderDoc 1.46 is installed, and
+  being vendor-neutral it can capture on the Intel UHD 730 as well as the NVIDIA card.
+- ~~**Windows long paths disabled.**~~ **Closed 2026-09-06.** `LongPathsEnabled` is 1, so
+  deep generated paths under `Build/` will not truncate.
 - **No compiler cache.** Neither `sccache` nor `ccache` is present. On six cores this is
   worth having before the module count grows.
+- **No ThreadSanitizer.** Not a gap that can be closed on this platform — see
+  [Continuous integration](#continuous-integration) above. `Monarc.Jobs` is verified by
+  invariant-shaped tests and repetition instead, which is corroboration and not proof.
 
 ## Toolchain quirks worth remembering
 

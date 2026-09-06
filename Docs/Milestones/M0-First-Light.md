@@ -87,9 +87,11 @@ first week they can be, rather than added once they would already fail.
 - ~~Install the LLVM toolchain and add a Clang build to CI.~~ **Done 2026-09-06.** Clang
   22.1.8 locally, and CI builds MSVC and Clang in Debug and Release on every push, so
   [ADR-0003](../Architecture/Decisions/ADR-0003-cpp23-baseline.md)'s condition is met.
-- **Install RenderDoc before Phase A3.** NVIDIA Nsight is installed but is NVIDIA-only, so it
-  cannot inspect frames on the Intel UHD 730 — the device that keeps the capability tiers
-  honest rather than theoretical. See [Status.md](../Status.md#known-gaps).
+- ~~Install RenderDoc before Phase A3.~~ **Done 2026-09-06.** RenderDoc 1.46, vendor-neutral,
+  so it can capture on the Intel UHD 730 as well as the NVIDIA card. Windows long paths are
+  enabled too. Phase A3 has no outstanding prerequisites — the Vulkan SDK (1.4.357.0) and
+  both devices are verified working; see [Status.md](../Status.md#hardware) for the two
+  device facts that constrain the backend.
 
 ## Honest assessment of size
 
