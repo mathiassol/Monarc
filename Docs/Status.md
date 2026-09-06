@@ -25,11 +25,23 @@ Confirmed by direct testing on the development machine, not assumed:
 |---|---|---|
 | Compiler | MSVC 19.51 (toolset 14.51, VS 2026 Community) | Compiles C++23 language features cleanly at `/W4` — verified: deducing `this`, `static operator()`, multidimensional `operator[]`, `if consteval`, `auto(x)`, `[[assume]]`, `std::expected` |
 | Second compiler | Clang 22.1.8 (`clang-cl`, standalone LLVM) | Builds the whole project and full test suite warning-free at `/WX`, output identical to MSVC. **ADR-0003's condition is only partly met**: it requires Clang *in CI*, and no CI exists — the Clang build is run by hand. See [Known gaps](#known-gaps) |
-| Build | CMake 4.2.1 + Ninja (bundled with VS) | Configure and build verified end to end |
+| Build | CMake 4.2.1 + Ninja 1.13.2 (standalone, on `PATH`) | Presets pin no absolute tool paths, so one set serves this machine, CI, and macOS later |
 | Vulkan | SDK 1.4.357.0 | Found automatically by CMake's `find_package(Vulkan)`. Validation layers, gfxreconstruct, SPIRV-Tools present |
 | Shaders | Slang 2026.13.1 (in the Vulkan SDK), DXC 1.9, glslang | |
 | Windows SDK | 10.0.26100.0 | D3D12 headers present |
 | Other | Python 3.14.7, Node 22.15, .NET 9 + 10 | |
+
+### Continuous integration
+
+`.github/workflows/ci.yml` builds and tests four configurations on every push and pull
+request — MSVC and Clang, Debug and Release — plus a documentation-link check.
+`fail-fast` is disabled so that when the compilers disagree, both results are visible.
+First run green, 2026-09-06.
+
+The runner's toolchain differs from this machine usefully: the same MSVC family
+(19.51.36256 vs 19.51.36244 here) but **Clang 20.1.8 against 22.1.8 locally**, so the
+pairing spans two Clang major versions. That is better coverage than the MSVC spread that
+was expected and did not materialise.
 
 ### Hardware
 
@@ -41,11 +53,6 @@ Confirmed by direct testing on the development machine, not assumed:
 
 ### Known gaps
 
-- **CI is configured but has never run.** `.github/workflows/ci.yml` builds and tests
-  MSVC and Clang, Debug and Release, on every push and pull request. It is validated locally
-  but unproven on a runner, and CI's MSVC is an older toolset than the 19.51 used here — so
-  the first run is a real test. [ADR-0003](Architecture/Decisions/ADR-0003-cpp23-baseline.md)'s
-  condition counts as met once it goes green.
 - **No macOS machine.** Metal is designed for but unimplemented and unproven. Expected
   within a year — see [ADR-0012](Architecture/Decisions/ADR-0012-backend-rollout.md).
 - **No graphics debugger.** NVIDIA Nsight Graphics is installed, but it is NVIDIA-only and

@@ -1,7 +1,6 @@
 # ADR-0003: C++23 baseline, library restricted by module kind
 
-**Status:** Accepted, **conditional** — 2026-09-05. Condition **configured but not yet
-observed passing** as of 2026-09-06.
+**Status:** Accepted — 2026-09-05. **Condition met 2026-09-06**, first CI run green.
 
 The condition is that a second compiler (Clang) must build the project in CI, because an
 MSVC-only build proves nothing about C++23 conformance — MSVC does not accept `/std:c++23`
@@ -11,10 +10,11 @@ and silently falls back to `/std:c++latest`, which is *beyond* C++23.
 request — MSVC and Clang, Debug and Release — with `fail-fast` disabled so that when the two
 compilers disagree, both results are visible. Warnings are errors in all four.
 
-That workflow has been written and validated locally, but **has not yet run on a GitHub
-runner**. Until it has gone green once, this condition is configured rather than met — and
-CI's MSVC is an older toolset than the 19.51 used locally, so the first run is a genuine
-test rather than a formality. Update this line to **Accepted** when it passes.
+The first run passed all four legs. The toolchains differ from the development machine in
+a useful way, though not the way that was predicted: the runner has the same MSVC family
+(19.51.36256 against 19.51.36244 locally) but an appreciably **older Clang — 20.1.8 against
+22.1.8**. So the pairing genuinely spans two Clang major versions, which is more valuable
+coverage than the MSVC-version spread that was expected and did not materialise.
 
 ## Context
 
@@ -76,9 +76,12 @@ loops; multidimensional `operator[]` serves grid and texture addressing; `static
 serves stateless job functors. The policy is *enforceable*, which "C++20 with selective
 C++23" was not — nobody can tell by inspection whether a line is C++20-legal.
 
-**Costs.** We are currently satisfying exactly one compiler, which is a thin basis for a
-portability claim. Console toolchains, if Monarc ever targets them, lag; a future downgrade
-would be a mechanical port of a handful of language constructs, which is bounded but real.
+**Costs.** Two compilers across four configurations is a reasonable basis for a portability
+claim, but not a complete one: everything so far is Windows, and both compilers front the
+MSVC standard library. libc++ — the implementation that actually lags on C++23 — remains
+untested until macOS arrives. Console toolchains, if Monarc ever targets them, lag further;
+a future downgrade would be a mechanical port of a handful of language constructs, which is
+bounded but real.
 
 **The asymmetry that decided it:** choosing C++23 and later needing C++20 is a mechanical
 port. Choosing C++20 and later wishing for C++23 means the whole codebase is written in the
