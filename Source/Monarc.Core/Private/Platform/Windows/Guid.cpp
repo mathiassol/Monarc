@@ -2,6 +2,8 @@
 
 #include <Monarc/Core/Assert.h>
 
+#include <cstdlib>
+
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
@@ -64,6 +66,15 @@ Guid Guid::Generate() {
                                              sizeof(bits), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
     MONARC_CHECK(BCRYPT_SUCCESS(status),
                  "BCryptGenRandom failed to produce entropy for Guid::Generate");
+    if (!BCRYPT_SUCCESS(status)) {
+        // Unconditional, matching Array<T> and HashMap: MONARC_CHECK alone can be swallowed
+        // by an installed handler that declines to break, and continuing here would return
+        // a nil Guid. ADR-0008 makes this asset identity, so a silent nil would collide
+        // with every other failure and quietly corrupt the cook cache. Stopping is the
+        // only safe answer to an entropy source that has failed.
+        MONARC_DEBUG_BREAK();
+        std::abort();
+    }
 
     Guid result;
     result.m_high = bits.high;

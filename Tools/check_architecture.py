@@ -33,8 +33,17 @@ PLATFORM_MACROS = re.compile(
 )
 # Trailing slashes are load-bearing: without them a bare prefix match would also exempt
 # a sibling such as Private/PlatformUtils/, which is a different directory and must not be.
-PLATFORM_EXEMPT_DIRS = ("Source/Monarc.Core/Include/Monarc/Core/Platform/",
-                        "Source/Monarc.Core/Private/Platform/")
+# The only place a platform conditional is legitimate is inside a per-platform source
+# directory -- Private/Platform/<Platform>/. ADR-0016 keeps public headers platform-neutral
+# and puts platform code in per-platform directories, so this is deliberately narrow:
+#
+#   Private/Platform/Windows/File.cpp   exempt -- genuinely one platform's code
+#   Private/Platform/Path.cpp           NOT exempt -- lives beside them but is neutral
+#   Include/.../Platform/Path.h         NOT exempt -- public headers are always neutral
+#
+# Exempting the whole Private/Platform/ tree, as this once did, would let a Windows
+# conditional sit unnoticed in a file explicitly labelled platform-neutral.
+PLATFORM_EXEMPT = re.compile(r"(?:^|/)Private/Platform/[^/]+/")
 
 
 class Gate:
@@ -146,7 +155,7 @@ def gate_platform_containment(modules: dict, root: pathlib.Path) -> Gate:
     for mod in modules.values():
         for path in iter_sources(root, mod["directory"]):
             rel = path.relative_to(root).as_posix()
-            if any(rel.startswith(d) for d in PLATFORM_EXEMPT_DIRS):
+            if PLATFORM_EXEMPT.search(rel):
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")
             for lineno, line in logical_lines(text):
