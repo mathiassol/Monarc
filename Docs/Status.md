@@ -3,7 +3,7 @@
 **What is actually true right now.** Intent lives in the other documents; this file is the
 honest account. Update it when reality changes, not when a plan is written.
 
-_Last updated: 2026-09-05_
+_Last updated: 2026-09-06_
 
 ## Summary
 
@@ -118,7 +118,10 @@ was expected and did not materialise.
 | Phase | Contents | State |
 |---|---|---|
 | A1 | Build system, module gates, Core memory + diagnostics | **Complete** |
-| A2 | Rest of Core (String, HashMap, math, GUID, platform), Jobs | Not started |
+| A2a | Hash, String, HashMap | **Complete** |
+| A2b | Math — vectors, matrices, quaternions, transforms | Not started |
+| A2c | Platform — files, paths, time, threads, dynamic libs, GUID | Not started |
+| A2d | Monarc.Jobs — thread pool, dependency graph, priorities | Not started |
 | A3 | RHI, Vulkan backend, Host.Windowed | Not started |
 | A4 | Minimal render graph | Not started |
 | B | ShaderCompiler, Shaders, Render | Not started |
@@ -139,9 +142,23 @@ was expected and did not materialise.
   — 43 doctest cases (126 assertions) plus the 4 architecture gates, 100% passing on a
   clean rebuild of all three presets
 
+### A2a delivered
+
+- `Hash.h`: 64-bit FNV-1a over a byte range, a splitmix64-style integer finaliser so
+  sequential ids do not collapse into adjacent buckets, and a `Hasher<T>` customisation
+  point with built-in specialisations for `std::string_view`, every integral type, `bool`,
+  and pointers
+- `String`: owning, null-terminated, growable string over an explicit allocator;
+  `StringView` is an alias for `std::string_view` rather than a new type
+- `HashMap<Key, Value>`: open-addressed, power-of-two capacity, linear probing, and
+  backward-shift deletion, so no tombstones accumulate in a long-lived map
+- Verified under MSVC Debug, MSVC Release, Clang Debug, and Clang Release, warnings-as-errors
+  — 80 doctest cases (2373 assertions) plus the 4 architecture gates, 100% passing on a
+  clean rebuild of all four presets
+
 ### Known gaps in A1, carried into A2
 
-A cross-cutting review at the end of A1 found no live defects, but three things worth
+A cross-cutting review at the end of A1 found no live defects, but four things worth
 carrying forward rather than rediscovering:
 
 - **`Tools/check_architecture.py` has no tests of its own.** It is the mechanism this whole
@@ -156,6 +173,9 @@ carrying forward rather than rediscovering:
 - **`MONARC_ASSERT` has no production call sites yet.** Everything real uses `MONARC_CHECK`.
   Not a misuse — A1 has no expensive invariant to check — but the distinction will quietly
   erode unless A2's hash tables and job graphs actually use it.
+- **No small-string optimisation in `String`.** Deferred deliberately: it is an
+  implementation detail behind an unchanged interface, and nothing serializes a `String`
+  yet. Revisit when there is profiling data rather than intuition.
 
 ## Verification gates
 
