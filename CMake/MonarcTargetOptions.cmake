@@ -1,24 +1,39 @@
 include_guard(GLOBAL)
 
-# Sanitizer to build with, e.g. "address". Empty means none.
+# Sanitizer to build with: "address", "undefined", or empty for none.
 #
 # Worth having because this codebase has produced three aliasing use-after-free hazards in
 # three containers -- Array<T>, String, and HashMap -- each caught by careful review. A
 # sanitizer catches that whole class mechanically, which matters more as the platform layer
 # and the job system arrive and the bugs stop being visible by reading.
-set(MONARC_SANITIZE "" CACHE STRING "Sanitizer to enable: address, or empty for none")
-set_property(CACHE MONARC_SANITIZE PROPERTY STRINGS "" "address")
+#
+# ThreadSanitizer is deliberately absent: clang-cl rejects -fsanitize=thread for the MSVC
+# target and LLVM ships no TSan runtime for Windows. Data races in Monarc.Jobs will need a
+# Linux CI leg or macOS, not a preset.
+set(MONARC_SANITIZE "" CACHE STRING "Sanitizer to enable: address, undefined, or empty")
+set_property(CACHE MONARC_SANITIZE PROPERTY STRINGS "" "address" "undefined")
 
 if(MONARC_SANITIZE)
-    # AddressSanitizer on Windows requires the dynamic CRT, in every configuration.
-    # Forced here rather than left to the preset so a sanitizing build cannot be
-    # accidentally configured against the static or debug CRT.
-    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL" CACHE STRING "" FORCE)
+    if(NOT MONARC_SANITIZE MATCHES "^(address|undefined)$")
+        message(FATAL_ERROR
+            "MONARC_SANITIZE must be 'address' or 'undefined', got '${MONARC_SANITIZE}'")
+    endif()
+
+    # The CRT choice is per-sanitizer, and getting it wrong fails the link with
+    # "/failifmismatch: mismatch detected for 'RuntimeLibrary'" rather than anything
+    # informative. ASan's runtime is a DLL and needs the dynamic CRT; UBSan ships only a
+    # static standalone runtime and needs the static one. Forced here rather than left to
+    # the preset, so a sanitizing build cannot be configured against the wrong CRT.
+    if(MONARC_SANITIZE STREQUAL "address")
+        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL" CACHE STRING "" FORCE)
+    else()
+        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING "" FORCE)
+    endif()
 
     # CMake links through lld-link directly rather than through the clang-cl driver, so
-    # -fsanitize=address never gets translated into a runtime library and the link fails
-    # on undefined __asan_* symbols. Ask the compiler where its runtime lives instead of
-    # hardcoding a path that embeds the LLVM major version.
+    # -fsanitize=... never gets translated into a runtime library and the link fails on
+    # undefined __asan_*/__ubsan_* symbols. Ask the compiler where its runtime lives
+    # instead of hardcoding a path that embeds the LLVM major version.
     if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
         execute_process(
             COMMAND "${CMAKE_CXX_COMPILER}" -print-resource-dir
@@ -28,18 +43,30 @@ if(MONARC_SANITIZE)
         if(NOT _resource_dir_result EQUAL 0)
             message(FATAL_ERROR "could not determine Clang's resource directory")
         endif()
-        set(MONARC_ASAN_DIR "${MONARC_CLANG_RESOURCE_DIR}/lib/windows")
-        set(MONARC_ASAN_LIB   "${MONARC_ASAN_DIR}/clang_rt.asan_dynamic-x86_64.lib")
-        set(MONARC_ASAN_THUNK "${MONARC_ASAN_DIR}/clang_rt.asan_dynamic_runtime_thunk-x86_64.lib")
-        set(MONARC_ASAN_DLL   "${MONARC_ASAN_DIR}/clang_rt.asan_dynamic-x86_64.dll")
-        foreach(_needed "${MONARC_ASAN_LIB}" "${MONARC_ASAN_THUNK}" "${MONARC_ASAN_DLL}")
+        set(_rt "${MONARC_CLANG_RESOURCE_DIR}/lib/windows")
+
+        set(MONARC_SANITIZE_LIBS "")
+        set(MONARC_SANITIZE_DLLS "")
+        if(MONARC_SANITIZE STREQUAL "address")
+            list(APPEND MONARC_SANITIZE_LIBS
+                "${_rt}/clang_rt.asan_dynamic-x86_64.lib"
+                "${_rt}/clang_rt.asan_dynamic_runtime_thunk-x86_64.lib")
+            list(APPEND MONARC_SANITIZE_DLLS "${_rt}/clang_rt.asan_dynamic-x86_64.dll")
+        else()
+            list(APPEND MONARC_SANITIZE_LIBS
+                "${_rt}/clang_rt.ubsan_standalone-x86_64.lib"
+                "${_rt}/clang_rt.ubsan_standalone_cxx-x86_64.lib")
+        endif()
+
+        foreach(_needed ${MONARC_SANITIZE_LIBS} ${MONARC_SANITIZE_DLLS})
             if(NOT EXISTS "${_needed}")
                 message(FATAL_ERROR "sanitizer runtime not found: ${_needed}")
             endif()
         endforeach()
     endif()
 
-    message(STATUS "Sanitizer: ${MONARC_SANITIZE} (dynamic CRT; runtime from ${MONARC_ASAN_DIR})")
+    message(STATUS "Sanitizer: ${MONARC_SANITIZE} "
+                   "(CRT: ${CMAKE_MSVC_RUNTIME_LIBRARY}; runtime from ${_rt})")
 endif()
 
 # Applied to every Monarc target. Keeps compiler settings in exactly one place.
@@ -82,17 +109,25 @@ function(monarc_set_target_options target)
     if(MONARC_SANITIZE)
         target_compile_options(${target} PRIVATE -fsanitize=${MONARC_SANITIZE})
 
+        # UBSan prints and continues by default, so a violation would leave the process
+        # exiting zero and CI green. Make it fatal, or it is not a gate.
+        if(MONARC_SANITIZE STREQUAL "undefined")
+            target_compile_options(${target} PRIVATE
+                -fno-sanitize-recover=undefined)
+        endif()
+
         get_target_property(_target_type ${target} TYPE)
         if(_target_type STREQUAL "EXECUTABLE")
-            # Incremental linking is incompatible with ASan instrumentation.
+            # Incremental linking is incompatible with sanitizer instrumentation.
             target_link_options(${target} PRIVATE /INCREMENTAL:NO)
-            target_link_libraries(${target} PRIVATE
-                "${MONARC_ASAN_LIB}" "${MONARC_ASAN_THUNK}")
-            # The runtime DLL must sit beside the executable, or it will not start.
-            add_custom_command(TARGET ${target} POST_BUILD
-                COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                        "${MONARC_ASAN_DLL}" "$<TARGET_FILE_DIR:${target}>"
-                COMMENT "Copying the AddressSanitizer runtime beside ${target}")
+            target_link_libraries(${target} PRIVATE ${MONARC_SANITIZE_LIBS})
+            # Any runtime DLL must sit beside the executable, or it will not start.
+            foreach(_dll ${MONARC_SANITIZE_DLLS})
+                add_custom_command(TARGET ${target} POST_BUILD
+                    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                            "${_dll}" "$<TARGET_FILE_DIR:${target}>"
+                    COMMENT "Copying the ${MONARC_SANITIZE} sanitizer runtime beside ${target}")
+            endforeach()
         endif()
     endif()
 endfunction()

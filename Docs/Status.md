@@ -7,15 +7,16 @@ _Last updated: 2026-09-06_
 
 ## Summary
 
-The architecture is designed and recorded, and **Phase A1 is complete**: the build
-mechanically enforces the module graph, and `Monarc.Core` has its memory and diagnostics
-foundation under test on two compilers.
+The architecture is designed and recorded, and **phases A1, A2a and A2b are complete**:
+the build mechanically enforces the module graph, and `Monarc.Core` has its memory,
+diagnostics, container and math foundations under test on two compilers and two sanitizers.
 
-Next is **Phase A2** — the rest of `Monarc.Core` (strings, hash maps, math, GUIDs, the
-platform layer) and `Monarc.Jobs`. See
+Next is **A2c** — the platform layer (files, paths, time, threads, dynamic libraries,
+GUID), which is the first module permitted platform `#ifdef`s and so the first for which
+gate 10 stops passing vacuously. Then **A2d**, `Monarc.Jobs`. See
 [M0 — First Light](Milestones/M0-First-Light.md) for how the phases fit together.
 
-Nothing renders yet. That is Phase A3 and A4.
+Nothing renders yet. That is A3 and A4.
 
 ## Verified environment
 
@@ -33,18 +34,32 @@ Confirmed by direct testing on the development machine, not assumed:
 
 ### Continuous integration
 
-`.github/workflows/ci.yml` builds and tests five configurations on every push and pull
-request — MSVC and Clang in Debug and Release, plus **`clang-asan`** under
-AddressSanitizer — and checks documentation links. `fail-fast` is disabled so that when
+`.github/workflows/ci.yml` builds and tests six configurations on every push and pull
+request — MSVC and Clang in Debug and Release, plus **`clang-asan`** and **`clang-ubsan`**
+under Address and UndefinedBehavior sanitizers — and checks documentation links. `fail-fast` is disabled so that when
 the compilers disagree, both results are visible. First run green, 2026-09-06.
 
-The sanitizer leg exists because this codebase has produced three aliasing
+The sanitizer legs exist because this codebase has produced three aliasing
 use-after-free hazards in three containers — `Array<T>`, `String`, `HashMap` — each caught
-by careful review rather than by a tool. ASan catches that class mechanically, which
-matters more as the platform layer and the job system arrive. Verified to actually report:
-a scratch program with a deliberate use-after-free produces
-`ERROR: AddressSanitizer: heap-use-after-free` with line numbers and a non-zero exit, so
-the leg is a real gate rather than a build that happens to pass.
+by careful review rather than by a tool. **ASan** catches that class mechanically;
+**UBSan** catches a different one — signed overflow, invalid casts, misaligned loads —
+which matters for the math that landed in A2b. Both were verified to actually report
+rather than merely to build: a deliberate use-after-free gives
+`ERROR: AddressSanitizer: heap-use-after-free`, and a deliberate signed overflow gives
+`runtime error: signed integer overflow`, both with line numbers and a non-zero exit.
+
+UBSan needs `-fno-sanitize-recover=undefined`, without which it prints and continues and
+the process still exits zero — a leg that reports nothing is not a gate.
+
+**There is no ThreadSanitizer leg, and cannot be one here.** `clang-cl` rejects
+`-fsanitize=thread` for the MSVC target and LLVM ships no TSan runtime for Windows. Data
+races in `Monarc.Jobs` (A2d) will need a Linux CI leg or macOS, not a preset — worth
+knowing before that phase rather than during it.
+
+Sanitizer CRT choice is per-sanitizer and getting it wrong fails the link with an
+uninformative `/failifmismatch: mismatch detected for 'RuntimeLibrary'`: ASan's runtime is
+a DLL and needs the dynamic CRT, UBSan ships only a static standalone runtime and needs the
+static one.
 
 ASan on Windows needs the dynamic CRT and its runtime linked explicitly — CMake drives
 `lld-link` directly, so `-fsanitize=address` never becomes a runtime library and the link
@@ -208,11 +223,6 @@ was expected and did not materialise.
 A cross-cutting review at the end of A1 found no live defects, but four things worth
 carrying forward rather than rediscovering:
 
-- **`Tools/check_architecture.py` has no tests of its own.** It is the mechanism this whole
-  phase exists to prove works, and it has already needed two non-obvious fixes — a bare
-  prefix match that would have exempted a sibling `Private/PlatformUtils/`, and a regex
-  defeated by a backslash-continued `#if`. It is string-matching over source trees, which is
-  exactly the code that regresses silently.
 - **`Array<T>`'s abort-on-allocation-failure contract is untested.** Its most important
   safety property is the one thing no test exercises, because triggering it kills the test
   process. Making it testable means routing through a replaceable fatal handler, the way

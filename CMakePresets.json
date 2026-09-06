@@ -58,6 +58,16 @@
         "CMAKE_CXX_COMPILER": "clang-cl",
         "MONARC_SANITIZE": "address"
       }
+    },
+    {
+      "name": "clang-ubsan",
+      "inherits": "base",
+      "displayName": "Clang + UndefinedBehaviorSanitizer",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_CXX_COMPILER": "clang-cl",
+        "MONARC_SANITIZE": "undefined"
+      }
     }
   ],
   "buildPresets": [
@@ -80,6 +90,10 @@
     {
       "name": "clang-asan",
       "configurePreset": "clang-asan"
+    },
+    {
+      "name": "clang-ubsan",
+      "configurePreset": "clang-ubsan"
     }
   ],
   "testPresets": [
@@ -114,6 +128,13 @@
     {
       "name": "clang-asan",
       "configurePreset": "clang-asan",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "clang-ubsan",
+      "configurePreset": "clang-ubsan",
       "output": {
         "outputOnFailure": true
       }

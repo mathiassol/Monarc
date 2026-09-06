@@ -64,4 +64,13 @@ if(MONARC_BUILD_TESTS)
                 "${CMAKE_BINARY_DIR}/module-graph.json"
                 "${CMAKE_SOURCE_DIR}")
     set_tests_properties(Architecture.Gates PROPERTIES LABELS "architecture")
+
+    # The gates are string-matching over source trees -- the kind of code that regresses
+    # silently, and which has already needed two non-obvious fixes. These tests build real
+    # violating trees and assert each gate fires.
+    add_test(
+        NAME Architecture.GateTests
+        COMMAND ${Python3_EXECUTABLE}
+                "${CMAKE_SOURCE_DIR}/Tools/test_check_architecture.py")
+    set_tests_properties(Architecture.GateTests PROPERTIES LABELS "architecture")
 endif()

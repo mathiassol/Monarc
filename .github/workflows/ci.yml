@@ -26,11 +26,13 @@ jobs:
     runs-on: windows-latest
     strategy:
       # Never cancel the other legs: when MSVC and Clang disagree, seeing *both*
-      # results is the entire point of running both. clang-asan is the leg that catches
-      # the aliasing use-after-free class this codebase has produced three times.
+      # results is the entire point of running both. clang-asan catches the aliasing
+      # use-after-free class this codebase has produced three times; clang-ubsan catches a
+      # different one -- signed overflow, bad casts, misaligned loads. There is no thread
+      # sanitizer leg because clang-cl does not support one on Windows.
       fail-fast: false
       matrix:
-        preset: [msvc-debug, msvc-release, clang-debug, clang-release, clang-asan]
+        preset: [msvc-debug, msvc-release, clang-debug, clang-release, clang-asan, clang-ubsan]
 
     steps:
       - uses: actions/checkout@v7
