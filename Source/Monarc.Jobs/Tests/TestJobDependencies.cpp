@@ -133,3 +133,35 @@ TEST_CASE("a wide fan-out then fan-in completes every branch") {
     jobs.Wait(*join);
     CHECK(seen.load(std::memory_order_acquire) == kWidth);
 }
+
+TEST_CASE("the cooker's shape: import many, then one job that needs them all") {
+    // Phase C's cooker submits an import per asset and waits for the lot before writing a
+    // manifest. This is that graph, repeated, with an invariant no interleaving can satisfy
+    // unless every import really finished first.
+    SystemAllocator allocator;
+    for (int attempt = 0; attempt < 50; ++attempt) {
+        JobSystem jobs(allocator, JobSystem::Config{.workerCount = 4, .maxJobs = 1024});
+        constexpr int kAssets = 100;
+
+        std::atomic<int> imported{0};
+        Array<JobHandle> imports(allocator);
+        for (int i = 0; i < kAssets; ++i) {
+            auto handle = jobs.Submit("import", [&imported] {
+                imported.fetch_add(1, std::memory_order_acq_rel);
+            });
+            REQUIRE(handle.has_value());
+            imports.Push(*handle);
+        }
+
+        std::atomic<int> manifestSaw{-1};
+        const auto manifest = jobs.SubmitAfter("manifest", imports, [&] {
+            manifestSaw.store(imported.load(std::memory_order_acquire),
+                              std::memory_order_release);
+        });
+        REQUIRE(manifest.has_value());
+
+        jobs.Wait(*manifest);
+        CHECK(manifestSaw.load(std::memory_order_acquire) == kAssets);
+        CHECK(imported.load(std::memory_order_acquire) == kAssets);
+    }
+}

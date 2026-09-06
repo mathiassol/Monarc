@@ -7,13 +7,13 @@ _Last updated: 2026-09-06_
 
 ## Summary
 
-The architecture is designed and recorded, and **phases A1, A2a and A2b are complete**:
-the build mechanically enforces the module graph, and `Monarc.Core` has its memory,
-diagnostics, container and math foundations under test on two compilers and two sanitizers.
+The architecture is designed and recorded, and **phases A1 through A2d are complete**:
+the build mechanically enforces the module graph, `Monarc.Core` has its memory,
+diagnostics, container, math and platform foundations under test on two compilers and two
+sanitizers, and `Monarc.Jobs` — the first module beyond `Monarc.Core` — adds a thread
+pool, dependency graph, priorities and instrumentation on top of it.
 
-Next is **A2c** — the platform layer (files, paths, time, threads, dynamic libraries,
-GUID), which is the first module permitted platform `#ifdef`s and so the first for which
-gate 10 stops passing vacuously. Then **A2d**, `Monarc.Jobs`. See
+Next is **A3** — RHI, the Vulkan backend, and `Host.Windowed`. See
 [M0 — First Light](Milestones/M0-First-Light.md) for how the phases fit together.
 
 Nothing renders yet. That is A3 and A4.
@@ -157,7 +157,7 @@ was expected and did not materialise.
 | A2a | Hash, String, HashMap | **Complete** |
 | A2b | Math — vectors, matrices, quaternions, transforms | **Complete** |
 | A2c | Platform — files, paths, time, threads, dynamic libs, GUID | **Complete** |
-| A2d | Monarc.Jobs — thread pool, dependency graph, priorities | Not started |
+| A2d | Monarc.Jobs — thread pool, dependency graph, priorities | **Complete** |
 | A3 | RHI, Vulkan backend, Host.Windowed | Not started |
 | A4 | Minimal render graph | Not started |
 | B | ShaderCompiler, Shaders, Render | Not started |
@@ -253,6 +253,39 @@ covered the whole `Private/Platform/` tree, including `Path.cpp`, which ADR-0016
 platform-*neutral*. A Windows conditional could have sat unnoticed in a file explicitly
 labelled neutral. The exemption now covers only per-platform subdirectories, and three
 tests pin that scope.
+
+### A2d delivered
+
+- `JobHandle`: a generation-checked (index, generation) pair, invalid by default, so a
+  recycled pool slot can never be mistaken for the job that previously occupied it
+- `JobSystem`: a thread pool (`Config::workerCount` OS threads) over a fixed-capacity pool
+  of job slots (`Config::maxJobs`, sized at construction) — `Submit`/`SubmitAfter` fail
+  rather than allocate or block once the pool is full, and store each job's callable
+  inline, never on the heap, with a `static_assert` turning an over-large capture into a
+  compile error instead of a silent allocation
+- Dependencies as a counted graph, not a traversal: each job holds a count of its own
+  unfinished dependencies, and a dependency that is already finished or stale by the time
+  `SubmitAfter` is called is satisfied immediately rather than waited on
+- Three strict priorities (`JobPriority::High`/`Normal`/`Low`), deliberately without
+  ageing, and completed-job instrumentation (`JobProfileRecord`/`CollectProfile`) behind a
+  ring buffer that costs nothing — no allocation, no timestamp read — when
+  `Config::profileCapacity` is left at its default of zero
+- **One mutex guards the entire scheduler**, with no atomics and no per-queue or per-slot
+  locking — see [Threading.md](Runtime/Threading.md) for why that is the right trade with
+  no ThreadSanitizer available on this platform to verify anything cleverer
+- `Wait` rejects being called from one of the pool's own worker threads via
+  `MONARC_CHECK` — verified, under a non-breaking assert handler, to report the violation
+  and then deadlock the pool exactly as the design predicts, rather than silently
+  recovering; see [Threading.md](Runtime/Threading.md#wait-is-for-the-owning-thread-not-a-worker)
+- 21 doctest cases, 8939 assertions, green on all six presets, plus the job test binary
+  run 200+ consecutive times standalone with zero failures
+
+**Gate 2 now sees a real edge.** The module graph has had exactly one node since A1, so
+gate 2's acyclicity check had only ever run against scratch fixtures in the gate's own
+tests, never a real second module. `module-graph.json` now records two modules —
+`Monarc.Core` and `Monarc.Jobs` — and the `Monarc.Jobs → Monarc.Core` edge Task 1 of the
+A2d plan introduced, and the gate continues to pass against a graph that could, for the
+first time, actually contain a cycle.
 
 ## Verification gates
 
