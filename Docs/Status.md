@@ -96,6 +96,13 @@ was expected and did not materialise.
   `CXX_SCAN_FOR_MODULES OFF` is free build time.
 - Git Bash puts MSYS2's `g++` ahead of MSVC on `PATH`. Builds must run from a VS developer
   environment (`vcvars64.bat`) or via CMake presets that pin the toolchain.
+
+  The same `PATH` entry bites the Clang presets differently and more confusingly: MSYS2 also
+  ships `ld.exe` and `ar.exe`, which CMake picks up as the linker and archiver during
+  compiler detection, producing a link failure in the sanity check that looks nothing like a
+  `PATH` problem. `vcvars64.bat` alone does not cause this — it appears when composing a
+  `PATH` by hand from the Machine and User variables. **Filter `msys64` out when doing
+  that**, or configure from a plain developer prompt.
 - **`clang-cl` does not accept `/std:c++23`** — it silently ignores the flag (emitting only
   an "argument unused" warning) and falls back to C++17, which then fails with a wall of
   confusing errors. Use `/std:c++latest`, or let CMake's `CXX_STANDARD 23` pick the flag.
@@ -133,7 +140,7 @@ was expected and did not materialise.
 |---|---|---|
 | A1 | Build system, module gates, Core memory + diagnostics | **Complete** |
 | A2a | Hash, String, HashMap | **Complete** |
-| A2b | Math — vectors, matrices, quaternions, transforms | Not started |
+| A2b | Math — vectors, matrices, quaternions, transforms | **Complete** |
 | A2c | Platform — files, paths, time, threads, dynamic libs, GUID | Not started |
 | A2d | Monarc.Jobs — thread pool, dependency graph, priorities | Not started |
 | A3 | RHI, Vulkan backend, Host.Windowed | Not started |
@@ -169,6 +176,32 @@ was expected and did not materialise.
 - Verified under MSVC Debug, MSVC Release, Clang Debug, and Clang Release, warnings-as-errors
   — 80 doctest cases (2373 assertions) plus the 4 architecture gates, 100% passing on a
   clean rebuild of all four presets
+
+### A2b delivered
+
+- `Scalar.h`: `kPi`/`kTwoPi`/`kHalfPi`/`kEpsilon`, `Radians`/`Degrees`, `Clamp`, `Lerp`,
+  `ApproxEqual` — `constexpr` wherever `sqrt` and trig are not involved
+- `Vec.h`: `Vec2`, `Vec3`, `Vec4` with the full arithmetic vocabulary, `Dot`, `Cross`,
+  `Length`, `Normalize`; `Vec3` stays an unpadded 12 bytes for GPU vertex layout, `Vec4` is
+  16-byte aligned for a future SIMD backend
+- `Mat.h`: `Mat3`, `Mat4` (column-major, `columns[3]` the translation), `Perspective` and
+  `Orthographic` both mapping depth to 0..1, `LookAt`, and an `Inverse` for a general affine
+  matrix, not only a rigid one
+- `Quat.h`: Hamilton quaternions matching `Mat4`'s composition order (`a * b` applies `b`
+  first), and a `Slerp` that takes the shorter path and falls back to a normalized lerp when
+  its inputs are nearly parallel rather than dividing by a near-zero `sin(theta)`
+- `Transform.h`: translation/rotation/scale composition and inverse, the latter checked
+  with `MONARC_CHECK` rather than silently wrong under non-uniform scale
+- `Bounds.h`: `AABB` with `Expand`, `Contains`, `Intersects`, and a `Transformed` that
+  re-fits around all eight transformed corners rather than just `min`/`max`, which is wrong
+  under any rotation
+- Every convention in [ADR-0015](Architecture/Decisions/ADR-0015-math-conventions.md) —
+  handedness, storage order, composition order, depth range — is the record of what this
+  phase decided, and is locked in by a test built to fail if any of it is ever quietly
+  changed, not merely stated in a comment
+- Verified under MSVC Debug, MSVC Release, Clang Debug, Clang Release, and Clang +
+  AddressSanitizer, warnings-as-errors — 132 doctest cases (2517 assertions) plus the 4
+  architecture gates, 100% passing on a clean rebuild of all five presets
 
 ### Known gaps in A1, carried into A2
 
