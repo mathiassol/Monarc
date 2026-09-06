@@ -25,6 +25,20 @@ namespace Monarc {
 // cheaper than a copy regardless of what eventually lives behind it.
 // -----------------------------------------------------------------------------------------
 
+namespace Detail {
+
+/// Floor for the length below which Normalize refuses to divide.
+///
+/// Deliberately far smaller than Math::kEpsilon, which is tuned for comparing
+/// roughly-unit-magnitude quantities and is the wrong tool here: a legitimate small vector
+/// like (1e-5, 0, 0) still has a perfectly well-defined direction, and Math::kEpsilon would
+/// have discarded it. This floor exists only to stop `1 / length` from overflowing to
+/// infinity, which needs a length below roughly `1 / FLT_MAX` (~2.9e-39); 1e-20 sits
+/// comfortably above that and comfortably below any vector this engine plausibly computes.
+inline constexpr f32 kMinNormalizableLength = 1e-20f;
+
+}  // namespace Detail
+
 /// Two-component vector: texture coordinates, 2D positions, screen-space offsets.
 struct Vec2 {
     f32 x = 0.0f;
@@ -83,9 +97,9 @@ struct Vec2 {
 /// configuration MONARC_CHECK runs in) and returns Zero(), a defined, inert value.
 [[nodiscard]] inline Vec2 Normalize(Vec2 v) {
     const f32 len = Length(v);
-    MONARC_CHECK(len > Math::kEpsilon,
+    MONARC_CHECK(len > Detail::kMinNormalizableLength,
                  "Normalize: vector is too close to zero length to normalize safely");
-    if (len <= Math::kEpsilon) {
+    if (len <= Detail::kMinNormalizableLength) {
         return Vec2::Zero();
     }
     return v * (1.0f / len);
@@ -186,9 +200,9 @@ static_assert(sizeof(Vec3) == 12, "Vec3 must match the GPU's tightly packed layo
 /// rather than left to produce NaN.
 [[nodiscard]] inline Vec3 Normalize(Vec3 v) {
     const f32 len = Length(v);
-    MONARC_CHECK(len > Math::kEpsilon,
+    MONARC_CHECK(len > Detail::kMinNormalizableLength,
                  "Normalize: vector is too close to zero length to normalize safely");
-    if (len <= Math::kEpsilon) {
+    if (len <= Detail::kMinNormalizableLength) {
         return Vec3::Zero();
     }
     return v * (1.0f / len);
@@ -318,9 +332,9 @@ static_assert(alignof(Vec4) == 16, "Vec4 must stay 16-byte aligned for later SIM
 /// rather than left to produce NaN.
 [[nodiscard]] inline Vec4 Normalize(Vec4 v) {
     const f32 len = Length(v);
-    MONARC_CHECK(len > Math::kEpsilon,
+    MONARC_CHECK(len > Detail::kMinNormalizableLength,
                  "Normalize: vector is too close to zero length to normalize safely");
-    if (len <= Math::kEpsilon) {
+    if (len <= Detail::kMinNormalizableLength) {
         return Vec4::Zero();
     }
     return v * (1.0f / len);
