@@ -21,3 +21,4 @@ than deleting it — the vision asks that we preserve an account of why directio
 | [0013](ADR-0013-editor-ui.md) | Editor UI: ImGui scaffolding behind thin panels | Accepted |
 | [0014](ADR-0014-dependency-policy.md) | Own the core, license the specialists | Accepted |
 | [0015](ADR-0015-math-conventions.md) | Right-handed Y-up, column vectors, 0..1 depth | Accepted |
+| [0016](ADR-0016-platform-code-selection.md) | Platform code selected by directory, not `#ifdef` | Accepted |
