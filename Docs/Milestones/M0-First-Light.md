@@ -48,7 +48,10 @@ stalling — there is always a working thing, and always a place to redirect.
 | Phase | Contents | Runnable proof |
 |---|---|---|
 | **A1** | Build system, `monarc_module`, architecture gates, Core's memory and diagnostics foundation | A build that enforces the architecture, and a tested `Monarc.Core` — [plan](../Plans/2026-09-05-phase-a1-foundation.md) |
-| **A2** | Rest of `Core` (String, HashMap, math, GUID, platform IO/time/threads) and `Jobs` | A parallel job graph with dependencies, under test |
+| **A2a** | `Hash`, `String`, `HashMap` | The vocabulary types the rest of Core is written in — [plan](../Plans/2026-09-06-phase-a2a-strings-and-maps.md) |
+| **A2b** | Math — vectors, matrices, quaternions, transforms | Testable math, needed from A4 onward |
+| **A2c** | Platform — files, paths, time, threads, dynamic libraries, GUID | The OS boundary; the only module permitted platform `#ifdef`s |
+| **A2d** | `Monarc.Jobs` | A parallel job graph with dependencies, under test |
 | **A3** | `RHI`, `RHI.Vulkan`, `Host.Windowed` | A window with a cleared screen, via the RHI directly |
 | **A4** | Minimal render graph | A window opens and the screen clears **through the real render graph** |
 | **B** | `ShaderCompiler`, `Shaders`, `Render` | A cube renders from in-memory data via `RenderScene` and a Slang shader |
@@ -81,10 +84,12 @@ first week they can be, rather than added once they would already fail.
 
 ## Prerequisites
 
-- **Install the LLVM toolchain and add a Clang build to CI.**
-  [ADR-0003](../Architecture/Decisions/ADR-0003-cpp23-baseline.md) makes the C++23 baseline
-  conditional on a second compiler, and there is currently none — see
-  [Status.md](../Status.md#known-gaps).
+- ~~Install the LLVM toolchain and add a Clang build to CI.~~ **Done 2026-09-06.** Clang
+  22.1.8 locally, and CI builds MSVC and Clang in Debug and Release on every push, so
+  [ADR-0003](../Architecture/Decisions/ADR-0003-cpp23-baseline.md)'s condition is met.
+- **Install RenderDoc before Phase A3.** NVIDIA Nsight is installed but is NVIDIA-only, so it
+  cannot inspect frames on the Intel UHD 730 — the device that keeps the capability tiers
+  honest rather than theoretical. See [Status.md](../Status.md#known-gaps).
 
 ## Honest assessment of size
 
