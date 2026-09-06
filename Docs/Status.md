@@ -87,18 +87,27 @@ was expected and did not materialise.
   confusing errors. Use `/std:c++latest`, or let CMake's `CXX_STANDARD 23` pick the flag.
 - `core.autocrlf` is `true` on this machine. `.gitattributes` overrides it with
   `text=auto eol=lf` so line-ending behaviour does not depend on developer config.
-- **Three Python interpreters are in play, and `python` and `pip` disagree.** `python`
-  resolves to MSYS2's 3.14.7 (`C:\msys64\mingw64\bin` precedes WindowsApps on `PATH`);
-  `pip` resolves to the Microsoft Store 3.11 shim, because MSYS2 ships no `pip.exe`; and
-  CMake's `find_package(Python3)` picks CPython 3.12 under
-  `%LOCALAPPDATA%\Programs\Python`. So `pip install X` followed by
-  `python -c "import X"` fails, and the interpreter running the architecture gates is a
-  third one again.
+- **Three Python installations exist; `python`, `pip` and the build now agree on one.**
+  Until 2026-09-06 they did not: `python` resolved to MSYS2's 3.14.7 (because
+  `C:\msys64\mingw64\bin` preceded WindowsApps on `PATH`), `pip` resolved to the Microsoft
+  Store 3.11 shim (because MSYS2 ships no `pip.exe`, so the name fell through), and CMake's
+  `find_package(Python3)` picked CPython 3.12. `pip install X` followed by
+  `python -c "import X"` therefore failed, and the architecture gates ran under a third
+  interpreter again.
 
-  Consequence for the project: the scripts in `Tools/` are written against the standard
-  library alone and must stay that way, because which interpreter runs them depends on how
-  they are invoked. If a script ever genuinely needs a package, pin the interpreter
-  explicitly rather than relying on `python`.
+  Fixed by prepending `%LOCALAPPDATA%\Programs\Python\Python312` and its `Scripts` to the
+  user `PATH` — chosen because CMake had already settled on that interpreter, so the shell
+  now matches the build rather than the other way round. All of `python`, `pip`, `pip3` and
+  `find_package(Python3)` resolve to **3.12.10**.
+
+  Two residues worth knowing. `python3` still resolves to MSYS2's 3.14.7, because CPython
+  on Windows installs no `python3.exe`; nothing in this project invokes it, but it is the
+  same class of trap. And MSYS2's `bin` remains on `PATH`, which is separately why
+  `g++` shadows MSVC in Git Bash.
+
+  Independently of all that, the scripts in `Tools/` are written against the standard
+  library alone and should stay that way: CI runs them under a different interpreter again,
+  so depending on a package would mean depending on which Python happened to win.
 - Ninja 1.13.2 and LLVM's `bin` are on `PATH` as of 2026-09-06, which is what lets
   `CMakePresets.json` pin no absolute tool paths.
 - Windows long paths are **not** enabled (`LongPathsEnabled=0`, `core.longpaths` unset).
