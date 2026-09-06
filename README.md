@@ -42,9 +42,12 @@ cmake --build --preset msvc-debug
 ctest --preset msvc-debug
 ```
 
-Presets: `msvc-debug`, `msvc-release`, `clang-debug`, `clang-release`. They pin no absolute
-tool paths, so `ninja` and `clang-cl` must be resolvable from `PATH`; override anything
-machine-specific in `CMakeUserPresets.json`, which is gitignored.
+Presets: `msvc-debug`, `msvc-release`, `clang-debug`, `clang-release`, and `clang-asan`
+(AddressSanitizer). They pin no absolute tool paths, so `ninja` and `clang-cl` must be
+resolvable from `PATH`; override anything machine-specific in `CMakeUserPresets.json`,
+which is gitignored.
+
+All five run in CI on every push.
 
 All builds are warnings-as-errors under both compilers.
 

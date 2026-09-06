@@ -26,10 +26,11 @@ jobs:
     runs-on: windows-latest
     strategy:
       # Never cancel the other legs: when MSVC and Clang disagree, seeing *both*
-      # results is the entire point of running both.
+      # results is the entire point of running both. clang-asan is the leg that catches
+      # the aliasing use-after-free class this codebase has produced three times.
       fail-fast: false
       matrix:
-        preset: [msvc-debug, msvc-release, clang-debug, clang-release]
+        preset: [msvc-debug, msvc-release, clang-debug, clang-release, clang-asan]
 
     steps:
       - uses: actions/checkout@v7

@@ -33,10 +33,24 @@ Confirmed by direct testing on the development machine, not assumed:
 
 ### Continuous integration
 
-`.github/workflows/ci.yml` builds and tests four configurations on every push and pull
-request — MSVC and Clang, Debug and Release — plus a documentation-link check.
-`fail-fast` is disabled so that when the compilers disagree, both results are visible.
-First run green, 2026-09-06.
+`.github/workflows/ci.yml` builds and tests five configurations on every push and pull
+request — MSVC and Clang in Debug and Release, plus **`clang-asan`** under
+AddressSanitizer — and checks documentation links. `fail-fast` is disabled so that when
+the compilers disagree, both results are visible. First run green, 2026-09-06.
+
+The sanitizer leg exists because this codebase has produced three aliasing
+use-after-free hazards in three containers — `Array<T>`, `String`, `HashMap` — each caught
+by careful review rather than by a tool. ASan catches that class mechanically, which
+matters more as the platform layer and the job system arrive. Verified to actually report:
+a scratch program with a deliberate use-after-free produces
+`ERROR: AddressSanitizer: heap-use-after-free` with line numbers and a non-zero exit, so
+the leg is a real gate rather than a build that happens to pass.
+
+ASan on Windows needs the dynamic CRT and its runtime linked explicitly — CMake drives
+`lld-link` directly, so `-fsanitize=address` never becomes a runtime library and the link
+fails on undefined `__asan_*` symbols. `MonarcTargetOptions.cmake` queries
+`clang-cl -print-resource-dir` rather than hardcoding a path containing the LLVM major
+version, and copies the runtime DLL beside each test executable.
 
 The runner's toolchain differs from this machine usefully: the same MSVC family
 (19.51.36256 vs 19.51.36244 here) but **Clang 20.1.8 against 22.1.8 locally**, so the
