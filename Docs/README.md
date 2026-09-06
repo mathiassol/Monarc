@@ -52,6 +52,7 @@ If you are new to the project, read in this order:
   - [Phase A2b — Math](Plans/2026-09-06-phase-a2b-math.md)
   - [Phase A2c — The platform layer](Plans/2026-09-06-phase-a2c-platform.md)
   - [Phase A2d — Monarc.Jobs](Plans/2026-09-06-phase-a2d-jobs.md)
+  - [Phase A3 — Monarc.RHI, the Vulkan backend, and first light](Plans/2026-09-06-phase-a3-rhi-and-first-light.md)
 
 A milestone says *what* and *why*; a plan says *how*, in executable steps. Plans are written
 one phase ahead, not all at once, because later phases are shaped by what earlier ones teach.
