@@ -41,12 +41,17 @@ namespace Monarc::Platform::Path {
 /// True if path is rooted rather than resolved relative to a current directory -- this
 /// platform's own notion of an absolute path. Deliberately unspecified beyond that; see the
 /// A2c plan for why no test probes the exact form.
+/// Implemented per-platform, under Private/Platform/<platform>/Path.cpp.
 [[nodiscard]] bool IsAbsolute(StringView path);
 
 /// The separator this platform's own APIs and paths prefer. Join and Normalize always emit
 /// '/' regardless of this value -- see their docs -- so this exists only for a caller that
 /// specifically wants the platform's native convention, such as formatting a path for
 /// display in a platform-native tool.
-[[nodiscard]] constexpr char PreferredSeparator() { return '\\'; }
+///
+/// Not constexpr, deliberately: a compile-time constant would have to come from a
+/// conditional in this header, and ADR-0016 forbids platform conditionals. Nothing needs
+/// it in a constant expression, so a per-platform definition is the cheaper trade.
+[[nodiscard]] char PreferredSeparator();
 
 }  // namespace Monarc::Platform::Path

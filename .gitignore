@@ -33,6 +33,8 @@ CMakeFiles/
 .vs/
 .claudian/
 .agents/
+__pycache__/
+*.pyc
 .vscode/
 .idea/
 Thumbs.db

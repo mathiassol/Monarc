@@ -13,10 +13,6 @@ constexpr char kSeparator = '/';
     return c == kSeparator;
 }
 
-[[nodiscard]] bool IsAsciiLetter(char c) {
-    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
-}
-
 }  // namespace
 
 StringView FileName(StringView path) {
@@ -128,21 +124,6 @@ String Normalize(IAllocator& allocator, StringView path) {
         result.Append(stack[idx]);
     }
     return result;
-}
-
-bool IsAbsolute(StringView path) {
-    // The one platform-specific fact in this file: on Windows, a path is unambiguously
-    // rooted only when it names a drive -- a letter, a colon, then a separator. Win32
-    // accepts '/' here as readily as '\\', and Join/Normalize always emit '/', so both are
-    // recognised. A bare leading separator ("/x") is deliberately NOT treated as absolute:
-    // it is resolved against whichever drive happens to be current, which is exactly the
-    // ambiguity an asset system cannot afford to call "absolute".
-    //
-    // This is the one function in this file that will need attention when a second
-    // platform arrives -- see the A2c plan's note on why Path.cpp has no per-platform
-    // sibling the way Time.cpp and File.cpp do.
-    return path.size() >= 3 && IsAsciiLetter(path[0]) && path[1] == ':' &&
-           (path[2] == '/' || path[2] == '\\');
 }
 
 }  // namespace Monarc::Platform::Path

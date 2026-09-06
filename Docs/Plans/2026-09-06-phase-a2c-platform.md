@@ -46,17 +46,24 @@ Source/Monarc.Core/
     Guid.h        128-bit identity
   Private/Platform/
     Path.cpp                 platform-neutral: pure string manipulation
-    Windows/Time.cpp  Windows/File.cpp  Windows/Thread.cpp
-    Windows/Library.cpp  Windows/Guid.cpp
+    Windows/Time.cpp  Windows/File.cpp  Windows/Path.cpp
+    Windows/Thread.cpp  Windows/Library.cpp  Windows/Guid.cpp
   Tests/
     TestTime.cpp  TestFile.cpp  TestPath.cpp  TestThread.cpp
     TestLibrary.cpp  TestGuid.cpp
 ```
 
-`Path` is deliberately **not** under `Windows/`: joining and splitting strings needs no
-platform call, and the one place platforms differ — the preferred separator — is a constant.
-Putting it in the platform-neutral directory keeps it testable everywhere and shrinks what
-each new platform must implement.
+`Path` is **split**, and the reason is worth stating because the first draft of this plan
+got it wrong. Joining, splitting and normalising need no platform call, so they live in the
+neutral `Path.cpp` — that keeps them testable everywhere and shrinks what a new platform
+must implement. But `IsAbsolute` and `PreferredSeparator` genuinely differ per platform, and
+the first draft left them in the neutral file with nowhere to put that difference, forcing
+Windows conventions into a file labelled platform-neutral. They now live in
+`Windows/Path.cpp` like every other platform fact.
+
+`PreferredSeparator` is therefore **not** `constexpr`: a compile-time constant would have to
+come from a conditional in the header, which ADR-0016 forbids. Nothing needs it in a
+constant expression, so a per-platform definition is the cheaper trade.
 
 ---
 
