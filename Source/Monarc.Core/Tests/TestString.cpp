@@ -145,3 +145,22 @@ TEST_CASE("a String is hashable and agrees with its view") {
     String s(allocator, "key");
     CHECK(Monarc::Hash(s) == Monarc::Hash(StringView("key")));
 }
+
+TEST_CASE("appending a String to itself is safe when it forces a reallocation") {
+    // The existing aliasing case fits inside its capacity, so it never reallocates --
+    // and growth-plus-aliasing is the exact combination that was a use-after-free in
+    // Array<T>. Fill to capacity first so the append must grow.
+    SystemAllocator allocator;
+    String s(allocator);
+    s.Reserve(8);
+    for (int i = 0; i < 8; ++i) {
+        s.PushBack(static_cast<char>('a' + i));
+    }
+    REQUIRE(s.Size() == s.Capacity());   // the next write must reallocate
+
+    s.Append(s.View());
+
+    CHECK(s.Size() == 16);
+    CHECK(s.View() == "abcdefghabcdefgh");
+    CHECK(std::strcmp(s.CStr(), "abcdefghabcdefgh") == 0);
+}

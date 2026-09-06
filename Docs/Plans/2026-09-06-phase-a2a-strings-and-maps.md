@@ -129,16 +129,16 @@ TEST_CASE("pointers are hashable") {
 }
 
 TEST_CASE("Hasher can be specialised for a user type") {
-    struct Key { int a; int b; };
-    // Specialisation lives in TestHash.cpp's own namespace scope; see Hash.h's contract.
     CHECK(Hasher<Key>{}(Key{1, 2}) == Hasher<Key>{}(Key{1, 2}));
     CHECK(Hasher<Key>{}(Key{1, 2}) != Hasher<Key>{}(Key{2, 1}));
 }
 ```
 
-> The final case requires a `Hasher<Key>` specialisation. Write it in the test file, above
-> the test cases, in the `Monarc` namespace. That is the point of the case: it proves the
-> customisation point is reachable from outside `Hash.h`.
+> `Key` must be declared at namespace scope above the test cases — in an anonymous
+> namespace, as `TestHashMap.cpp` does with `Collide` — with `template <> struct
+> Monarc::Hasher<Key>` beside it. A type local to a function cannot be specialised for at
+> namespace scope. That case exists to prove the customisation point is reachable from
+> outside `Hash.h`.
 
 - [ ] **Step 2: Build and confirm it fails**
 
@@ -439,8 +439,11 @@ public:
     [[nodiscard]] char*       Data();
     [[nodiscard]] const char* Data() const;
 
-    [[nodiscard]] friend bool operator==(const String& a, const String& b);
-    [[nodiscard]] friend bool operator==(const String& a, StringView b);
+    // No [[nodiscard]] on these two: MSVC accepts it on a friend declaration, clang-cl
+    // rejects it as "an attribute list cannot appear here" in either ordering. Found by
+    // building both, which is what ADR-0003's second compiler is for.
+    friend bool operator==(const String& a, const String& b);
+    friend bool operator==(const String& a, StringView b);
 
 private:
     // Implementer's choice, subject to the tests.
@@ -863,8 +866,11 @@ git commit -m "docs: record Phase A2a complete"
 2. Every build is warning-free (`/WX`).
 3. The four architecture gates still pass.
 4. `Hasher` is demonstrably specialisable from outside `Hash.h`.
-5. The aliasing case (`s.Append(s.View())`) and the colliding-removal case both pass — those
-   are the two that catch the defects this design is most likely to have.
+5. The aliasing cases and the colliding-removal case pass — those catch the defects this
+   design is most likely to have. Note `s.Append(s.View())` on a string that fits inside its
+   capacity does **not** reallocate, so it does not exercise the dangerous path on its own;
+   a second case fills to capacity first, because growth-plus-aliasing is what was a
+   use-after-free in `Array<T>`.
 6. `Docs/Status.md` reflects reality.
 
 ## What A2a deliberately excludes
