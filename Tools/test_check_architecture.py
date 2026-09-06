@@ -42,6 +42,10 @@ def graph(*modules):
     return {m["name"]: m for m in modules}
 
 
+#: A minimal source file carrying a platform conditional.
+WIN32_IFDEF = "#ifdef _WIN32\nint w = 1;\n#endif\n"
+
+
 class TreeFixture:
     """A throwaway source tree. Paths are relative to the tree root."""
 
@@ -198,8 +202,10 @@ class TestPlatformContainment(FixtureTest):
         self._core("Private/p.cpp", "#ifdef _WIN32\nint w = 1;\n#endif\n")
         self.assertGateFails(self._gate(), "_WIN32")
 
-    def test_the_same_ifdef_inside_platform_is_exempt(self):
-        self._core("Private/Platform/p.cpp", "#ifdef _WIN32\nint w = 1;\n#endif\n")
+    def test_the_same_ifdef_inside_a_platform_directory_is_exempt(self):
+        # Note the path: a per-platform directory, not Private/Platform/ itself. This case
+        # originally used the latter, which passed only because the exemption was too broad.
+        self._core("Private/Platform/Windows/p.cpp", WIN32_IFDEF)
         self.assertGatePasses(self._gate())
 
     def test_a_platform_sibling_directory_is_not_exempt(self):
@@ -223,6 +229,24 @@ class TestPlatformContainment(FixtureTest):
     def test_apple_and_linux_macros_are_caught_too(self):
         self._core("Private/p.cpp", "#if defined(__APPLE__)\nint a = 1;\n#endif\n")
         self.assertGateFails(self._gate(), "__APPLE__")
+
+    def test_a_neutral_file_beside_the_platform_directories_is_not_exempt(self):
+        # Regression: the exemption once covered the whole Private/Platform/ tree, so a
+        # Windows conditional could sit unnoticed in Path.cpp -- a file ADR-0016 makes
+        # platform-neutral precisely so every platform shares it.
+        self._core("Private/Platform/Path.cpp", WIN32_IFDEF)
+        self.assertGateFails(self._gate(), "Platform/Path.cpp")
+
+    def test_a_per_platform_directory_is_exempt(self):
+        self._core("Private/Platform/Windows/File.cpp", WIN32_IFDEF)
+        self.assertGatePasses(self._gate())
+
+    def test_a_public_platform_header_is_not_exempt(self):
+        # Public headers stay platform-neutral under ADR-0016, carrying opaque fixed-size
+        # members rather than conditional ones.
+        self._core("Include/Monarc/Core/Platform/Thread.h", WIN32_IFDEF)
+        self.tree.mkdir("Source/Monarc.Core/Private")
+        self.assertGateFails(self._gate(), "Thread.h")
 
     def test_a_platform_macro_in_a_test_is_ignored(self):
         # Tests are not modules; nothing may depend on them, and they are entitled to probe

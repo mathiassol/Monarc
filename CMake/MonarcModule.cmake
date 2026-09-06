@@ -45,10 +45,36 @@ function(monarc_module)
         message(FATAL_ERROR "monarc_module(${ARG_NAME}): TIER must be 0-4, got '${ARG_TIER}'")
     endif()
 
+    # ADR-0016: platform code lives in per-platform directories and is selected here, so
+    # that a file which cannot compile on this platform is never handed to the compiler.
+    # Any directory under Private/Platform/ that is not the current platform is excluded.
+    if(WIN32)
+        set(_monarc_platform "Windows")
+    elseif(APPLE)
+        set(_monarc_platform "Mac")
+    elseif(UNIX)
+        set(_monarc_platform "Linux")
+    else()
+        message(FATAL_ERROR "monarc_module(${ARG_NAME}): unrecognised target platform")
+    endif()
+    set(MONARC_PLATFORM_DIR "${_monarc_platform}" CACHE INTERNAL "")
+
     file(GLOB_RECURSE _sources CONFIGURE_DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/Private/*.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/Private/*.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/Include/*.h")
+
+    # Drop sources under any Private/Platform/<other> directory.
+    set(_filtered "")
+    foreach(_source IN LISTS _sources)
+        file(RELATIVE_PATH _rel "${CMAKE_CURRENT_SOURCE_DIR}" "${_source}")
+        if(_rel MATCHES "^Private/Platform/([^/]+)/" AND
+           NOT CMAKE_MATCH_1 STREQUAL _monarc_platform)
+            continue()
+        endif()
+        list(APPEND _filtered "${_source}")
+    endforeach()
+    set(_sources ${_filtered})
 
     if(NOT _sources)
         message(FATAL_ERROR "monarc_module(${ARG_NAME}): no sources found under "

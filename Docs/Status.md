@@ -156,7 +156,7 @@ was expected and did not materialise.
 | A1 | Build system, module gates, Core memory + diagnostics | **Complete** |
 | A2a | Hash, String, HashMap | **Complete** |
 | A2b | Math — vectors, matrices, quaternions, transforms | **Complete** |
-| A2c | Platform — files, paths, time, threads, dynamic libs, GUID | Not started |
+| A2c | Platform — files, paths, time, threads, dynamic libs, GUID | **Complete** |
 | A2d | Monarc.Jobs — thread pool, dependency graph, priorities | Not started |
 | A3 | RHI, Vulkan backend, Host.Windowed | Not started |
 | A4 | Minimal render graph | Not started |
@@ -233,6 +233,26 @@ carrying forward rather than rediscovering:
 - **No small-string optimisation in `String`.** Deferred deliberately: it is an
   implementation detail behind an unchanged interface, and nothing serializes a `String`
   yet. Revisit when there is profiling data rather than intuition.
+
+### A2c delivered
+
+- Platform code selected by **directory**, not `#ifdef` — `monarc_module()` globs the current
+  platform and excludes the others. Verified concretely: a `Private/Platform/Mac/` file
+  containing `#error` is present, the build succeeds, and `Platform\Mac` appears nowhere in
+  the generated Ninja file.
+- `Time` (monotonic and wall clocks), `Path`, `File` (whole-file IO), `Thread`/`Mutex`/
+  `ConditionVariable`, `Library`, and 128-bit `Guid` from the platform's cryptographic RNG
+- **Zero platform `#ifdef`s anywhere in `Monarc.Core`**, which is
+  [ADR-0016](Architecture/Decisions/ADR-0016-platform-code-selection.md)'s intended outcome:
+  gate 10's exemption exists as a pressure valve and is currently unused
+- 177 doctest cases, 3666 assertions, green on all six presets
+
+**Gate 10 now does real work.** It had been passing vacuously since A1 for want of any
+platform code. Verifying it during closeout found it was still too permissive: the exemption
+covered the whole `Private/Platform/` tree, including `Path.cpp`, which ADR-0016 makes
+platform-*neutral*. A Windows conditional could have sat unnoticed in a file explicitly
+labelled neutral. The exemption now covers only per-platform subdirectories, and three
+tests pin that scope.
 
 ## Verification gates
 
