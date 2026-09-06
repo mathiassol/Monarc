@@ -91,13 +91,31 @@ struct AABB {
 
 /// Half the box's size along each axis: the distance from Center() to either face, not the
 /// full width/height/depth.
-[[nodiscard]] constexpr Vec3 Extents(const AABB& box) { return (box.max - box.min) * 0.5f; }
+[[nodiscard]] constexpr bool IsEmpty(const AABB& box) {
+    return box.min.x > box.max.x || box.min.y > box.max.y || box.min.z > box.max.z;
+}
+
+/// Half the size along each axis. Zero for an empty box: `max - min` on the sentinels is
+/// twice the largest finite float, which overflows to infinity rather than being merely
+/// meaningless.
+[[nodiscard]] constexpr Vec3 Extents(const AABB& box) {
+    return IsEmpty(box) ? Vec3::Zero() : (box.max - box.min) * 0.5f;
+}
 
 /// Transforms `box` by `m`, re-fitting around all eight transformed corners rather than
 /// just the transformed min and max. Transforming only those two produces a wrong,
 /// too-small box under any rotation, because the corners that end up extreme afterward are
 /// not, in general, the images of the corners that were extreme before it.
+/// An empty box transforms to an empty box. Without this guard its sentinel corners --
+/// the largest finite floats -- are multiplied and translated, which overflows to
+/// infinity. That result is worse than merely wrong: expanding a parent by it silently
+/// poisons the parent too, and a scene node with no geometry yet is exactly the case that
+/// produces one.
 [[nodiscard]] constexpr AABB Transformed(const AABB& box, const Mat4& m) {
+    if (IsEmpty(box)) {
+        return AABB::Empty();
+    }
+
     const Vec3 corners[8] = {
         Vec3{box.min.x, box.min.y, box.min.z}, Vec3{box.max.x, box.min.y, box.min.z},
         Vec3{box.min.x, box.max.y, box.min.z}, Vec3{box.max.x, box.max.y, box.min.z},

@@ -108,3 +108,28 @@ TEST_CASE("a transformed AABB still contains the transformed corners") {
         }
     }
 }
+
+TEST_CASE("an empty AABB stays empty and finite under transformation") {
+    // Without a guard, Transformed feeds the sentinel corners of an empty box through the
+    // matrix, and multiplying the largest finite floats overflows to infinity. Expanding a
+    // parent by that result silently poisons the parent -- and a scene node with no
+    // geometry yet is exactly what produces an empty box in the first place.
+    const Monarc::AABB empty = Monarc::AABB::Empty();
+    const Mat4 m = Mat4::Translation(Vec3{5.0f, 0.0f, 0.0f}) * Mat4::RotationZ(0.3f);
+    const Monarc::AABB moved = Transformed(empty, m);
+
+    CHECK(IsEmpty(moved));
+    CHECK_FALSE(Contains(moved, Vec3::Zero()));
+
+    // And it must not contaminate a real box it is folded into.
+    const Monarc::AABB real{Vec3{-1.0f, -1.0f, -1.0f}, Vec3{1.0f, 1.0f, 1.0f}};
+    const Monarc::AABB merged = Expand(real, moved);
+    CHECK(Approx(merged.min, real.min));
+    CHECK(Approx(merged.max, real.max));
+}
+
+TEST_CASE("an empty AABB reports zero extents rather than infinity") {
+    CHECK(Approx(Extents(Monarc::AABB::Empty()), Vec3::Zero()));
+    CHECK(IsEmpty(Monarc::AABB::Empty()));
+    CHECK_FALSE(IsEmpty(Monarc::AABB{Vec3{-1.0f, -1.0f, -1.0f}, Vec3{1.0f, 1.0f, 1.0f}}));
+}
