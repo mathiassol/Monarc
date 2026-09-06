@@ -118,4 +118,4 @@ jobs:
         with:
           python-version: '3.x'
       - name: Check documentation links
-        run: python Tools/check_doc_links.py Docs
+        run: python Tools/check_doc_links.py Docs README.md

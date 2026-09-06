@@ -24,12 +24,12 @@ Confirmed by direct testing on the development machine, not assumed:
 | Component | Version | Notes |
 |---|---|---|
 | Compiler | MSVC 19.51 (toolset 14.51, VS 2026 Community) | Compiles C++23 language features cleanly at `/W4` — verified: deducing `this`, `static operator()`, multidimensional `operator[]`, `if consteval`, `auto(x)`, `[[assume]]`, `std::expected` |
-| Second compiler | Clang 22.1.8 (`clang-cl`, standalone LLVM) | Builds the whole project and full test suite warning-free at `/WX`, output identical to MSVC. **ADR-0003's condition is only partly met**: it requires Clang *in CI*, and no CI exists — the Clang build is run by hand. See [Known gaps](#known-gaps) |
+| Second compiler | Clang 22.1.8 (`clang-cl`, standalone LLVM) | Builds the whole project and test suite warning-free at `/WX`, output identical to MSVC. Runs in CI on every push, which is what [ADR-0003](Architecture/Decisions/ADR-0003-cpp23-baseline.md)'s condition required |
 | Build | CMake 4.2.1 + Ninja 1.13.2 (standalone, on `PATH`) | Presets pin no absolute tool paths, so one set serves this machine, CI, and macOS later |
 | Vulkan | SDK 1.4.357.0 | Found automatically by CMake's `find_package(Vulkan)`. Validation layers, gfxreconstruct, SPIRV-Tools present |
 | Shaders | Slang 2026.13.1 (in the Vulkan SDK), DXC 1.9, glslang | |
 | Windows SDK | 10.0.26100.0 | D3D12 headers present |
-| Other | Python 3.14.7, Node 22.15, .NET 9 + 10 | |
+| Other | Python (see quirks — three interpreters), Node 22.15, .NET 9 + 10 | |
 
 ### Continuous integration
 
@@ -87,11 +87,18 @@ was expected and did not materialise.
   confusing errors. Use `/std:c++latest`, or let CMake's `CXX_STANDARD 23` pick the flag.
 - `core.autocrlf` is `true` on this machine. `.gitattributes` overrides it with
   `text=auto eol=lf` so line-ending behaviour does not depend on developer config.
-- The only `python` on `PATH` is MSYS2's (3.14.7), and it ships **without `pip`**. Both
-  scripts in `Tools/` are therefore written against the standard library alone, and must
-  stay that way — `find_package(Python3)` resolves to this interpreter. A separate CPython
-  3.12 exists under `%LOCALAPPDATA%\Programs\Python` if a script ever genuinely needs a
-  package.
+- **Three Python interpreters are in play, and `python` and `pip` disagree.** `python`
+  resolves to MSYS2's 3.14.7 (`C:\msys64\mingw64\bin` precedes WindowsApps on `PATH`);
+  `pip` resolves to the Microsoft Store 3.11 shim, because MSYS2 ships no `pip.exe`; and
+  CMake's `find_package(Python3)` picks CPython 3.12 under
+  `%LOCALAPPDATA%\Programs\Python`. So `pip install X` followed by
+  `python -c "import X"` fails, and the interpreter running the architecture gates is a
+  third one again.
+
+  Consequence for the project: the scripts in `Tools/` are written against the standard
+  library alone and must stay that way, because which interpreter runs them depends on how
+  they are invoked. If a script ever genuinely needs a package, pin the interpreter
+  explicitly rather than relying on `python`.
 - Ninja 1.13.2 and LLVM's `bin` are on `PATH` as of 2026-09-06, which is what lets
   `CMakePresets.json` pin no absolute tool paths.
 - Windows long paths are **not** enabled (`LongPathsEnabled=0`, `core.longpaths` unset).
