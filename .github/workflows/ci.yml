@@ -32,7 +32,7 @@ jobs:
         preset: [msvc-debug, msvc-release, clang-debug, clang-release]
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Preflight toolchain
         shell: pwsh
@@ -103,7 +103,7 @@ jobs:
       # read. Publishing it makes a graph change visible in the run itself.
       - name: Upload module graph
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: module-graph-${{ matrix.preset }}
           path: Build/${{ matrix.preset }}/module-graph.json
@@ -113,8 +113,8 @@ jobs:
     name: docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.x'
       - name: Check documentation links
