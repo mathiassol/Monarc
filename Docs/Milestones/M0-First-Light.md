@@ -49,7 +49,7 @@ stalling — there is always a working thing, and always a place to redirect.
 |---|---|---|
 | **A1** | Build system, `monarc_module`, architecture gates, Core's memory and diagnostics foundation | A build that enforces the architecture, and a tested `Monarc.Core` — [plan](../Plans/2026-09-05-phase-a1-foundation.md) |
 | **A2a** | `Hash`, `String`, `HashMap` | The vocabulary types the rest of Core is written in — [plan](../Plans/2026-09-06-phase-a2a-strings-and-maps.md) |
-| **A2b** | Math — vectors, matrices, quaternions, transforms | Testable math, needed from A4 onward |
+| **A2b** | Math — vectors, matrices, quaternions, transforms | Testable math with the conventions of [ADR-0015](../Architecture/Decisions/ADR-0015-math-conventions.md) locked in by tests — [plan](../Plans/2026-09-06-phase-a2b-math.md) |
 | **A2c** | Platform — files, paths, time, threads, dynamic libraries, GUID | The OS boundary; the only module permitted platform `#ifdef`s |
 | **A2d** | `Monarc.Jobs` | A parallel job graph with dependencies, under test |
 | **A3** | `RHI`, `RHI.Vulkan`, `Host.Windowed` | A window with a cleared screen, via the RHI directly |
