@@ -129,16 +129,16 @@ TEST_CASE("pointers are hashable") {
 }
 
 TEST_CASE("Hasher can be specialised for a user type") {
-    struct Key { int a; int b; };
-    // Specialisation lives in TestHash.cpp's own namespace scope; see Hash.h's contract.
     CHECK(Hasher<Key>{}(Key{1, 2}) == Hasher<Key>{}(Key{1, 2}));
     CHECK(Hasher<Key>{}(Key{1, 2}) != Hasher<Key>{}(Key{2, 1}));
 }
 ```
 
-> The final case requires a `Hasher<Key>` specialisation. Write it in the test file, above
-> the test cases, in the `Monarc` namespace. That is the point of the case: it proves the
-> customisation point is reachable from outside `Hash.h`.
+> `Key` must be declared at namespace scope above the test cases — in an anonymous
+> namespace, as `TestHashMap.cpp` does with `Collide` — with `template <> struct
+> Monarc::Hasher<Key>` beside it. A type local to a function cannot be specialised for at
+> namespace scope. That case exists to prove the customisation point is reachable from
+> outside `Hash.h`.
 
 - [ ] **Step 2: Build and confirm it fails**
 
@@ -439,8 +439,11 @@ public:
     [[nodiscard]] char*       Data();
     [[nodiscard]] const char* Data() const;
 
-    [[nodiscard]] friend bool operator==(const String& a, const String& b);
-    [[nodiscard]] friend bool operator==(const String& a, StringView b);
+    // No [[nodiscard]] on these two: MSVC accepts it on a friend declaration, clang-cl
+    // rejects it as "an attribute list cannot appear here" in either ordering. Found by
+    // building both, which is what ADR-0003's second compiler is for.
+    friend bool operator==(const String& a, const String& b);
+    friend bool operator==(const String& a, StringView b);
 
 private:
     // Implementer's choice, subject to the tests.
@@ -529,6 +532,11 @@ struct Monarc::Hasher<Collide> {
     u64 operator()(const Collide&) const { return 0; }
 };
 
+// Inside the anonymous namespace, not after it: this operator== must live in Collide's own
+// namespace to be found by ADL from HashMap<Collide, int>'s template code, which is
+// instantiated from namespace Monarc. Declared outside, it compiles under MSVC's lenient
+// two-phase lookup and is rejected by clang-cl -- the third MSVC/Clang divergence this
+// project has found, and the reason ADR-0003 requires the second compiler.
 static bool operator==(const Collide& a, const Collide& b) { return a.v == b.v; }
 
 TEST_CASE("a new map is empty and holds no memory") {
@@ -863,8 +871,11 @@ git commit -m "docs: record Phase A2a complete"
 2. Every build is warning-free (`/WX`).
 3. The four architecture gates still pass.
 4. `Hasher` is demonstrably specialisable from outside `Hash.h`.
-5. The aliasing case (`s.Append(s.View())`) and the colliding-removal case both pass — those
-   are the two that catch the defects this design is most likely to have.
+5. The aliasing cases and the colliding-removal case pass — those catch the defects this
+   design is most likely to have. Note `s.Append(s.View())` on a string that fits inside its
+   capacity does **not** reallocate, so it does not exercise the dangerous path on its own;
+   a second case fills to capacity first, because growth-plus-aliasing is what was a
+   use-after-free in `Array<T>`.
 6. `Docs/Status.md` reflects reality.
 
 ## What A2a deliberately excludes
@@ -876,3 +887,18 @@ git commit -m "docs: record Phase A2a complete"
 - **No `Clone` for `String` or containers.** Copying stays deleted until a caller needs it,
   at which point it should be explicit.
 - **No stable iteration order.** Unspecified and documented as such.
+
+## Added during implementation, beyond this plan
+
+Three tests were added because implementation and review found the specified set left real
+paths uncovered. Recorded so the plan matches what shipped:
+
+- `String`: appending to itself **on the path that reallocates**. The specified aliasing case
+  fits inside its capacity, so it never grows — and growth-plus-aliasing is what was a
+  use-after-free in `Array<T>`.
+- `HashMap`: removal across the **array boundary**, using a key type that homes to the last
+  slot so probe chains wrap immediately. None of the specified tests reach a capacity where
+  insertion wraps, yet wraparound is exactly what a raw-index backward shift gets wrong.
+- `HashMap`: **replacing a key destroys the old value exactly once**, with a lifetime-counting
+  value type. The replace path was otherwise only exercised with `int`, where a leaked or
+  double-destroyed value is invisible.
