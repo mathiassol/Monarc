@@ -1,6 +1,7 @@
 #include <Monarc/Jobs/JobSystem.h>
 
 #include <Monarc/Core/Assert.h>
+#include <Monarc/Core/Platform/Time.h>
 
 #include <cstdlib>
 #include <format>
@@ -43,11 +44,29 @@ JobSystem::JobSystem(IAllocator& allocator, const Config& config)
         std::construct_at(&m_slots[i], allocator);
     }
 
-    m_readyQueue = static_cast<u32*>(
-        m_allocator->Allocate(sizeof(u32) * config.maxJobs, alignof(u32)));
-    MONARC_CHECK(m_readyQueue != nullptr, "JobSystem: failed to allocate the ready queue");
-    if (m_readyQueue == nullptr) {
-        OnResourceExhausted();
+    // One ring buffer per priority, each sized maxJobs -- see ReadyQueue's own comment on
+    // why that many is always enough capacity for any one of the three, even in the worst
+    // case where every ready job in the pool shares one priority.
+    for (ReadyQueue& queue : m_readyQueues) {
+        queue.slots = static_cast<u32*>(
+            m_allocator->Allocate(sizeof(u32) * config.maxJobs, alignof(u32)));
+        MONARC_CHECK(queue.slots != nullptr, "JobSystem: failed to allocate a ready queue");
+        if (queue.slots == nullptr) {
+            OnResourceExhausted();
+        }
+    }
+
+    // Profiling off (the default, profileCapacity == 0) allocates nothing here, which is
+    // half of what makes disabling it free -- see WorkerLoop for the other half (no
+    // timestamp reads either).
+    if (config.profileCapacity > 0) {
+        m_profileRecords = static_cast<JobProfileRecord*>(m_allocator->Allocate(
+            sizeof(JobProfileRecord) * config.profileCapacity, alignof(JobProfileRecord)));
+        MONARC_CHECK(m_profileRecords != nullptr,
+                     "JobSystem: failed to allocate the profile buffer");
+        if (m_profileRecords == nullptr) {
+            OnResourceExhausted();
+        }
     }
 
     m_workers = static_cast<Platform::Thread*>(m_allocator->Allocate(
@@ -60,16 +79,17 @@ JobSystem::JobSystem(IAllocator& allocator, const Config& config)
         std::construct_at(&m_workers[i]);
     }
 
-    // Started only after every slot, the queue and every Thread object already exist:
-    // a worker can start running WorkerLoop the instant Start() returns, and WorkerLoop
-    // reads m_slots/m_readyQueue/m_config immediately.
+    // Started only after every slot, all three ready queues and every Thread object
+    // already exist: a worker can start running WorkerLoop the instant Start() returns,
+    // and WorkerLoop reads m_slots/m_readyQueues/m_config immediately.
     for (u32 i = 0; i < config.workerCount; ++i) {
         char       nameBuffer[32];
         const auto formatted =
             std::format_to_n(nameBuffer, sizeof(nameBuffer) - 1, "Monarc.Jobs.Worker{}", i);
         *formatted.out = '\0';
 
-        const Status started = m_workers[i].Start(StringView(nameBuffer), [this] { WorkerLoop(); });
+        const Status started =
+            m_workers[i].Start(StringView(nameBuffer), [this, i] { WorkerLoop(i); });
         MONARC_CHECK(started.has_value(), "JobSystem: failed to start a worker thread");
         if (!started.has_value()) {
             OnResourceExhausted();
@@ -104,7 +124,16 @@ JobSystem::~JobSystem() {
         std::destroy_at(&m_slots[i]);
     }
     m_allocator->Deallocate(m_slots, sizeof(JobSlot) * m_config.maxJobs, alignof(JobSlot));
-    m_allocator->Deallocate(m_readyQueue, sizeof(u32) * m_config.maxJobs, alignof(u32));
+
+    for (ReadyQueue& queue : m_readyQueues) {
+        m_allocator->Deallocate(queue.slots, sizeof(u32) * m_config.maxJobs, alignof(u32));
+    }
+
+    if (m_profileRecords != nullptr) {
+        m_allocator->Deallocate(m_profileRecords,
+                                sizeof(JobProfileRecord) * m_config.profileCapacity,
+                                alignof(JobProfileRecord));
+    }
 }
 
 void JobSystem::Wait(JobHandle handle) {
@@ -137,13 +166,14 @@ bool JobSystem::IsCompleteLocked(JobHandle handle) const {
     return slot.done;
 }
 
-u32 JobSystem::ClaimSlotLocked(StringView name) {
+u32 JobSystem::ClaimSlotLocked(StringView name, JobPriority priority) {
     for (u32 i = 0; i < m_config.maxJobs; ++i) {
         if (m_slots[i].done) {
             JobSlot& slot = m_slots[i];
             ++slot.generation;
-            slot.done = false;
-            slot.name = name;
+            slot.done     = false;
+            slot.name     = name;
+            slot.priority = priority;
             return i;
         }
     }
@@ -178,21 +208,38 @@ JobHandle JobSystem::ScheduleAfterDependenciesLocked(u32                        
 }
 
 void JobSystem::PushQueueLocked(u32 slotIndex) {
-    MONARC_CHECK(m_queueCount < m_config.maxJobs,
-                 "JobSystem: ready queue overflow -- more ready jobs than pool capacity, "
-                 "which should be impossible since each slot can only be queued once per "
-                 "generation");
-    const usize tail = (m_queueHead + m_queueCount) % m_config.maxJobs;
-    m_readyQueue[tail] = slotIndex;
-    ++m_queueCount;
+    ReadyQueue& queue = m_readyQueues[static_cast<usize>(m_slots[slotIndex].priority)];
+    MONARC_CHECK(queue.count < m_config.maxJobs,
+                 "JobSystem: ready queue overflow -- more ready jobs at one priority than "
+                 "pool capacity, which should be impossible since each slot can only be "
+                 "queued once per generation");
+    const usize tail = (queue.head + queue.count) % m_config.maxJobs;
+    queue.slots[tail] = slotIndex;
+    ++queue.count;
 }
 
 u32 JobSystem::PopQueueLocked() {
-    MONARC_CHECK(m_queueCount > 0, "JobSystem: PopQueueLocked called on an empty queue");
-    const u32 slotIndex = m_readyQueue[m_queueHead];
-    m_queueHead         = (m_queueHead + 1) % m_config.maxJobs;
-    --m_queueCount;
-    return slotIndex;
+    // High before Normal before Low -- see JobPriority's own comment on what "strict
+    // priority" does and does not promise.
+    for (ReadyQueue& queue : m_readyQueues) {
+        if (queue.count > 0) {
+            const u32 slotIndex = queue.slots[queue.head];
+            queue.head          = (queue.head + 1) % m_config.maxJobs;
+            --queue.count;
+            return slotIndex;
+        }
+    }
+    MONARC_CHECK(false, "JobSystem: PopQueueLocked called with every priority queue empty");
+    return kNoSlot;
+}
+
+bool JobSystem::AnyQueuedLocked() const {
+    for (const ReadyQueue& queue : m_readyQueues) {
+        if (queue.count > 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void JobSystem::CompleteSlot(u32 slotIndex) {
@@ -220,17 +267,17 @@ void JobSystem::CompleteSlot(u32 slotIndex) {
     slot.dependents.Clear();
 }
 
-void JobSystem::WorkerLoop() {
+void JobSystem::WorkerLoop(u32 workerIndex) {
     t_isJobWorkerThread = true;
 
     for (;;) {
         u32 slotIndex;
         {
             Platform::ScopedLock lock(m_mutex);
-            while (m_queueCount == 0 && !m_stopping) {
+            while (!AnyQueuedLocked() && !m_stopping) {
                 m_cv.Wait(m_mutex);
             }
-            if (m_queueCount == 0) {
+            if (!AnyQueuedLocked()) {
                 // m_stopping is set only after ~JobSystem has already waited for
                 // m_outstandingCount to reach zero, so nothing can ever be queued again
                 // once we observe both conditions together here -- see the destructor.
@@ -243,15 +290,52 @@ void JobSystem::WorkerLoop() {
         // is true, and it is the entire reason a thread pool is faster than one mutex.
         JobSlot& slot     = m_slots[slotIndex];
         auto*    callable = std::launder(reinterpret_cast<Detail::IJobCallable*>(slot.callableStorage));
+
+        // Reading Config::profileCapacity needs no lock: m_config is written once, by the
+        // constructor, before any worker thread is even started, and never again -- the
+        // same reasoning that already lets WorkerCount() read it unlocked. Skipping both
+        // Time::Ticks() reads below when profiling is off is what makes disabling it
+        // actually free rather than merely unread; what remains is this one
+        // branch-predictor-friendly check, read twice more below.
+        const bool profiling  = m_config.profileCapacity > 0;
+        const u64  startTicks = profiling ? Platform::Time::Ticks() : 0;
         callable->Invoke();
+        const u64 endTicks = profiling ? Platform::Time::Ticks() : 0;
         callable->~IJobCallable();
 
         {
             Platform::ScopedLock lock(m_mutex);
+            if (profiling) {
+                RecordProfileLocked(slot.name, workerIndex, startTicks, endTicks);
+            }
             CompleteSlot(slotIndex);
             m_cv.NotifyAll();
         }
     }
+}
+
+void JobSystem::RecordProfileLocked(StringView name, u32 workerIndex, u64 startTicks,
+                                    u64 endTicks) {
+    MONARC_CHECK(m_config.profileCapacity > 0,
+                "JobSystem: RecordProfileLocked called with profiling disabled");
+    const usize tail        = (m_profileHead + m_profileCount) % m_config.profileCapacity;
+    m_profileRecords[tail]  = JobProfileRecord{name, workerIndex, startTicks, endTicks};
+    if (m_profileCount < m_config.profileCapacity) {
+        ++m_profileCount;
+    } else {
+        // Buffer already full: the entry just overwritten at `tail` (== m_profileHead in
+        // this branch) was the oldest unread record, so the head advances past it too.
+        m_profileHead = (m_profileHead + 1) % m_config.profileCapacity;
+    }
+}
+
+void JobSystem::CollectProfile(Array<JobProfileRecord>& out) {
+    Platform::ScopedLock lock(m_mutex);
+    for (usize i = 0; i < m_profileCount; ++i) {
+        out.Push(m_profileRecords[(m_profileHead + i) % m_config.profileCapacity]);
+    }
+    m_profileHead  = 0;
+    m_profileCount = 0;
 }
 
 }  // namespace Monarc
