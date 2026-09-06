@@ -40,7 +40,7 @@ JobSystem::JobSystem(IAllocator& allocator, const Config& config)
         OnResourceExhausted();
     }
     for (u32 i = 0; i < config.maxJobs; ++i) {
-        std::construct_at(&m_slots[i]);
+        std::construct_at(&m_slots[i], allocator);
     }
 
     m_readyQueue = static_cast<u32*>(
@@ -150,6 +150,33 @@ u32 JobSystem::ClaimSlotLocked(StringView name) {
     return kNoSlot;
 }
 
+JobHandle JobSystem::ScheduleAfterDependenciesLocked(u32                         slotIndex,
+                                                     std::span<const JobHandle> dependencies) {
+    JobSlot& slot = m_slots[slotIndex];
+
+    // Counted, not traversed (see the A2d plan's decisions section): only the count of
+    // still-pending dependencies is tracked here, never a graph walk at schedule time. An
+    // already-complete or stale dependency is satisfied right now and is never registered
+    // as anything -- it will not decrement a count that was never incremented for it,
+    // because there is nothing left for it to ever notify.
+    u32 pending = 0;
+    for (const JobHandle& dependency : dependencies) {
+        if (IsCompleteLocked(dependency)) {
+            continue;
+        }
+        ++pending;
+        m_slots[dependency.index].dependents.Push(slotIndex);
+    }
+    slot.pendingDependencies = pending;
+
+    const JobHandle handle{slotIndex, slot.generation};
+    if (pending == 0) {
+        PushQueueLocked(slotIndex);
+        m_cv.NotifyAll();
+    }
+    return handle;
+}
+
 void JobSystem::PushQueueLocked(u32 slotIndex) {
     MONARC_CHECK(m_queueCount < m_config.maxJobs,
                  "JobSystem: ready queue overflow -- more ready jobs than pool capacity, "
@@ -170,8 +197,27 @@ u32 JobSystem::PopQueueLocked() {
 
 void JobSystem::CompleteSlot(u32 slotIndex) {
     MONARC_CHECK(m_outstandingCount > 0, "JobSystem: outstanding-count underflow");
-    m_slots[slotIndex].done = true;
+    JobSlot& slot = m_slots[slotIndex];
+    slot.done     = true;
     --m_outstandingCount;
+
+    // The dependency graph's other half: wake everything that was waiting on exactly this
+    // slot. Every decrement below happens inside this one m_mutex-held call, so if two
+    // dependencies of the same dependent finish on two different workers, their two
+    // CompleteSlot calls are still strictly ordered by the mutex -- one strictly before the
+    // other -- and only whichever one observes the count reach zero pushes the dependent.
+    // The other observes a still-positive count and does nothing. Neither ordering can
+    // enqueue it twice, and neither can miss enqueueing it.
+    for (const u32 dependentIndex : slot.dependents) {
+        JobSlot& dependent = m_slots[dependentIndex];
+        MONARC_CHECK(dependent.pendingDependencies > 0,
+                     "JobSystem: a dependent's pending-dependency count underflowed");
+        --dependent.pendingDependencies;
+        if (dependent.pendingDependencies == 0) {
+            PushQueueLocked(dependentIndex);
+        }
+    }
+    slot.dependents.Clear();
 }
 
 void JobSystem::WorkerLoop() {
