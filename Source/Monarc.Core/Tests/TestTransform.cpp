@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <Monarc/Core/Math/Bounds.h>
 #include <Monarc/Core/Math/Transform.h>
 
 using Monarc::f32;
@@ -57,4 +58,53 @@ TEST_CASE("Inverse undoes a Transform") {
 
     const Vec3 v{1.0f, 2.0f, 3.0f};
     CHECK(Approx(TransformPoint(ToMat4(Inverse(t)), TransformPoint(ToMat4(t), v)), v));
+}
+
+TEST_CASE("an AABB from points contains them all") {
+    const Vec3 points[] = {Vec3{1.0f, 2.0f, 3.0f}, Vec3{-4.0f, 0.0f, 5.0f},
+                           Vec3{0.0f, -6.0f, 1.0f}};
+    Monarc::AABB box = Monarc::AABB::Empty();
+    for (const Vec3& p : points) { box = Expand(box, p); }
+
+    for (const Vec3& p : points) { CHECK(Contains(box, p)); }
+    CHECK(Approx(box.min, Vec3{-4.0f, -6.0f, 1.0f}));
+    CHECK(Approx(box.max, Vec3{1.0f, 2.0f, 5.0f}));
+}
+
+TEST_CASE("an empty AABB contains nothing and expands correctly") {
+    const Monarc::AABB empty = Monarc::AABB::Empty();
+    CHECK_FALSE(Contains(empty, Vec3::Zero()));
+    const Monarc::AABB one = Expand(empty, Vec3{1.0f, 1.0f, 1.0f});
+    CHECK(Contains(one, Vec3{1.0f, 1.0f, 1.0f}));
+}
+
+TEST_CASE("AABB centre and extents describe the box") {
+    const Monarc::AABB box{Vec3{-1.0f, -2.0f, -3.0f}, Vec3{1.0f, 2.0f, 3.0f}};
+    CHECK(Approx(Center(box), Vec3::Zero()));
+    CHECK(Approx(Extents(box), Vec3{1.0f, 2.0f, 3.0f}));
+}
+
+TEST_CASE("AABBs report overlap correctly") {
+    const Monarc::AABB a{Vec3{0.0f, 0.0f, 0.0f}, Vec3{2.0f, 2.0f, 2.0f}};
+    const Monarc::AABB b{Vec3{1.0f, 1.0f, 1.0f}, Vec3{3.0f, 3.0f, 3.0f}};
+    const Monarc::AABB c{Vec3{5.0f, 5.0f, 5.0f}, Vec3{6.0f, 6.0f, 6.0f}};
+    CHECK(Intersects(a, b));
+    CHECK_FALSE(Intersects(a, c));
+    CHECK(Intersects(a, a));
+}
+
+TEST_CASE("a transformed AABB still contains the transformed corners") {
+    // Transforming a box means transforming all eight corners and re-fitting -- not
+    // transforming min and max, which produces a wrong box under rotation.
+    const Monarc::AABB box{Vec3{-1.0f, -1.0f, -1.0f}, Vec3{1.0f, 1.0f, 1.0f}};
+    const Mat4 m = Mat4::Translation(Vec3{5.0f, 0.0f, 0.0f}) * Mat4::RotationZ(kPi * 0.25f);
+    const Monarc::AABB moved = Transformed(box, m);
+
+    for (f32 x : {-1.0f, 1.0f}) {
+        for (f32 y : {-1.0f, 1.0f}) {
+            for (f32 z : {-1.0f, 1.0f}) {
+                CHECK(Contains(moved, TransformPoint(m, Vec3{x, y, z})));
+            }
+        }
+    }
 }
