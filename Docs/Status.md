@@ -567,12 +567,21 @@ A3 Task 5's checkbox.
 
 ## Verification gates
 
-Four of M0's eleven gates are implemented and running under CTest as
-`Architecture.Gates`: acyclicity (2), renderer package boundary (3), module layout (7), and
-platform containment (10). Gate 3 currently passes vacuously — no tier 2 module exists yet —
-which is the intended state: it will go red the first time the boundary is crossed.
+Five of M0's thirteen gates are implemented and running under CTest as
+`Architecture.Gates`: acyclicity (2), renderer package boundary (3), platform containment
+(10), apps are graph leaves (12), and module layout (13).
+
+**Gate 3 stopped passing vacuously in A3 Task 1.** It had nothing real to forbid until then:
+every include prefix in its list named a module Monarc had not written. `Monarc.RHI` and
+`Monarc.RHI.Vulkan` are now tier 2, `Monarc.Host.Windowed` is the project's first tier 3
+module, and `Monarc/Host/` is in the list — so the gate polices a boundary that two existing
+modules sit either side of, and it was made to fail on purpose before being trusted.
+
+The layout gate was numbered 7 from A1 until A3 Task 1, which collided with M0's own gate 7
+(world-kind parity), so `ctest` printed one rule's name under another's number. M0's table is
+the authority for these numbers and had no row for layout at all; it is 13 in both places now.
 
 The remaining gates need modules that do not exist yet and are added against this same
 harness: export purity (1), cook determinism (4), cook incrementality (5), asset identity
-across rename (6), world-kind parity, export explainability (8), headless purity (9), and
+across rename (6), world-kind parity (7), export explainability (8), headless purity (9), and
 schema migration (11).
