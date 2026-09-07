@@ -481,17 +481,29 @@ and the read went unnoticed. What failed was the test's exact-text comparison. S
 cases compare the whole message rather than searching it for a substring; a `find()` or a
 non-empty check would let the dangling case through on all six presets.
 
-Two produced **compile errors rather than test failures**, and the comments now say that rather
-than claiming a test covers them: two tiers given the same value — `error C2196: case value
-'Monarc::RHI::CapabilityTier::Bindless' already used`, from the `default`-less switch in
-`ToString` — and a direct call to a global entry point under `VK_NO_PROTOTYPES`, which is
-`error C3861: 'vkCreateInstance': identifier not found`. The second is what makes the loader
-decision a property of the build rather than a discipline.
+Three produced **compile errors rather than test failures**, and the comments now say that
+rather than claiming a test covers them: two tiers given the same value — `error C2196: case
+value 'Monarc::RHI::CapabilityTier::Bindless' already used`, from the `default`-less switch in
+`ToString`; a direct call to a global entry point under `VK_NO_PROTOTYPES`, which is
+`error C3861: 'vkCreateInstance': identifier not found`, and is what makes the loader decision
+a property of the build rather than a discipline; and `VulkanBackend backend;`, which is
+`error C2512: 'Monarc::RHI::VulkanBackend': no appropriate default constructor available` — the
+factory is the only way to come by one.
+
+**One header comment was wrong about the code it sat on, and measurement is what caught it.**
+`Loader`'s move is defaulted, and the class comment was written to say that a moved-from Loader
+is a closed one with every table null. It is not: `Platform::Library`'s move nulls the source's
+module handle, but the three entry-point tables are trivially copyable, so the defaulted move
+*copies* them and the source keeps the pointers. Observed — `IsOpen()` false while
+`Global().vkCreateInstance` is still non-null — and the comment now says that, with an
+assertion in the device suite pinning it. `IsOpen()` is the query that separates the two
+states; nothing in Monarc reads a table off a Loader it has moved from, so the move is left
+defaulted rather than hand-written to clear them.
 
 - Green on all six presets: 9 CTest entries each, including the device tests actually running
   against this machine's two adapters
 - 57 device-free doctest cases and 304 assertions across `Monarc.RHI.Tests` (34 cases, 217
-  assertions) and `Monarc.RHI.Vulkan.Tests` (23 / 87), plus 12 device-required cases and 56
+  assertions) and `Monarc.RHI.Vulkan.Tests` (23 / 87), plus 12 device-required cases and 57
   assertions — that last number scales with how many adapters a machine has
 - **Where those numbers moved, and why.** `VulkanBackend` is a factory, so a backend exists
   only if it came up: move construction, move assignment, `Shutdown` and the accessors'

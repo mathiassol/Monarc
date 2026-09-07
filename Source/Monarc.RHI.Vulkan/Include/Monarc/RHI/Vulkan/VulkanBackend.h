@@ -57,8 +57,10 @@ namespace Monarc::RHI {
 /// Move-only and non-copyable: it owns resources that must be released exactly once. There is
 /// no default constructor -- unlike `Platform::Library`, whose storage is one inline handle, a
 /// backend owns a heap allocation, so a default-constructed one would be a permanently dead
-/// object rather than a cheap closed handle. A backend that has been moved from is that dead
-/// object, and every query below answers on one rather than dereferencing.
+/// object rather than a cheap closed handle. `VulkanBackend backend;` is
+/// `error C2512: 'Monarc::RHI::VulkanBackend': no appropriate default constructor available`,
+/// verified by writing one. A backend that has been moved from *is* that dead object, and
+/// every query below answers on one rather than dereferencing.
 class VulkanBackend {
 public:
     struct Config {

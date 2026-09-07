@@ -91,8 +91,18 @@ struct DebugUtilsFunctions {
 /// Default-constructible and closed, with a static `Open` returning a `Result<Loader>`, a
 /// `Close` safe to call unconditionally, and an `IsOpen` query: the shape
 /// `Platform::Library` uses, one rung up, and for the same reason -- it owns an OS resource
-/// that must be released exactly once. Move-only, non-copyable. A moved-from Loader is a
-/// closed one: `IsOpen()` is false, every table is null, and `Close` on it does nothing.
+/// that must be released exactly once. Move-only, non-copyable.
+///
+/// **A moved-from Loader is not the same thing as a closed one, and `IsOpen()` is the query
+/// that tells them apart.** `IsOpen()` on one is false, because `Platform::Library`'s move
+/// nulls the source's module handle -- but the three tables are trivially copyable, so the
+/// defaulted move *copies* them and the source is left holding the same entry-point pointers
+/// the destination now uses. Measured, not assumed: after a move, the source reports
+/// `IsOpen() == false` while `Global().vkCreateInstance` is still non-null. Those pointers
+/// stay callable only for as long as the destination keeps the module mapped, which is why
+/// nothing may be called through a Loader without asking `IsOpen()` first. `Close()` on a
+/// moved-from Loader is therefore not a no-op: it clears the stale tables, and unloading
+/// nothing is the part that does nothing.
 class Loader {
 public:
     Loader()  = default;
@@ -101,9 +111,12 @@ public:
     Loader(const Loader&)            = delete;
     Loader& operator=(const Loader&) = delete;
 
-    // Defaulted rather than written out: Platform::Library's own move transfers the module
-    // handle and nulls the source, and the three tables are trivially copyable. There is
-    // nothing a hand-written move would do differently.
+    // Defaulted rather than written out. Platform::Library's own move transfers the module
+    // handle and nulls the source, which is the half that matters; the tables are copied
+    // rather than cleared, and the class comment above says what that leaves behind. A
+    // hand-written move that also nulled the source's tables would make the moved-from state
+    // identical to the closed one -- worth doing when something needs it, and unclaimed until
+    // then, because nothing in Monarc reads a table off a Loader it has moved from.
     Loader(Loader&&)            = default;
     Loader& operator=(Loader&&) = default;
 

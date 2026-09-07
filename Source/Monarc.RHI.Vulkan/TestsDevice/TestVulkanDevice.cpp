@@ -284,6 +284,13 @@ TEST_CASE("a loader that is open transfers on move and leaves the source closed"
     // The source must not still hold the module. If it did, both would call FreeLibrary on it
     // and the second call would be releasing a reference nobody owns.
     CHECK_FALSE(source->IsOpen());
+
+    // And the source's *tables* are not cleared, which is the half of the moved-from state
+    // that is easy to assume wrongly: the three tables are trivially copyable, so the
+    // defaulted move copies them. Asserted rather than left to a comment, because Loader.h
+    // now says so -- and because if a hand-written move ever nulls them, this line is what
+    // says the class comment needs updating with it.
+    CHECK(source->Global().vkCreateInstance != nullptr);
 }
 
 TEST_CASE("opening a library that is not the Vulkan loader still fails on a machine that has one") {
