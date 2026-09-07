@@ -520,6 +520,19 @@ TEST_CASE("texture and buffer usages translate to the Vulkan bits with the same 
     // The mask the readback's texture is created with.
     CHECK(ToVulkan(TextureUsage::ColorAttachment | TextureUsage::TransferSource) ==
           (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
+
+    // **A bit no enumerator names translates to zero, which is the opposite of what a stage
+    // does**, and Translate.h argues the asymmetry rather than leaving it to be noticed: a
+    // dropped usage is caught by validation at the resource's first use -- an image with no
+    // TRANSFER_SRC_BIT is `VUID-VkCopyImageToBufferInfo2-srcImage-00186` -- where a dropped
+    // stage would be a synchronisation hole nothing reports. Nothing pinned this, and the two
+    // fallbacks returning `VK_IMAGE_USAGE_STORAGE_BIT` instead left both suites green.
+    CHECK(ToVulkanBit(static_cast<TextureUsage>(kUnnamedBit)) == 0);
+    CHECK(ToVulkanBit(static_cast<BufferUsage>(kUnnamedBit)) == 0);
+
+    // And through the mask walk, so an unnamed bit does not cost the named ones beside it.
+    CHECK(ToVulkan(TextureUsage::TransferSource | static_cast<TextureUsage>(kUnnamedBit)) ==
+          VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
 }
 
 TEST_CASE("load and store operations translate to the Vulkan ones with the same meaning") {
@@ -623,4 +636,26 @@ TEST_CASE("a device with no suitable memory type reports so rather than picking 
     // rather than the properties happening not to match.
     const VkPhysicalDeviceMemoryProperties none = MemoryLayout({});
     CHECK(FindMemoryType(none, kAnyType, kDeviceLocal) == kNoMemoryType);
+}
+
+TEST_CASE("a memory location no enumerator names matches no type rather than the first one") {
+    // `ToVulkan(MemoryLocation)`'s fallback carries a five-line argument for why it is
+    // `VK_MEMORY_PROPERTY_FLAG_BITS_MAX_ENUM` and not zero, and nothing pinned it: changing it
+    // to zero left all three suites green. Asserted here as the *consequence* rather than as
+    // the constant, because the consequence is what the argument is about.
+    CHECK(ToVulkan(static_cast<MemoryLocation>(99)) == VK_MEMORY_PROPERTY_FLAG_BITS_MAX_ENUM);
+
+    const VkPhysicalDeviceMemoryProperties properties =
+        MemoryLayout({kDeviceLocal, kHostCoherent});
+
+    // No memory type has every property bit, so the fallback matches nothing and `AllocateFor`
+    // turns that into ErrorCode::Unsupported.
+    CHECK(FindMemoryType(properties, kAnyType, ToVulkan(static_cast<MemoryLocation>(99))) ==
+          kNoMemoryType);
+
+    // Zero is what the fallback deliberately is not, and this is why: a required mask of zero
+    // is a subset of every type's properties, so it matches index 0 -- device-local memory on
+    // the layout above. A HostVisible request answered that way fails at vkMapMemory instead,
+    // a long way from the value that caused it.
+    CHECK(FindMemoryType(properties, kAnyType, 0) == 0);
 }
