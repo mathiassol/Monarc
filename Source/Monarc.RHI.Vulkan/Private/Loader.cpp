@@ -128,12 +128,22 @@ Status Loader::LoadInstanceFunctions(VkInstance instance, bool debugUtilsEnabled
                    "Loader::LoadInstanceFunctions called with a null VkInstance");
     }
 
+    // `m_instance = InstanceFunctions{}` before the early return, so this function keeps the
+    // promise Open's comment above makes: nothing partially resolved survives it. Without it a
+    // failure part-way through the list leaves a table half full of live pointers on an object
+    // whose IsOpen() is still true -- and vkDestroyInstance is *first* in the list, so the
+    // half-populated table the caller is most likely to reach is the one missing the entry
+    // point its own teardown needs. Measured: with vkDestroyInstance forced null on a machine
+    // that has Vulkan, `FirstLight --adapters` exited 0xC0000005, a call through a null
+    // function pointer from VulkanBackend::State::Shutdown. Fixed on both sides -- the call
+    // site is guarded too -- because the two files are maintained independently.
 #define MONARC_VK_RESOLVE_INSTANCE(name)                                                    \
     m_instance.name = reinterpret_cast<PFN_##name>(m_getInstanceProcAddr(instance, #name)); \
     if (m_instance.name == nullptr) {                                                       \
         MONARC_LOG(VulkanLoader, Warning,                                                   \
                    "vkGetInstanceProcAddr returned null for " #name " on a created "        \
                    "instance");                                                             \
+        m_instance = InstanceFunctions{};                                                    \
         return Err(ErrorCode::NotFound,                                                     \
                    "vkGetInstanceProcAddr returned null for " #name                         \
                    " on a created instance: this Vulkan implementation does not provide an " \

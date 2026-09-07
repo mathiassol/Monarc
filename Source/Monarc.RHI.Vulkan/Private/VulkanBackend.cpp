@@ -480,11 +480,30 @@ void VulkanBackend::State::Shutdown() {
     // still alive is itself a validation error ("all child objects must have been destroyed"),
     // and unloading vulkan-1.dll before either would unmap the code that does the destroying.
     if (messenger != VK_NULL_HANDLE) {
+        // No null check on this one, and it does not need the guard below: `messenger` is only
+        // ever set after `loader.HasDebugUtilsFunctions()` came back true, which is exactly
+        // "both of these resolved", and nothing between there and here can null them.
         loader.DebugUtils().vkDestroyDebugUtilsMessengerEXT(instance, messenger, nullptr);
         messenger = VK_NULL_HANDLE;
     }
     if (instance != VK_NULL_HANDLE) {
-        loader.Instance().vkDestroyInstance(instance, nullptr);
+        // **Guarded, because this pair can genuinely disagree.** BringUp creates the instance
+        // and *then* resolves the instance table, so a LoadInstanceFunctions that fails --
+        // vkDestroyInstance is the first name in MONARC_VK_INSTANCE_FUNCTIONS -- returns with
+        // an instance to destroy and no entry point to destroy it with. Create's failure path
+        // calls this. Measured: without the guard, and with vkDestroyInstance forced null on
+        // a machine that has Vulkan, `FirstLight --adapters` exited 0xC0000005.
+        //
+        // Leaking the instance is all that is left to do about it, and it is the right thing:
+        // the alternative is the crash above, and the process is on its way out through a
+        // failed Create in the only way to reach here.
+        if (loader.Instance().vkDestroyInstance != nullptr) {
+            loader.Instance().vkDestroyInstance(instance, nullptr);
+        } else {
+            MONARC_LOG(Vulkan, Error,
+                       "the Vulkan instance cannot be destroyed: vkDestroyInstance never "
+                       "resolved, so it is leaked until the process exits");
+        }
         instance = VK_NULL_HANDLE;
     }
     loader.Close();
