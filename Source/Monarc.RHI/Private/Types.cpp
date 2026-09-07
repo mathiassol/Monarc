@@ -3,9 +3,13 @@
 namespace Monarc::RHI {
 
 // Both switches below are deliberately `default`-less. Adding an enumerator to Format then
-// becomes a compile error here -- MSVC C4062, Clang -Wswitch, both fatal at /W4 /WX -- rather
-// than a silent fall-through to the trailing return, which is exactly the shape a format
-// table needs. The trailing return still has to exist: Format has a fixed underlying type,
+// becomes a compile error here rather than a silent fall-through to the trailing return,
+// which is exactly the shape a format table needs. The two compilers get there differently:
+// Clang's -Wswitch is on at /W4, while MSVC's C4062 is off by default and /W4 does not enable
+// it, so CMake/MonarcTargetOptions.cmake passes /w44062 to ask for it by name. /WX makes both
+// fatal. Without that flag this comment would be half true, which is worse than absent.
+//
+// The trailing return still has to exist: Format has a fixed underlying type,
 // so it can hold a value outside its enumerator set, and no switch can be exhaustive at run
 // time however complete it is at compile time.
 
