@@ -251,6 +251,48 @@ struct VulkanBackend::State {
         return Err(Detail::ToErrorCode(result), Detail::ToString(result));
     }
 
+    /// Runs Vulkan's count-then-fill enumeration idiom and leaves the result in `out`.
+    ///
+    /// `enumerate(u32* count, T* data)` is called twice: once with a null `data` to learn the
+    /// count, then with storage for it. `operation` names the entry point in a failure
+    /// message and in the truncation warning, and must be a literal -- `Error::message` is a
+    /// non-owning view, so nothing on this path formats a string.
+    ///
+    /// **This exists because there were four near-identical copies of it and two of them
+    /// silently dropped VK_INCOMPLETE.** VK_INCOMPLETE on the second call means more elements
+    /// appeared between the two, which no amount of retrying can rule out: `*count` is then
+    /// what was actually written, so the honest response is to keep those and say so rather
+    /// than loop. Two of the four said so and two did not, and the difference was invisible.
+    /// Saying it once here means the next enumeration -- Tasks 3 and 4 add queue-family,
+    /// surface-format and present-mode -- gets it by construction rather than by someone
+    /// remembering.
+    template <typename T, typename Enumerate>
+    [[nodiscard]] Status EnumerateInto(const char* operation, Array<T>& out,
+                                       Enumerate enumerate) {
+        u32 count = 0;
+        if (const VkResult counted = enumerate(&count, nullptr); counted != VK_SUCCESS) {
+            return FailVk(operation, counted, " (count)");
+        }
+
+        ResizeTo(out, count);
+        if (count == 0) {
+            return {};
+        }
+
+        const VkResult filled = enumerate(&count, out.Data());
+        if (filled != VK_SUCCESS && filled != VK_INCOMPLETE) {
+            return FailVk(operation, filled);
+        }
+        if (filled == VK_INCOMPLETE) {
+            MONARC_LOG(Vulkan, Warning,
+                       "{} reported more elements than it returned; continuing with the {} it "
+                       "wrote",
+                       operation, count);
+        }
+        ShrinkTo(out, count);
+        return {};
+    }
+
     [[nodiscard]] Status BringUp(const Config& config);
     void                 Shutdown();
 
@@ -489,111 +531,51 @@ void VulkanBackend::State::Shutdown() {
     validationLayerEnabled = false;
 }
 
+// The four enumerations below are `EnumerateInto` plus the two lines that say which entry
+// point to call. Each was ~20 lines of count-then-fill before, and two of the four dropped
+// VK_INCOMPLETE without a word -- see EnumerateInto's own comment.
+
 Status VulkanBackend::State::QueryInstanceExtensions(Array<VkExtensionProperties>& out) {
-    u32 count = 0;
-    if (const VkResult result = loader.Global().vkEnumerateInstanceExtensionProperties(
-            nullptr, &count, nullptr);
-        result != VK_SUCCESS) {
-        return FailVk("vkEnumerateInstanceExtensionProperties (count)", result);
-    }
-
-    ResizeTo(out, count);
-    if (count == 0) {
-        return {};
-    }
-
-    // VK_INCOMPLETE here means more extensions appeared between the two calls, which no amount
-    // of retrying can rule out. `count` is then what was actually written, so the honest
-    // response is to keep those and say so rather than loop.
-    const VkResult result =
-        loader.Global().vkEnumerateInstanceExtensionProperties(nullptr, &count, out.Data());
-    if (result != VK_SUCCESS && result != VK_INCOMPLETE) {
-        return FailVk("vkEnumerateInstanceExtensionProperties", result);
-    }
-    if (result == VK_INCOMPLETE) {
-        MONARC_LOG(Vulkan, Warning,
-                   "vkEnumerateInstanceExtensionProperties reported more extensions than it "
-                   "returned; continuing with the {} it wrote",
-                   count);
-    }
-    ShrinkTo(out, count);
-    return {};
+    return EnumerateInto("vkEnumerateInstanceExtensionProperties", out,
+                         [this](u32* count, VkExtensionProperties* data) {
+                             return loader.Global().vkEnumerateInstanceExtensionProperties(
+                                 nullptr, count, data);
+                         });
 }
 
 Status VulkanBackend::State::QueryInstanceLayers(Array<VkLayerProperties>& out) {
-    u32 count = 0;
-    if (const VkResult result = loader.Global().vkEnumerateInstanceLayerProperties(&count,
-                                                                                   nullptr);
-        result != VK_SUCCESS) {
-        return FailVk("vkEnumerateInstanceLayerProperties (count)", result);
-    }
-
-    ResizeTo(out, count);
-    if (count == 0) {
-        return {};
-    }
-
-    const VkResult result =
-        loader.Global().vkEnumerateInstanceLayerProperties(&count, out.Data());
-    if (result != VK_SUCCESS && result != VK_INCOMPLETE) {
-        return FailVk("vkEnumerateInstanceLayerProperties", result);
-    }
-    ShrinkTo(out, count);
-    return {};
+    return EnumerateInto("vkEnumerateInstanceLayerProperties", out,
+                         [this](u32* count, VkLayerProperties* data) {
+                             return loader.Global().vkEnumerateInstanceLayerProperties(count,
+                                                                                       data);
+                         });
 }
 
 Status VulkanBackend::State::QueryDeviceExtensions(VkPhysicalDevice              device,
                                                    Array<VkExtensionProperties>& out) {
-    const Detail::InstanceFunctions& fns = loader.Instance();
-
-    u32 count = 0;
-    if (const VkResult result =
-            fns.vkEnumerateDeviceExtensionProperties(device, nullptr, &count, nullptr);
-        result != VK_SUCCESS) {
-        return FailVk("vkEnumerateDeviceExtensionProperties (count)", result);
-    }
-
-    ResizeTo(out, count);
-    if (count == 0) {
-        return {};
-    }
-
-    const VkResult result =
-        fns.vkEnumerateDeviceExtensionProperties(device, nullptr, &count, out.Data());
-    if (result != VK_SUCCESS && result != VK_INCOMPLETE) {
-        return FailVk("vkEnumerateDeviceExtensionProperties", result);
-    }
-    ShrinkTo(out, count);
-    return {};
+    return EnumerateInto("vkEnumerateDeviceExtensionProperties", out,
+                         [this, device](u32* count, VkExtensionProperties* data) {
+                             return loader.Instance().vkEnumerateDeviceExtensionProperties(
+                                 device, nullptr, count, data);
+                         });
 }
 
 Status VulkanBackend::State::EnumerateRaw(Array<AdapterInfo>& out) {
-    const Detail::InstanceFunctions& fns = loader.Instance();
-
-    u32 count = 0;
-    if (const VkResult result = fns.vkEnumeratePhysicalDevices(instance, &count, nullptr);
-        result != VK_SUCCESS) {
-        return FailVk("vkEnumeratePhysicalDevices (count)", result);
-    }
-    if (count == 0) {
-        // Not an error. A loader with no ICD registered behind it is exactly what a CI runner
-        // looks like, and "there are no devices" is a true answer to the question asked.
-        return {};
-    }
-
     Array<VkPhysicalDevice> devices(allocator);
-    ResizeTo(devices, count);
-    const VkResult result = fns.vkEnumeratePhysicalDevices(instance, &count, devices.Data());
-    if (result != VK_SUCCESS && result != VK_INCOMPLETE) {
-        return FailVk("vkEnumeratePhysicalDevices", result);
-    }
-    if (result == VK_INCOMPLETE) {
-        MONARC_LOG(Vulkan, Warning,
-                   "vkEnumeratePhysicalDevices reported more devices than it returned; "
-                   "continuing with the {} it wrote",
-                   count);
+    if (Status enumerated =
+            EnumerateInto("vkEnumeratePhysicalDevices", devices,
+                          [this](u32* count, VkPhysicalDevice* data) {
+                              return loader.Instance().vkEnumeratePhysicalDevices(instance,
+                                                                                  count, data);
+                          });
+        !enumerated) {
+        return enumerated;
     }
 
+    // An empty list is not an error, and the loop below simply does not run. A loader with no
+    // ICD registered behind it is exactly what a CI runner looks like, and "there are no
+    // devices" is a true answer to the question asked.
+    const u32 count = static_cast<u32>(devices.Size());
     out.Reserve(count);
     for (u32 i = 0; i < count; ++i) {
         AdapterInfo info{};

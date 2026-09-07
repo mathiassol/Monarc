@@ -4,35 +4,17 @@
 #include <Monarc/Core/Platform/Library.h>
 
 #include <Loader.h>
+#include <LoaderTables.h>
 
 #include <string_view>
 
+using Monarc::RHI::Detail::AllTablesEmpty;
 using Monarc::RHI::Detail::Loader;
 
 namespace {
 
 /// A library name no machine can resolve.
 constexpr const char* kNoSuchLibrary = "monarc_no_such_vulkan_runtime.dll";
-
-/// True when every entry point in every table is null.
-///
-/// Written out rather than trusting Loader::IsOpen, because "not open" and "holding stale
-/// pointers into an unmapped module" are exactly the two states a Close has to keep apart --
-/// and a table that kept its pointers would turn the next call into a jump into freed address
-/// space rather than a null dereference.
-[[nodiscard]] bool AllTablesEmpty(const Loader& loader) {
-    bool empty = true;
-#define MONARC_VK_CHECK_NULL(name) empty = empty && loader.Global().name == nullptr;
-    MONARC_VK_GLOBAL_FUNCTIONS(MONARC_VK_CHECK_NULL)
-#undef MONARC_VK_CHECK_NULL
-#define MONARC_VK_CHECK_NULL(name) empty = empty && loader.Instance().name == nullptr;
-    MONARC_VK_INSTANCE_FUNCTIONS(MONARC_VK_CHECK_NULL)
-#undef MONARC_VK_CHECK_NULL
-#define MONARC_VK_CHECK_NULL(name) empty = empty && loader.DebugUtils().name == nullptr;
-    MONARC_VK_DEBUG_UTILS_FUNCTIONS(MONARC_VK_CHECK_NULL)
-#undef MONARC_VK_CHECK_NULL
-    return empty;
-}
 
 }  // namespace
 

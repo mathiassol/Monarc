@@ -168,18 +168,18 @@ TEST_CASE("a device missing one baseline requirement never reaches Baseline") {
 
 TEST_CASE("a device missing one bindless requirement stops at Baseline") {
     SUBCASE("no non-uniform indexing") {
-        Capabilities capabilities     = Everything();
+        Capabilities capabilities       = Everything();
         capabilities.nonUniformIndexing = false;
         CHECK(DetermineTier(capabilities) == CapabilityTier::Baseline);
         CHECK_FALSE(MeetsTier(capabilities, CapabilityTier::Bindless));
     }
     SUBCASE("no runtime descriptor array") {
-        Capabilities capabilities         = Everything();
+        Capabilities capabilities           = Everything();
         capabilities.runtimeDescriptorArray = false;
         CHECK(DetermineTier(capabilities) == CapabilityTier::Baseline);
     }
     SUBCASE("no partially bound descriptors") {
-        Capabilities capabilities            = Everything();
+        Capabilities capabilities              = Everything();
         capabilities.partiallyBoundDescriptors = false;
         CHECK(DetermineTier(capabilities) == CapabilityTier::Baseline);
     }

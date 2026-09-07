@@ -8,8 +8,10 @@
 #include <VulkanPlatform.h>
 #include <vulkan/vulkan.h>
 
-#include <string_view>
-#include <utility>
+// No <string_view> and no <utility>. Nothing here is a std::string_view -- `StringView` comes
+// from Monarc/Core/Containers/String.h above -- and nothing here moves, exchanges or forwards;
+// the only mention of std::move in this file is inside a comment, and Loader.cpp includes
+// <utility> for its own use.
 
 namespace Monarc::RHI::Detail {
 

@@ -57,6 +57,15 @@ include(MonarcModule)
 # Monarc.RHI.Vulkan opens vulkan-1.dll itself through Platform::Library and resolves every
 # entry point through vkGetInstanceProcAddr, which is also why it compiles with
 # VK_NO_PROTOTYPES -- see Source/Monarc.RHI.Vulkan/CMakeLists.txt.
+#
+# **This block is why the four Clang presets pin CMAKE_C_COMPILER.** Monarc's own project()
+# says LANGUAGES CXX, but Vulkan-Headers says project(VULKAN_HEADERS LANGUAGES C CXX), so
+# fetching it enables C for the whole build. With CMAKE_CXX_COMPILER pinned to clang-cl and
+# CMAKE_C_COMPILER unset, CMake then picks plain `clang` for the C compiler and compiler
+# detection fails on the MSVC-style flags it is handed:
+# `clang: error: no such file or directory: '/DWIN32'`. CMakePresets.json cannot say this --
+# JSON has no comments -- so it is said here, beside the dependency that created the
+# requirement. Docs/Status.md's "Known gaps" carries the same note at length.
 FetchContent_Declare(VulkanHeaders
     GIT_REPOSITORY https://github.com/KhronosGroup/Vulkan-Headers.git
     GIT_TAG        vulkan-sdk-1.4.357.0

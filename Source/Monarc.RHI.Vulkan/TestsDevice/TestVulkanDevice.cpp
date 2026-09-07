@@ -33,9 +33,12 @@
 #include <Monarc/RHI/Vulkan/VulkanBackend.h>
 
 #include <Loader.h>
+#include <LoaderTables.h>
 
 #include <string_view>
 #include <utility>
+
+using Monarc::RHI::Detail::AllTablesEmpty;
 
 namespace {
 
@@ -67,27 +70,6 @@ Monarc::Array<Monarc::RHI::AdapterInfo>* g_rawAdapters = nullptr;
 [[nodiscard]] const Monarc::Array<Monarc::RHI::AdapterInfo>& Adapters() { return *g_adapters; }
 [[nodiscard]] const Monarc::Array<Monarc::RHI::AdapterInfo>& RawAdapters() {
     return *g_rawAdapters;
-}
-
-/// True when every entry in every one of the loader's three tables is null.
-///
-/// The same helper Tests/TestVulkanLoader.cpp carries, duplicated rather than shared: these
-/// are two separate binaries, and the device-free one can only ever call it on a Loader that
-/// was never open. Written out through the X-macros rather than checking IsOpen(), because
-/// "closed" and "holding pointers into a module it no longer owns" are exactly the two states
-/// this asserts are the same state.
-[[nodiscard]] bool AllTablesEmpty(const Monarc::RHI::Detail::Loader& loader) {
-    bool empty = true;
-#define MONARC_VK_CHECK_NULL(name) empty = empty && loader.Global().name == nullptr;
-    MONARC_VK_GLOBAL_FUNCTIONS(MONARC_VK_CHECK_NULL)
-#undef MONARC_VK_CHECK_NULL
-#define MONARC_VK_CHECK_NULL(name) empty = empty && loader.Instance().name == nullptr;
-    MONARC_VK_INSTANCE_FUNCTIONS(MONARC_VK_CHECK_NULL)
-#undef MONARC_VK_CHECK_NULL
-#define MONARC_VK_CHECK_NULL(name) empty = empty && loader.DebugUtils().name == nullptr;
-    MONARC_VK_DEBUG_UTILS_FUNCTIONS(MONARC_VK_CHECK_NULL)
-#undef MONARC_VK_CHECK_NULL
-    return empty;
 }
 
 void ReportAdapter(const char* label, Monarc::usize index,

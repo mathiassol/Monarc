@@ -171,13 +171,21 @@ int main(int argc, char** argv) {
                Monarc::RHI::ToString(kSurfaceFormat),
                Monarc::RHI::BytesPerPixel(kSurfaceFormat));
 
-    // Both numbers in the summary below are counted here rather than one of them being
-    // written into the message. Tasks 2 through 4 turn these steps green one at a time and
-    // Task 5 adds more, and a hardcoded total is the kind of thing that survives that as
-    // "1 of 2" long after there are three. The steps stay written out one per block, each
-    // with its result type spelled in full, because being a visible call into the module it
-    // names is this app's whole job -- see the file comment.
+    // Every number in the summary below is counted here rather than written into the message.
+    // Tasks 2 through 4 turn these steps green one at a time and Task 5 adds more, and a
+    // hardcoded total is the kind of thing that survives that as "1 of 2" long after there
+    // are three. The steps stay written out one per block, each with its result type spelled
+    // in full, because being a visible call into the module it names is this app's whole job
+    // -- see the file comment.
+    //
+    // **Three counters, not two, because "failed" and "not written yet" are different
+    // findings and this printed the wrong one.** `unimplemented` used to be incremented on
+    // any failure, so a machine with no Vulkan runtime got "2 of 2 steps are not implemented
+    // yet" -- while Task 2's backend *is* implemented and had simply found nothing. Which
+    // bucket a step falls in is a property of the step and not of its error, so each block
+    // below picks its own: the backend is written and can fail, and the window is Task 4's.
     int steps         = 0;
+    int failed        = 0;
     int unimplemented = 0;
 
     Monarc::SystemAllocator allocator;
@@ -188,8 +196,11 @@ int main(int argc, char** argv) {
     if (const Monarc::Result<Monarc::RHI::VulkanBackend> backend =
             Monarc::RHI::VulkanBackend::Create(allocator, backendConfig);
         !backend) {
+        // `failed`, not `unimplemented`: this step is written. On this machine it comes up; on
+        // one with no `vulkan-1.dll` or no registered ICD it does not, and that is a fact
+        // about the machine rather than about the repository.
         Report("Vulkan backend", backend.error());
-        ++unimplemented;
+        ++failed;
     } else {
         const Monarc::RHI::ApiVersion instance = backend->InstanceApiVersion();
         MONARC_LOG(FirstLight, Info,
@@ -204,14 +215,17 @@ int main(int argc, char** argv) {
     if (const Monarc::Result<Monarc::Host::Window> window =
             Monarc::Host::Window::Create(kWindow);
         !window) {
+        // `unimplemented`: the window arrives in Task 4. This is the step the non-zero exit
+        // below is actually about.
         Report("window", window.error());
         ++unimplemented;
     }
 
-    if (unimplemented != 0) {
+    if (failed != 0 || unimplemented != 0) {
         MONARC_LOG(FirstLight, Error,
-                   "first light is not lit: {} of {} steps are not implemented yet",
-                   unimplemented, steps);
+                   "first light is not lit: of {} steps, {} failed and {} are not implemented "
+                   "yet",
+                   steps, failed, unimplemented);
         return 1;
     }
 
