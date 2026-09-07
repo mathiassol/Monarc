@@ -43,6 +43,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <new>
 #include <span>
 #include <string_view>
@@ -329,10 +330,22 @@ Status VulkanBackend::State::BringUp(const Config& config) {
     // after vkCreateInstance, so an instance that had not asked for these would have to be
     // torn down and rebuilt the moment Task 4 opened a window -- and a Vulkan implementation
     // that cannot present is not one Monarc can render with anyway.
-    const char* enabledExtensions[3]   = {};
-    u32         enabledExtensionCount  = 0;
     const char* const requiredExtensions[] = {VK_KHR_SURFACE_EXTENSION_NAME,
                                               Detail::PlatformSurfaceExtensionName()};
+
+    // Sized from requiredExtensions, plus one slot for the VK_EXT_debug_utils name pushed
+    // below when validation is available -- the only instance extension here that is asked
+    // for conditionally.
+    //
+    // **Derived rather than the `[3]` this used to be, and the difference is memory
+    // corruption.** Both `enabledExtensionCount++` sites below are unchecked, and a
+    // hand-written size has nothing tying it to the list two lines up. Measured: with `[3]`
+    // and a third entry in requiredExtensions, clang-asan reported
+    // `stack-buffer-overflow ... [304, 328) 'enabledExtensions' <== Memory access at offset
+    // 328 overflows this variable`, WRITE of size 8, at the debug-utils push -- and the whole
+    // matrix had compiled at /W4 /WX without a word. Derived, the same edit grows the array.
+    const char* enabledExtensions[std::size(requiredExtensions) + 1] = {};
+    u32         enabledExtensionCount                                = 0;
     for (const char* name : requiredExtensions) {
         if (!ContainsExtension(availableExtensions, name)) {
             MONARC_LOG(Vulkan, Warning,
@@ -379,11 +392,12 @@ Status VulkanBackend::State::BringUp(const Config& config) {
         }
     }
 
-    const char* enabledLayers[1]  = {};
-    u32         enabledLayerCount = 0;
-    if (validationLayerEnabled) {
-        enabledLayers[enabledLayerCount++] = kValidationLayerName;
-    }
+    // One layer, so there is no array to fill and no counter to increment past the end: the
+    // array *is* its initialiser, and the count is 1 or 0 to select it or ignore it. A second
+    // layer turns this back into something built at run time, at which point it gets
+    // requiredExtensions' treatment above rather than a hand-written size of its own.
+    const char* const enabledLayers[]   = {kValidationLayerName};
+    const u32         enabledLayerCount = validationLayerEnabled ? 1U : 0U;
 
     VkApplicationInfo applicationInfo{};
     applicationInfo.sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO;
