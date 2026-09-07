@@ -604,11 +604,20 @@ Status VulkanBackend::State::EnumerateRaw(Array<AdapterInfo>& out) {
 Status VulkanBackend::State::DescribeAdapter(VkPhysicalDevice device, AdapterInfo& out) {
     const Detail::InstanceFunctions& fns = loader.Instance();
 
-    // Separate property queries rather than one chained call, because what may be chained
-    // depends on the version the device itself reports. Chaining a structure a device does not
-    // support is a validation error, and this backend stops at those -- so the version is read
-    // first, from the base structure alone, and each extension structure is added only once
-    // the device has said it understands it.
+    // Separate property queries rather than one chained call, because which structures are
+    // worth chaining depends on the version the device itself reports: the version is read
+    // first, from the base structure alone, and each promoted-version structure is added only
+    // once the device has said it understands it.
+    //
+    // **Not because validation objects.** That was the assumption, and it is wrong: chaining
+    // VkPhysicalDeviceVulkan14Properties onto the 1.3.275 Intel device produced no message at
+    // all from SDK 1.4.357's validation layer, and the process ran to completion. The gate is
+    // here for the quieter reason. An implementation that does not recognise a chained
+    // structure simply does not write it, so Monarc would read back whatever it initialised --
+    // zeros -- as though a driver had reported them. Zeros happen to be safe for the bindless
+    // *limit*, since a device would then fail a tier rather than pass one it should not; they
+    // are not safe in general, and a feature struct left unwritten reads as all-false, which a
+    // requirement phrased as "must not have X" would satisfy on a device that was never asked.
     VkPhysicalDeviceProperties2 baseProperties{};
     baseProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
     fns.vkGetPhysicalDeviceProperties2(device, &baseProperties);
@@ -621,8 +630,9 @@ Status VulkanBackend::State::DescribeAdapter(VkPhysicalDevice device, AdapterInf
 
     const ApiVersion deviceVersion = out.capabilities.apiVersion;
     if (deviceVersion < ApiVersion{1, 1, 0}) {
-        // The caller drops this device. There is nothing more that can honestly be asked of
-        // it, and asking anyway would be the validation error described above.
+        // The caller drops this device. There is nothing more that can honestly be asked of it:
+        // VkPhysicalDeviceIDProperties is 1.1 core, so a device below that has no UUID to
+        // report and asking would read back the zeros above rather than an identity.
         return {};
     }
 
@@ -783,7 +793,15 @@ Status VulkanBackend::EnumerateAdaptersRaw(Array<AdapterInfo>& out) {
         return Err(ErrorCode::InvalidArgument,
                    "VulkanBackend::EnumerateAdaptersRaw called before a successful Initialize");
     }
-    return m_state->EnumerateRaw(out);
+    Status enumerated = m_state->EnumerateRaw(out);
+    if (!enumerated) {
+        // EnumerateRaw appends as it describes each device, so a failure part-way through
+        // leaves some in `out`. The Status is [[nodiscard]] and a caller that heeds it never
+        // reads them, but "half a list" is not a state worth having available: clearing costs
+        // nothing and removes the question.
+        out.Clear();
+    }
+    return enumerated;
 }
 
 Status VulkanBackend::EnumerateAdapters(Array<AdapterInfo>& out) {

@@ -1,6 +1,16 @@
 #include <Monarc/RHI/Adapter.h>
 
+#include <type_traits>
+
 namespace Monarc::RHI {
+
+// Adapter.h says AdapterInfo is trivially copyable and that DeduplicateAdapters relies on it,
+// so the claim is checked rather than stated: the compaction below assigns whole AdapterInfo
+// values, and a member that acquired a non-trivial copy -- a String, a pointer with ownership
+// -- would turn an order-preserving memcpy into something with side effects.
+static_assert(std::is_trivially_copyable_v<AdapterInfo>,
+              "DeduplicateAdapters compacts by assignment; AdapterInfo must stay a value type");
+static_assert(std::is_trivially_copyable_v<AdapterUuid>);
 
 namespace {
 

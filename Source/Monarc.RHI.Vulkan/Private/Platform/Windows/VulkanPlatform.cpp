@@ -9,11 +9,13 @@
 // Defined before the Vulkan headers, because it is what makes vulkan_win32.h's contents
 // visible at all.
 //
-// Note that this is a #define and not a platform *conditional*: there is no #ifdef _WIN32
-// anywhere in this file, and gate 10 in Tools/check_architecture.py -- which matches
-// #if/#ifdef/#ifndef/#elif on platform macros -- would not fire here even if this directory
-// were not exempt. The directory is what selects the file; monarc_module() hands the
-// compiler only the current platform's Private/Platform/<Platform>/ tree.
+// Note that this is a #define and not a platform *conditional*. Gate 10 in
+// Tools/check_architecture.py matches #if/#ifdef/#ifndef/#elif carrying one of a fixed list of
+// platform macros -- _WIN32, __APPLE__, __linux__ and so on -- and this line is neither a
+// conditional nor one of those names, so the exemption this directory enjoys is not what keeps
+// the gate quiet here. The directory is what selects the file: monarc_module() hands the
+// compiler only the current platform's Private/Platform/<Platform>/ tree, which is the whole
+// mechanism ADR-0016 asks for.
 #define VK_USE_PLATFORM_WIN32_KHR
 #include <vulkan/vulkan.h>
 

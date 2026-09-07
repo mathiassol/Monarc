@@ -461,7 +461,7 @@ decision a property of the build rather than a discipline.
 
 - Green on all six presets: 9 CTest entries each, including the device tests actually running
   against this machine's two adapters
-- 61 device-free doctest cases and 333 assertions across `Monarc.RHI.Tests` (32 cases, 211
+- 62 device-free doctest cases and 334 assertions across `Monarc.RHI.Tests` (33 cases, 212
   assertions) and `Monarc.RHI.Vulkan.Tests` (29 / 122), plus 9 device-required cases and 37
   assertions — that last number scales with how many adapters a machine has
 

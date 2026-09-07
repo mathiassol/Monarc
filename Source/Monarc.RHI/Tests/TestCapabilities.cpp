@@ -68,6 +68,19 @@ constexpr CapabilityTier kTiers[] = {
 
 }  // namespace
 
+TEST_CASE("kTiers lists every CapabilityTier enumerator") {
+    // Every case below iterates kTiers, so the list being incomplete would make all of them
+    // quietly weaker rather than wrong. C++ cannot ask an enum how many enumerators it has, so
+    // this is the indirect check TestTypes.cpp uses for Format: the index one past the end of
+    // the list must not name a tier, which ToString answers with its own invalid-value marker.
+    // Append a tier without extending the list and that index becomes a named tier, and this
+    // fails. It rests on the enumerators being one contiguous run from Unsupported = 0, which
+    // Capabilities.h keeps by giving none of them an explicit value.
+    const CapabilityTier onePastTheList = static_cast<CapabilityTier>(std::size(kTiers));
+    CHECK(std::string_view(Monarc::RHI::ToString(onePastTheList)) ==
+          std::string_view(Monarc::RHI::ToString(static_cast<CapabilityTier>(4242))));
+}
+
 TEST_CASE("the tiers are distinct and strictly ascending") {
     // MeetsTier is literally `DetermineTier(capabilities) >= tier`, so the enumerator values
     // *are* the comparison. Distinct but descending values -- Bindless = 5 and Advanced = 3

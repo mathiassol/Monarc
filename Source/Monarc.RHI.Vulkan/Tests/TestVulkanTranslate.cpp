@@ -54,7 +54,8 @@ TEST_CASE("kAllFormats lists every Format enumerator") {
     // enumerators it has. Same indirect check as TestTypes.cpp's: the index one past the end
     // of the list must not name a format, which ToString answers by returning its
     // not-a-format marker. Append an enumerator without extending this list and that index
-    // becomes a named format, and this fails.
+    // becomes a named format, and this fails -- observed, by dropping B8G8R8A8_UNORM from the
+    // list and watching it report "B8G8R8A8_UNORM == <invalid Format>".
     const Format onePastTheList = static_cast<Format>(std::size(kAllFormats));
     CHECK(std::string_view(Monarc::RHI::ToString(onePastTheList)) ==
           std::string_view(Monarc::RHI::ToString(kNotAFormat)));

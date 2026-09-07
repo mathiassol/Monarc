@@ -75,8 +75,9 @@ struct DebugUtilsFunctions {
 ///
 /// Monarc opens `vulkan-1.dll` through `Platform::Library` and resolves every entry point
 /// through `vkGetInstanceProcAddr`. Nothing in this build links `vulkan-1.lib`, and
-/// `VK_NO_PROTOTYPES` makes that a linker-enforced property rather than a discipline: a
-/// direct call to `vkCreateInstance` does not compile, because no such function is declared.
+/// `VK_NO_PROTOTYPES` makes that a compiler-enforced property rather than a discipline: no
+/// global `vkCreateInstance` is declared, so a direct call to one is
+/// `error C3861: 'vkCreateInstance': identifier not found` -- verified by writing one.
 /// The reason is not purity -- an import library makes a missing Vulkan runtime a Windows
 /// loader failure before `main`, with a system dialog naming a DLL, which is useless to a
 /// player and unrecoverable by us. Opening it ourselves makes the same situation an ordinary
