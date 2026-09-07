@@ -32,6 +32,7 @@ Third-party code is acceptable for:
 | Shader compilation | Slang | Khronos-adopted, and a compiler is its own multi-year project ([ADR-0004](ADR-0004-slang-shading-language.md)) |
 | Editor UI scaffolding | Dear ImGui | Explicitly transitional ([ADR-0013](ADR-0013-editor-ui.md)) |
 | Unit testing | doctest | Single-header MIT framework; compiles far faster than Catch2, which matters on six cores. Test-only, never linked into a shipped target |
+| Graphics API definitions | Vulkan-Headers | Not a library at all — an API definition, and therefore the platform interface, in the same sense `windows.h` is. Header-only, Apache-2.0, no code linked. Pinned to a tag (`vulkan-sdk-1.4.357.0`) rather than found through `find_package(Vulkan)`, so the build is reproducible on a machine with no SDK — which is every CI runner |
 | Physics | Jolt | Deep specialist domain; correctness and stability take years |
 | Image and font decoding | To be chosen | Format-compliance work with no architectural content |
 | Mesh optimisation | meshoptimizer | Well-studied algorithms, no architectural content |
@@ -43,6 +44,21 @@ Two rules govern every inclusion:
    Replacing the library must be an internal change.
 2. **Permissive licence only.** MIT, Apache-2.0, BSD, zlib. Nothing that constrains what a
    Monarc user may ship.
+
+Rule 1 needs one clarification that the Vulkan-Headers row above is the first case of. A
+graphics API's *headers* are not third-party code sitting behind an interface — they are the
+interface, to the operating system, and there is no version of "own the RHI" that involves
+writing our own `VkInstanceCreateInfo`. What rule 1 governs there is that no Vulkan type
+appears in a `Monarc.RHI` public header, which
+[RHI.md](../../Rendering/RHI.md) already requires and
+[gate 3](../../Milestones/M0-First-Light.md) polices. `Monarc.RHI.Vulkan`'s own public header
+names no Vulkan type either; the headers are private to its implementation.
+
+The linking rule that goes with it is stricter than the licence rule and matters more:
+**Monarc links the `Vulkan::Headers` interface target and never `Vulkan::Vulkan` or
+`vulkan-1.lib`.** An import library would make a missing Vulkan runtime a Windows loader
+failure before `main`, where opening the runtime through `Platform::Library` makes it an
+ordinary `Result` — see the loader decision in the Phase A3 plan.
 
 Note that windowing and input are on the *own it* side, which is the line most projects draw
 differently. They sit closer to engine architecture than they appear: they own the event loop,

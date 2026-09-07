@@ -15,7 +15,17 @@ enum class ErrorCode : u32 {
     AlreadyExists,
     PermissionDenied,
     IoFailure,
+
+    /// This device, platform or build cannot do what was asked -- the capability is absent,
+    /// not broken.
     Unsupported,
+
+    /// A backing API returned an error of its own. Distinct from Unsupported because the two
+    /// lead to different handling: Unsupported means asking differently might work, where a
+    /// backend failure means the call was legitimate and the API refused it. The message
+    /// names the underlying result -- a VkResult's own spelling, for Monarc.RHI.Vulkan -- so
+    /// that a report is actionable without a debugger attached.
+    BackendFailure,
 };
 
 const char* ToString(ErrorCode code);
