@@ -924,10 +924,12 @@ TEST_CASE("a command list outlives its device's shutdown and refuses to record")
     // **The one surface the device hands out that used to answer a shut-down device by
     // dereferencing it.** `Shutdown` destroys the command pools, and a `VulkanCommandList` a
     // caller still holds from `BeginFrame` kept its recording flag and its `VkCommandBuffer`
-    // across that -- so the next recording call dispatched a `vkCmd*` through a freed buffer on
-    // a destroyed `VkDevice`. Measured: `BeginFrame -> Begin -> Shutdown ->
-    // Barrier(GlobalBarrier{})` exited 3221226505, where the same three steps without the
-    // barrier exited zero.
+    // across that -- so the next recording call dispatched through a freed buffer on a
+    // destroyed `VkDevice`. Measured, by deleting the detach loop from
+    // `VulkanDeviceState::Shutdown`: this case then exits 3221226505 (0xC0000409) and prints
+    // nothing at all, the process being gone before doctest's output is flushed, while the
+    // rest of the suite -- this case excluded by name -- stays green at 35 cases and 338
+    // assertions. Nothing else in the suite reached it.
     //
     // `Shutdown` is documented as safe to call unconditionally and more than once, which is
     // what makes the ordering a teardown path rather than only a dangling pointer, and

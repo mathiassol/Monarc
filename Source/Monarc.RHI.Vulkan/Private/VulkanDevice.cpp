@@ -285,9 +285,13 @@ void VulkanDeviceState::Shutdown() {
     // documented as safe to call unconditionally and more than once, which puts that ordering
     // in a teardown path rather than only behind a dangling pointer -- and
     // Monarc/RHI/Vulkan/VulkanDevice.h promises every surface this class hands out answers
-    // safely on a shut-down device. Measured: with this loop absent,
-    // `BeginFrame -> Begin -> Shutdown -> Barrier(GlobalBarrier{})` exits 0xC0000409 where the
-    // same sequence without the barrier exits zero.
+    // safely on a shut-down device.
+    //
+    // Measured, both directions. With this loop absent, "a command list outlives its device's
+    // shutdown and refuses to record" exits 0xC0000409 and prints nothing -- the process is
+    // gone before doctest's output is flushed -- while the rest of the device suite, that case
+    // excluded by name, stays green at 35 cases and 338 assertions. So the crash is this
+    // ordering and nothing else in the suite reached it.
     for (VulkanCommandList& list : lists) {
         list.Detach();
     }

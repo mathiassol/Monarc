@@ -1018,12 +1018,14 @@ false for a second reason. A frame loop with an early-out between `BeginFrame` a
 `VUID-vkQueueSubmit2-commandBuffer-03874`, "is unrecorded and contains no commands", at exit
 `0xC0000409`. And `VulkanDeviceState::Shutdown` destroyed the command pools without detaching
 the lists, so a list a caller still held kept its recording flag and its `VkCommandBuffer`
-across the shutdown: `BeginFrame → Begin → Shutdown → Barrier(GlobalBarrier{})` exited
-`0xC0000409` where the same sequence without the barrier exited zero. Both are now returned
-`Status`es, which is what the rest of the module already did for `Begin` twice, `End` outside a
-pass, `End` inside one, a copy inside a pass, a nested pass, and a list from another device.
-With the detach loop removed the rest of the device suite is green at 35 cases and 338
-assertions, so nothing else reached it.
+across the shutdown. With the detach loop removed, the case that pins it exits `0xC0000409` and
+prints nothing at all — the process is gone before doctest's output is flushed — while the rest
+of the device suite, that case excluded by name, is green at 35 cases and 338 assertions. Both
+are now returned `Status`es, which is what the rest of the module already did for `Begin` twice,
+`End` outside a pass, `End` inside one, a copy inside a pass, a nested pass, and a list from
+another device; the three `Barrier` overloads and `EndRendering` have no `Status` to carry a
+refusal, so they report through the assertion handler instead, and the case captures that with a
+handler that declines to break.
 
 **`CopyTextureToBuffer` documented one usage precondition it did not check and never mentioned
 the other.** The destination's `BufferUsage::TransferDestination` was in the comment and not in
