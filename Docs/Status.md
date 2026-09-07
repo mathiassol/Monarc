@@ -3,7 +3,7 @@
 **What is actually true right now.** Intent lives in the other documents; this file is the
 honest account. Update it when reality changes, not when a plan is written.
 
-_Last updated: 2026-09-06_
+_Last updated: 2026-09-07_
 
 ## Summary
 
@@ -13,10 +13,14 @@ diagnostics, container, math and platform foundations under test on two compiler
 sanitizers, and `Monarc.Jobs` — the first module beyond `Monarc.Core` — adds a thread
 pool, dependency graph, priorities and instrumentation on top of it.
 
-Next is **A3** — RHI, the Vulkan backend, and `Host.Windowed`. See
-[M0 — First Light](Milestones/M0-First-Light.md) for how the phases fit together.
+**A3 is under way: Tasks 1 and 2 are complete.** The module graph has six modules,
+`Monarc.RHI.Vulkan` opens `vulkan-1.dll` itself and brings up a real Vulkan 1.3 instance with a
+fatal validation messenger, and adapter enumeration reports the two GPUs on this machine where
+raw enumeration reports five. Tasks 3 (device, command lists, colour readback) and 4 (window,
+surface, swapchain) are next. See [M0 — First Light](Milestones/M0-First-Light.md) for how the
+phases fit together.
 
-Nothing renders yet. That is A3 and A4.
+Nothing renders yet — there is no device and no window. That is Tasks 3 and 4.
 
 ## Verified environment
 
@@ -27,7 +31,7 @@ Confirmed by direct testing on the development machine, not assumed:
 | Compiler | MSVC 19.51 (toolset 14.51, VS 2026 Community) | Compiles C++23 language features cleanly at `/W4` — verified: deducing `this`, `static operator()`, multidimensional `operator[]`, `if consteval`, `auto(x)`, `[[assume]]`, `std::expected` |
 | Second compiler | Clang 22.1.8 (`clang-cl`, standalone LLVM) | Builds the whole project and test suite warning-free at `/WX`, output identical to MSVC. Runs in CI on every push, which is what [ADR-0003](Architecture/Decisions/ADR-0003-cpp23-baseline.md)'s condition required |
 | Build | CMake 4.2.1 + Ninja 1.13.2 (standalone, on `PATH`) | Presets pin no absolute tool paths, so one set serves this machine, CI, and macOS later |
-| Vulkan | SDK 1.4.357.0, loader reports instance 1.4.357 | Found automatically by CMake's `find_package(Vulkan)`. Validation layers, gfxreconstruct, SPIRV-Tools present. Device support verified with `vulkaninfo` — see [Hardware](#hardware) |
+| Vulkan | SDK 1.4.357.0, loader reports instance 1.4.357 | Validation layers, gfxreconstruct, SPIRV-Tools present. Device support verified with `vulkaninfo` — see [Hardware](#hardware). **The build does not use `find_package(Vulkan)` and does not need an SDK**: headers come from `FetchContent` at the pinned tag `vulkan-sdk-1.4.357.0`, and the runtime is opened at run time through `Platform::Library` — see [RHI.md](Rendering/RHI.md#how-the-vulkan-runtime-is-loaded) |
 | Graphics debugger | RenderDoc 1.46 | Vendor-neutral, so it can capture on the Intel UHD 730 as well as the NVIDIA card. Nsight is also installed but is NVIDIA-only |
 | Shaders | Slang 2026.13.1 (in the Vulkan SDK), DXC 1.9, glslang | |
 | Windows SDK | 10.0.26100.0 | D3D12 headers present |
@@ -75,15 +79,20 @@ was expected and did not materialise.
 
 ### Hardware
 
-- **NVIDIA RTX 3070 Ti** (Ampere) — high capability tier: bindless, mesh shaders, ray tracing.
-  Reports Vulkan **1.4.351**, driver 616.56
-- **Intel UHD 730** (Xe-LP, integrated) — a genuinely useful *second vendor and lower tier*
-  on the same machine, for keeping capability tiers honest rather than theoretical. Reports
-  Vulkan **1.3.275**, driver 101.5334
+- **NVIDIA RTX 3070 Ti** (Ampere) — `Advanced` tier. Reports Vulkan **1.4.351**, driver
+  616.56, `DRIVER_ID_NVIDIA_PROPRIETARY`, discrete, six queue families (one graphics),
+  `deviceUUID` `759c8156-7b91-7099-6511-5bd91de66f76`. Has `VK_EXT_mesh_shader`,
+  `VK_KHR_ray_tracing_pipeline` and `VK_KHR_acceleration_structure`
+- **Intel UHD 730** (Xe-LP, integrated) — `Bindless` tier, a genuinely useful *second vendor
+  and lower tier* on the same machine, for keeping capability tiers honest rather than
+  theoretical. Reports Vulkan **1.3.275**, driver 101.5334,
+  `DRIVER_ID_INTEL_PROPRIETARY_WINDOWS`, two queue families (one graphics), `deviceUUID`
+  `86808b4c-0400-0000-0002-000000000000`. No mesh shading and no ray tracing
 - Intel i5-11400, 6 cores / 12 threads, 32 GB RAM — modest, so **compile-time discipline is
   a design constraint, not a virtue**
 
-Two facts from this that constrain `Monarc.RHI.Vulkan` before a line of it is written:
+Two facts from this constrained `Monarc.RHI.Vulkan` before a line of it was written, and
+both held up once it was:
 
 - **Vulkan 1.3 is the ceiling, not 1.4.** The Intel part caps at 1.3.275, so anything
   requiring 1.4 silently drops the lower tier out of the test matrix — which would defeat
@@ -96,6 +105,27 @@ Two facts from this that constrain `Monarc.RHI.Vulkan` before a line of it is wr
   So adapter enumeration must **dedupe on `VkPhysicalDeviceIDProperties::deviceUUID`**, or
   the adapter list a user sees will have four identical entries in it. This is exactly the
   class of bug that normally surfaces only on someone else's machine.
+  **Closed in A3 Task 2** — `Monarc.FirstLight --adapters` now prints five raw entries and two
+  deduplicated ones; the output is in [A3 Task 2 delivered](#a3-task-2-delivered).
+
+Two further measurements from A3 Task 2, both of which changed the design rather than
+confirming it:
+
+- **Descriptor indexing does not distinguish the two devices.** Both report
+  `shaderSampledImageArrayNonUniformIndexing`, `runtimeDescriptorArray` and
+  `descriptorBindingPartiallyBound`, and both report
+  `maxDescriptorSetUpdateAfterBindSampledImages = 1048576`. The only descriptor-related number
+  that differs is `maxUpdateAfterBindDescriptorsInAllPools` (4294967295 against 1048576), which
+  nothing asks about. So a bindless tier alone leaves the two devices indistinguishable, which
+  is why the tier ladder gained an `Advanced` rung keyed on mesh shading and ray tracing — and
+  why device *type* is not a tier input at all, despite the phase plan listing it as one.
+- **Five implicit Vulkan layers are inserted into every instance this machine creates**: NVIDIA
+  Optimus and Present, Overwolf's overlay and OBS hook, and Medal's capture hook. Three of them
+  (`VK_LAYER_OW_OVERLAY`, `VK_LAYER_OW_OBS_HOOK`, `VK_LAYER_MEDAL_HOOK`) are built against
+  Vulkan 1.2 and the loader warns about each on an instance created at 1.3; Medal registers
+  itself twice and the loader drops the duplicate. Four warnings per process start, none of
+  them Monarc's, and none of them fatal — which is precisely why the fatal messenger keys off
+  VALIDATION-type messages rather than on ERROR severity alone.
 
 ### Known gaps
 
@@ -165,6 +195,14 @@ Two facts from this that constrain `Monarc.RHI.Vulkan` before a line of it is wr
   Independently of all that, the scripts in `Tools/` are written against the standard
   library alone and should stay that way: CI runs them under a different interpreter again,
   so depending on a package would mean depending on which Python happened to win.
+- **A `FetchContent` dependency can enable a language the project never declared.**
+  `Monarc`'s own `project()` says `LANGUAGES CXX`, but Vulkan-Headers says
+  `project(VULKAN_HEADERS LANGUAGES C CXX)`, so adding it enabled C for the whole build. The
+  Clang presets then failed *compiler detection* — `CMAKE_CXX_COMPILER` was pinned to
+  `clang-cl` and `CMAKE_C_COMPILER` was not, so CMake picked plain `clang`, which rejects the
+  MSVC-style flags CMake hands it: `clang: error: no such file or directory: '/DWIN32'`. The
+  four Clang presets now pin `CMAKE_C_COMPILER` to `clang-cl` as well. Worth knowing because
+  the failure is a wall of unrecognised-flag errors from a compiler nobody chose.
 - Ninja 1.13.2 and LLVM's `bin` are on `PATH` as of 2026-09-06, which is what lets
   `CMakePresets.json` pin no absolute tool paths.
 - Windows long paths are **not** enabled (`LongPathsEnabled=0`, `core.longpaths` unset).
@@ -179,7 +217,7 @@ Two facts from this that constrain `Monarc.RHI.Vulkan` before a line of it is wr
 | A2b | Math — vectors, matrices, quaternions, transforms | **Complete** |
 | A2c | Platform — files, paths, time, threads, dynamic libs, GUID | **Complete** |
 | A2d | Monarc.Jobs — thread pool, dependency graph, priorities | **Complete** |
-| A3 | RHI, Vulkan backend, Host.Windowed | Not started |
+| A3 | RHI, Vulkan backend, Host.Windowed | **Tasks 1–2 complete**; 3–5 not started |
 | A4 | Minimal render graph | Not started |
 | B | ShaderCompiler, Shaders, Render | Not started |
 | C | Reflect, Serialize, Assets, Cook | Not started |
@@ -309,6 +347,127 @@ tests, never a real second module. `module-graph.json` now records two modules �
 `Monarc.Core` and `Monarc.Jobs` — and the `Monarc.Jobs → Monarc.Core` edge Task 1 of the
 A2d plan introduced, and the gate continues to pass against a graph that could, for the
 first time, actually contain a cycle.
+
+### A3 Task 1 delivered
+
+- `monarc_app()` in `CMake/MonarcModule.cmake`: executables that are nodes in the module graph
+  rather than exceptions to it, with the leaf rule — nothing may depend on an app — enforced at
+  configure time and again by gate 12 against the emitted `module-graph.json`
+- `Monarc.RHI` (tier 2), `Monarc.RHI.Vulkan` (tier 2), `Monarc.Host.Windowed` (tier 3) and the
+  `Monarc.FirstLight` app (tier 3), as honest stubs: `module-graph.json` records six modules and
+  the first Tier 3 → Tier 2 edges in the project
+- Gate 13 (module layout) renumbered from 7, which had collided with M0's own gate 7
+
+### A3 Task 2 delivered
+
+The loader, the instance, the debug messenger, and adapter enumeration — `Monarc.RHI.Vulkan`
+is real from `vkCreateInstance` down. No device, no command buffers, no window: those are
+Tasks 3 and 4.
+
+- **The Vulkan runtime is opened by us**, `vulkan-1.dll` through `Platform::Library`, with every
+  entry point resolved through `vkGetInstanceProcAddr` into X-macro-generated tables. Nothing
+  links `vulkan-1.lib`, and `VK_NO_PROTOTYPES` makes a direct call a compile error rather than
+  a discipline. Two tables, global and instance; the device table arrives with Task 3's
+  `VkDevice`, and `Loader.h` says so rather than shipping an empty third one
+- **Vulkan headers come from `FetchContent` at `vulkan-sdk-1.4.357.0`**, not
+  `find_package(Vulkan)`, so a machine with no SDK — which is every CI runner — still
+  configures and builds. Recorded as a row in
+  [ADR-0014](Architecture/Decisions/ADR-0014-dependency-policy.md) with the linking rule that
+  goes with it
+- **A Vulkan 1.3 instance** with `VK_KHR_surface` + `VK_KHR_win32_surface` required, and
+  `VK_LAYER_KHRONOS_validation` + `VK_EXT_debug_utils` requested in Debug. A missing layer is a
+  warning naming which half is absent and a degraded instance, not a failure
+- **Validation errors stop the process**, and the guard was provoked rather than assumed — see
+  below
+- **`ErrorCode::BackendFailure`** in `Monarc.Core`, carrying the `VkResult`'s own spelling and
+  its numeric value in the message
+- **`AdapterInfo`, `DeduplicateAdapters` and a three-rung capability tier** in `Monarc.RHI`, all
+  pure and all tested with no device — which is what makes CI cover them
+- **`Monarc.FirstLight --adapters`**, which is also the `Monarc.RHI.Vulkan.Probe` CTest entry
+
+**The headline measurement.** `--adapters` on this machine:
+
+```
+probe: loader open | instance Vulkan 1.4.357 | validation layer enabled | debug messenger installed
+probe: raw enumeration -- 5 physical device(s)
+  raw [0] NVIDIA GeForce RTX 3070 Ti   759c8156-7b91-7099-6511-5bd91de66f76  DiscreteGpu    1.4.351  Advanced
+  raw [1] Intel(R) UHD Graphics 730    86808b4c-0400-0000-0002-000000000000  IntegratedGpu  1.3.275  Bindless
+  raw [2] Intel(R) UHD Graphics 730    86808b4c-0400-0000-0002-000000000000  IntegratedGpu  1.3.275  Bindless
+  raw [3] Intel(R) UHD Graphics 730    86808b4c-0400-0000-0002-000000000000  IntegratedGpu  1.3.275  Bindless
+  raw [4] Intel(R) UHD Graphics 730    86808b4c-0400-0000-0002-000000000000  IntegratedGpu  1.3.275  Bindless
+probe: after deduplication on deviceUUID -- 2 adapter(s)
+  adapter [0] NVIDIA GeForce RTX 3070 Ti   759c8156-7b91-7099-6511-5bd91de66f76  DiscreteGpu    1.4.351  Advanced
+  adapter [1] Intel(R) UHD Graphics 730    86808b4c-0400-0000-0002-000000000000  IntegratedGpu  1.3.275  Bindless
+probe: 5 raw entries collapsed to 2
+```
+
+**Three test outcomes, because a suite that silently runs nothing while showing green is the
+failure mode this phase is shaped to avoid.** `ctest` now reports nine entries under four
+labels: `unit` (five, device-free, run everywhere), `gpu` (one, `SKIP_RETURN_CODE 77`),
+`probe` (one, always runs and always passes) and `architecture` (two).
+
+The skip machinery was demonstrated in both directions rather than trusted. Pointing the
+registered `gpu` command at a library that cannot exist:
+
+```
+7/9 Test #7: Monarc.RHI.Vulkan.DeviceTests ....***Skipped   0.02 sec
+...
+The following tests did not run:
+	  7 - Monarc.RHI.Vulkan.DeviceTests (Skipped)
+```
+
+and then changing the binary's skip code from 77 to 0 and running the same no-device path:
+
+```
+1/1 Test #7: Monarc.RHI.Vulkan.DeviceTests ....   Passed    0.02 sec
+```
+
+— the fake-green outcome, on demand. `SKIP_RETURN_CODE` is what separates them, observed
+rather than assumed.
+
+**The fatal validation messenger was provoked.** With a deliberately wrong
+`VkApplicationInfo::sType`, the validation layer's `VUID-VkApplicationInfo-sType-sType` error
+reached the callback during `vkCreateInstance` and the process stopped at `0x80000003` — the
+same signature `JobSystem::Wait`'s worker guard produces. Verified twice over:
+
+- Under an assert handler that **reports and declines to break** — a test harness, or
+  Shipping — the handler ran, printed, returned false, and the process *still* stopped at
+  `0x80000003` from the unconditional break, never re-entering Vulkan. This is the case
+  `MONARC_CHECK` alone would have got wrong, and it is why the house pattern has the extra two
+  lines.
+- **Removing the messenger from `VkInstanceCreateInfo::pNext`**, with the same invalid `sType`,
+  changed the outcome completely: the layer printed the same error to stderr on its own,
+  `vkCreateInstance` **succeeded**, enumeration ran, and the process **exited zero**. So the
+  chained create-info is load-bearing rather than good practice — without it, an
+  instance-creation validation error is exactly the output that scrolls past.
+
+**Every new guard was violated on purpose and watched fail.** Eleven produced test failures:
+adjacent-only deduplication (caught by the A-B-A-B-A case and *not* by the four-identical-Intel
+case, which is why both exist); UUID comparison stopping at the first zero byte (caught at byte
+6 of the real Intel UUID); two tiers given distinct but descending values; one bindless
+requirement dropped; the loader leaving a library mapped and reporting a message naming
+nothing; both formats mapped to one `VkFormat`; the version decoded with the pre-Vulkan-SC
+open-coded shifts (caught *only* by the variant-bits case, since for variant 0 the old layout
+and the macros agree); `DeduplicateAdapters`' returned count ignored; a move-assignment that
+adopted without releasing; one accessor's null check removed (a SIGSEGV in the moved-from
+case); and the validation-default generator expression's polarity flipped.
+
+Two produced **compile errors rather than test failures**, and the comments now say that rather
+than claiming a test covers them: two tiers given the same value — `error C2196: case value
+'Monarc::RHI::CapabilityTier::Bindless' already used`, from the `default`-less switch in
+`ToString` — and a direct call to a global entry point under `VK_NO_PROTOTYPES`, which is
+`error C3861: 'vkCreateInstance': identifier not found`. The second is what makes the loader
+decision a property of the build rather than a discipline.
+
+- Green on all six presets: 9 CTest entries each, including the device tests actually running
+  against this machine's two adapters
+- 61 device-free doctest cases and 333 assertions across `Monarc.RHI.Tests` (32 cases, 211
+  assertions) and `Monarc.RHI.Vulkan.Tests` (29 / 122), plus 9 device-required cases and 37
+  assertions — that last number scales with how many adapters a machine has
+
+**What CI will report is not yet known and is deliberately not claimed here.** The probe entry
+exists so that the runners' answer becomes an observed fact; reading it and writing it down is
+A3 Task 5's checkbox.
 
 ## Verification gates
 
