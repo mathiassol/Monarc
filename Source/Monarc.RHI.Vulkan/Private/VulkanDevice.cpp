@@ -300,6 +300,10 @@ void VulkanDeviceState::Shutdown() {
     if (functions.vkDestroyDevice != nullptr) {
         functions.vkDestroyDevice(device, nullptr);
     } else {
+        // Reachable only if `Loader::ResolveDeviceDestroyer` also came back null on the
+        // factory's failure path -- see `BringUpDevice`, which resolves this one entry back
+        // precisely so that this branch is not where a failed bring-up ends. Kept because a
+        // null here is still possible in principle and a silent leak is worse than a loud one.
         MONARC_LOG(LogCategories::VulkanDevice, Error,
                    "the Vulkan device cannot be destroyed: vkDestroyDevice never resolved, so "
                    "it is leaked until the process exits");
@@ -518,6 +522,18 @@ namespace {
     }
 
     if (Status loaded = loader.LoadDeviceFunctions(state.device, state.functions); !loaded) {
+        // **The one failure path in this module that leaked a Vulkan object, closed.**
+        // `LoadDeviceFunctions` clears the whole table when a Required entry is missing -- that
+        // is its promise, and a good one -- so `Shutdown` would find no `vkDestroyDevice` and
+        // log that the VkDevice is leaked until the process exits. Resolving that single entry
+        // back is enough for the device to be destroyed, and it is the only one needed: nothing
+        // else has been created yet, so `Shutdown` has a device and nothing else to unwind.
+        //
+        // Vanishingly unlikely -- every device entry point Monarc asks for is Vulkan 1.3 core
+        // on a device that reported 1.3 -- and reachable only by forcing the failure, which is
+        // how it was measured: with `LoadDeviceFunctions` made to fail unconditionally, the
+        // leak line disappears from the log and vkDestroyDevice runs.
+        state.functions.vkDestroyDevice = loader.ResolveDeviceDestroyer(state.device);
         return loaded;
     }
 

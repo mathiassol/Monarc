@@ -241,6 +241,24 @@ public:
     /// `vkGetDeviceProcAddr` out of the instance table.
     [[nodiscard]] Status LoadDeviceFunctions(VkDevice device, DeviceFunctions& out) const;
 
+    /// Resolves `device`'s `vkDestroyDevice`, and nothing else. Null if the instance entry
+    /// points have not been resolved, if `device` is null, or if the lookup itself came back
+    /// empty.
+    ///
+    /// **This exists for one caller and one situation: a `LoadDeviceFunctions` that failed.**
+    /// That function clears the whole table when a Required entry is missing, which is the
+    /// promise it makes -- a partially resolved table never leaves it -- and the cost is that
+    /// the freshly created `VkDevice` would have nothing left able to destroy it. Resolving
+    /// that one entry separately is what keeps the factory's failure path from leaking a
+    /// Vulkan object, and it does not weaken the promise: the caller asks for the destroyer by
+    /// name rather than being handed a table that is partly filled in.
+    ///
+    /// Through `vkGetDeviceProcAddr`, the same resolver the device table uses, which is
+    /// available because it is an *instance* entry point and was resolved before any device
+    /// existed. See the note above the entry-point lists on `vkDestroyDevice` being resolvable
+    /// either way.
+    [[nodiscard]] PFN_vkDestroyDevice ResolveDeviceDestroyer(VkDevice device) const;
+
     [[nodiscard]] const GlobalFunctions&     Global() const { return m_global; }
     [[nodiscard]] const InstanceFunctions&   Instance() const { return m_instance; }
     [[nodiscard]] const DebugUtilsFunctions& DebugUtils() const { return m_debugUtils; }

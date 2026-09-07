@@ -225,6 +225,16 @@ Status Loader::LoadDeviceFunctions(VkDevice device, DeviceFunctions& out) const 
     return {};
 }
 
+PFN_vkDestroyDevice Loader::ResolveDeviceDestroyer(VkDevice device) const {
+    if (m_instance.vkGetDeviceProcAddr == nullptr || device == VK_NULL_HANDLE) {
+        return nullptr;
+    }
+    // A function pointer to a function pointer, which is ordinary standard C++ -- the
+    // `CastSymbol` note above is about the one place a `void*` is involved, and this is not it.
+    return reinterpret_cast<PFN_vkDestroyDevice>(
+        m_instance.vkGetDeviceProcAddr(device, "vkDestroyDevice"));
+}
+
 void Loader::ClearTables() {
     m_debugUtils          = DebugUtilsFunctions{};
     m_instance            = InstanceFunctions{};
