@@ -93,16 +93,20 @@ struct DebugUtilsFunctions {
 /// `Platform::Library` uses, one rung up, and for the same reason -- it owns an OS resource
 /// that must be released exactly once. Move-only, non-copyable.
 ///
-/// **A moved-from Loader is not the same thing as a closed one, and `IsOpen()` is the query
-/// that tells them apart.** `IsOpen()` on one is false, because `Platform::Library`'s move
-/// nulls the source's module handle -- but the three tables are trivially copyable, so the
-/// defaulted move *copies* them and the source is left holding the same entry-point pointers
-/// the destination now uses. Measured, not assumed: after a move, the source reports
-/// `IsOpen() == false` while `Global().vkCreateInstance` is still non-null. Those pointers
-/// stay callable only for as long as the destination keeps the module mapped, which is why
-/// nothing may be called through a Loader without asking `IsOpen()` first. `Close()` on a
-/// moved-from Loader is therefore not a no-op: it clears the stale tables, and unloading
-/// nothing is the part that does nothing.
+/// **A moved-from Loader is a closed one -- every table null, `IsOpen()` false -- and the
+/// hand-written move below is what makes that true.** `Platform::Library`'s move nulls the
+/// source's module handle on its own, but the three tables are trivially copyable, so a
+/// *defaulted* move would copy them: the source would be left holding the same entry-point
+/// pointers the destination now uses, into a module it no longer owns. Once the destination
+/// is destroyed, a call through one of those is a use-after-unload, and nothing mechanical
+/// in this codebase catches that shape of bug: an equivalent dangling read in this module --
+/// an `Error::message` re-pointed into freed `VulkanBackend::State` -- was run under
+/// `clang-asan` and ASan reported nothing at all, because the freed storage still held its
+/// bytes; only a test's exact-text comparison caught it. Docs/Status.md records that run. So
+/// the moves clear the source rather than leaving the hazard documented, which is the
+/// difference between a state that must not be used and one that cannot be. `Close()` on a
+/// moved-from Loader is a genuine no-op as a result: there is nothing left to clear and
+/// nothing left to unload.
 class Loader {
 public:
     Loader()  = default;
@@ -111,14 +115,13 @@ public:
     Loader(const Loader&)            = delete;
     Loader& operator=(const Loader&) = delete;
 
-    // Defaulted rather than written out. Platform::Library's own move transfers the module
-    // handle and nulls the source, which is the half that matters; the tables are copied
-    // rather than cleared, and the class comment above says what that leaves behind. A
-    // hand-written move that also nulled the source's tables would make the moved-from state
-    // identical to the closed one -- worth doing when something needs it, and unclaimed until
-    // then, because nothing in Monarc reads a table off a Loader it has moved from.
-    Loader(Loader&&)            = default;
-    Loader& operator=(Loader&&) = default;
+    // Written out rather than defaulted, for the one reason the class comment gives: a
+    // defaulted move copies the tables, and the source's copy outlives its claim on the
+    // module. Shaped exactly like Platform::Library's own pair -- noexcept, and move
+    // assignment guarded on `this != &other`, without which `x = std::move(x)` would Close()
+    // x and then adopt the nulls Close() had just written.
+    Loader(Loader&& other) noexcept;
+    Loader& operator=(Loader&& other) noexcept;
 
     /// Opens `libraryName` and resolves every global entry point from it, returning a Loader
     /// only if both succeeded. Fails with the code `Platform::Library::Open` reported --
@@ -174,6 +177,11 @@ public:
     void Close();
 
 private:
+    /// Nulls `m_getInstanceProcAddr` and every table entry, without touching the library.
+    /// The half of `Close` the moves need, so that "what a closed Loader's tables look like"
+    /// is written once and the moved-from state cannot drift away from the closed one.
+    void ClearTables();
+
     Platform::Library         m_library;
     PFN_vkGetInstanceProcAddr m_getInstanceProcAddr = nullptr;
     GlobalFunctions           m_global;

@@ -69,6 +69,27 @@ Monarc::Array<Monarc::RHI::AdapterInfo>* g_rawAdapters = nullptr;
     return *g_rawAdapters;
 }
 
+/// True when every entry in every one of the loader's three tables is null.
+///
+/// The same helper Tests/TestVulkanLoader.cpp carries, duplicated rather than shared: these
+/// are two separate binaries, and the device-free one can only ever call it on a Loader that
+/// was never open. Written out through the X-macros rather than checking IsOpen(), because
+/// "closed" and "holding pointers into a module it no longer owns" are exactly the two states
+/// this asserts are the same state.
+[[nodiscard]] bool AllTablesEmpty(const Monarc::RHI::Detail::Loader& loader) {
+    bool empty = true;
+#define MONARC_VK_CHECK_NULL(name) empty = empty && loader.Global().name == nullptr;
+    MONARC_VK_GLOBAL_FUNCTIONS(MONARC_VK_CHECK_NULL)
+#undef MONARC_VK_CHECK_NULL
+#define MONARC_VK_CHECK_NULL(name) empty = empty && loader.Instance().name == nullptr;
+    MONARC_VK_INSTANCE_FUNCTIONS(MONARC_VK_CHECK_NULL)
+#undef MONARC_VK_CHECK_NULL
+#define MONARC_VK_CHECK_NULL(name) empty = empty && loader.DebugUtils().name == nullptr;
+    MONARC_VK_DEBUG_UTILS_FUNCTIONS(MONARC_VK_CHECK_NULL)
+#undef MONARC_VK_CHECK_NULL
+    return empty;
+}
+
 void ReportAdapter(const char* label, Monarc::usize index,
                    const Monarc::RHI::AdapterInfo& info) {
     MONARC_LOG(VulkanDeviceTest, Info, "{} [{}] {} | {} | {} | Vulkan {}.{}.{} | tier {}", label,
@@ -268,10 +289,11 @@ TEST_CASE("a backend releases everything it allocated") {
     CHECK(allocator.BytesAllocated() == 0);
 }
 
-TEST_CASE("a loader that is open transfers on move and leaves the source closed") {
-    // The case TestVulkanLoader.cpp cannot write: with nothing open, a correct move and a
-    // memcpy are indistinguishable, so the only place this can be told apart is a machine with
-    // a real Vulkan runtime to hold a handle to.
+TEST_CASE("a loader that is open transfers on move and leaves the source closed and empty") {
+    // The case TestVulkanLoader.cpp cannot write, and the reason is the tables: telling a
+    // move that clears the source from one that copies it needs a source whose tables were
+    // populated, and only a real Vulkan runtime can populate them. With nothing open the two
+    // are indistinguishable, so this is the only suite the assertion can live in.
     Monarc::Result<Monarc::RHI::Detail::Loader> source = Monarc::RHI::Detail::Loader::Open();
     REQUIRE(source.has_value());
     REQUIRE(source->IsOpen());
@@ -285,12 +307,55 @@ TEST_CASE("a loader that is open transfers on move and leaves the source closed"
     // and the second call would be releasing a reference nobody owns.
     CHECK_FALSE(source->IsOpen());
 
-    // And the source's *tables* are not cleared, which is the half of the moved-from state
-    // that is easy to assume wrongly: the three tables are trivially copyable, so the
-    // defaulted move copies them. Asserted rather than left to a comment, because Loader.h
-    // now says so -- and because if a hand-written move ever nulls them, this line is what
-    // says the class comment needs updating with it.
-    CHECK(source->Global().vkCreateInstance != nullptr);
+    // And its tables must be null, which is the half a defaulted move gets wrong: the three
+    // tables are trivially copyable, so a defaulted move copies them and leaves the source
+    // holding live-looking pointers into a module the destination now owns. This is the line
+    // that fails if Loader's moves are ever defaulted again -- verified by defaulting them.
+    CHECK(AllTablesEmpty(*source));
+}
+
+TEST_CASE("move-assigning a loader to itself leaves it open") {
+    Monarc::Result<Monarc::RHI::Detail::Loader> loader = Monarc::RHI::Detail::Loader::Open();
+    REQUIRE(loader.has_value());
+    REQUIRE(loader->IsOpen());
+
+    // Not a contrivance to reach a line. Loader::operator= releases the destination through
+    // Close() before adopting the source, so an unguarded version applied to one object
+    // unloads the library and then copies back the nulls Close() had just written -- both
+    // checks below go red, and the module is gone. The `this != &other` guard is the whole
+    // of what prevents it, and it is Platform::Library::operator='s own guard.
+    Monarc::RHI::Detail::Loader& alias = *loader;
+    *loader                            = std::move(alias);
+
+    CHECK(loader->IsOpen());
+    CHECK(loader->Global().vkCreateInstance != nullptr);
+}
+
+TEST_CASE("move assignment clears the source's tables, and not only move construction does") {
+    // Both operators are written out, so both need the assertion: a hand-written constructor
+    // beside a defaulted assignment would pass the case above and fail this one. This is also
+    // the operator VulkanBackend::State::BringUp uses on every bring-up -- `loader =
+    // std::move(*opened)` -- so it is the moved-from Loader that actually exists in shipped
+    // code, rather than only in a test.
+    //
+    // What is *not* asserted here is that the destination's own module was released: two
+    // Loaders opened from the same name hold the same refcounted HMODULE, and nothing in the
+    // public interface can see the count. Loader::operator= releases through Close() for that
+    // reason -- one release path, stated once -- and the claim stops where the observation
+    // does.
+    Monarc::Result<Monarc::RHI::Detail::Loader> destination =
+        Monarc::RHI::Detail::Loader::Open();
+    Monarc::Result<Monarc::RHI::Detail::Loader> source = Monarc::RHI::Detail::Loader::Open();
+    REQUIRE(destination.has_value());
+    REQUIRE(source.has_value());
+    REQUIRE(source->Global().vkCreateInstance != nullptr);
+
+    *destination = std::move(*source);
+
+    CHECK(destination->IsOpen());
+    CHECK(destination->Global().vkCreateInstance != nullptr);
+    CHECK_FALSE(source->IsOpen());
+    CHECK(AllTablesEmpty(*source));
 }
 
 TEST_CASE("opening a library that is not the Vulkan loader still fails on a machine that has one") {

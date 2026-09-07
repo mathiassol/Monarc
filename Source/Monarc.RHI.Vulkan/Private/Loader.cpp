@@ -38,6 +38,35 @@ template <typename Function>
 
 }  // namespace
 
+Loader::Loader(Loader&& other) noexcept
+    : m_library(std::move(other.m_library)),
+      m_getInstanceProcAddr(other.m_getInstanceProcAddr),
+      m_global(other.m_global),
+      m_instance(other.m_instance),
+      m_debugUtils(other.m_debugUtils) {
+    // Platform::Library's move has already nulled other.m_library; this is the other half,
+    // and it is the whole reason this constructor is written out rather than defaulted.
+    other.ClearTables();
+}
+
+Loader& Loader::operator=(Loader&& other) noexcept {
+    if (this != &other) {
+        // Close rather than an inline release: the destination owns a module of its own, and
+        // Close is where the "tables first, library second" order is stated. Guarding on
+        // `this != &other` is what keeps `x = std::move(x)` from closing x and then adopting
+        // the nulls Close just wrote -- the same guard, for the same reason, as
+        // Platform::Library::operator=.
+        Close();
+        m_library             = std::move(other.m_library);
+        m_getInstanceProcAddr = other.m_getInstanceProcAddr;
+        m_global              = other.m_global;
+        m_instance            = other.m_instance;
+        m_debugUtils          = other.m_debugUtils;
+        other.ClearTables();
+    }
+    return *this;
+}
+
 Result<Loader> Loader::Open(StringView libraryName) {
     Result<Platform::Library> library = Platform::Library::Open(libraryName);
     if (!library) {
@@ -129,14 +158,18 @@ Status Loader::LoadInstanceFunctions(VkInstance instance, bool debugUtilsEnabled
     return {};
 }
 
-void Loader::Close() {
-    // Tables first, so a caller holding a stale reference to one sees nulls rather than
-    // pointers into an unmapped module. Nothing in Monarc holds such a reference across a
-    // Close; clearing them costs nothing and removes the question.
+void Loader::ClearTables() {
     m_debugUtils          = DebugUtilsFunctions{};
     m_instance            = InstanceFunctions{};
     m_global              = GlobalFunctions{};
     m_getInstanceProcAddr = nullptr;
+}
+
+void Loader::Close() {
+    // Tables first, so a caller holding a stale reference to one sees nulls rather than
+    // pointers into an unmapped module. Nothing in Monarc holds such a reference across a
+    // Close; clearing them costs nothing and removes the question.
+    ClearTables();
     m_library.Close();
 }
 

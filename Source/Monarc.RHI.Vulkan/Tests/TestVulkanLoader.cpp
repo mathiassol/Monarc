@@ -116,9 +116,12 @@ TEST_CASE("resolving instance functions on a closed loader is rejected, not atte
 // implementation, and a case written to pass in their absence would be worse than no case:
 //
 //   * A successful Open, and the global entry-point table being populated by it.
-//   * Loader's move, which can only be told apart from a copy when there is a real library
-//     handle to transfer -- with nothing open, a defaulted move and a memcpy are
-//     indistinguishable.
+//   * Loader's move, which nulls the source's module handle *and* clears its tables. Neither
+//     half can be told apart here: with nothing open there is no handle to transfer, and with
+//     every table already null there is nothing for a move to clear or copy, so the
+//     hand-written move, a defaulted one and a memcpy all produce the same object. A source
+//     whose tables are populated is the thing that separates them, and only a real Vulkan
+//     runtime can populate them -- Loader's members are private and Open is the only writer.
 //
 // Both are in TestsDevice/TestVulkanDevice.cpp, which reports Skipped rather than Passed when
 // there is no device to run them against.
