@@ -37,8 +37,10 @@
 #include <Monarc/Core/Assert.h>
 #include <Monarc/Core/Log.h>
 
+#include <ArrayOps.h>
 #include <Loader.h>
 #include <Translate.h>
+#include <VulkanDeviceFactory.h>
 #include <VulkanPlatform.h>
 
 #include <cstdlib>
@@ -156,29 +158,6 @@ VKAPI_ATTR VkBool32 VKAPI_CALL DebugMessengerCallback(
     return VK_FALSE;
 }
 
-/// Fills `array` with `count` value-initialised elements, replacing whatever it held.
-///
-/// Array<T> has Reserve, Emplace and Pop but no Resize, and the count-then-fill idiom every
-/// Vulkan enumeration uses needs one. Written here rather than added to Array because this is
-/// its only caller in the tree; it moves into Array if a second one appears.
-template <typename T>
-void ResizeTo(Array<T>& array, usize count) {
-    array.Clear();
-    array.Reserve(count);
-    for (usize i = 0; i < count; ++i) {
-        array.Emplace();
-    }
-}
-
-/// Shrinks `array` to `count` elements. The pair of it and ResizeTo is what stands in for
-/// Array<T>::Resize on the "Vulkan wrote fewer than it said" path.
-template <typename T>
-void ShrinkTo(Array<T>& array, usize count) {
-    while (array.Size() > count) {
-        array.Pop();
-    }
-}
-
 [[nodiscard]] VkDebugUtilsMessengerCreateInfoEXT MakeMessengerCreateInfo() {
     VkDebugUtilsMessengerCreateInfoEXT info{};
     info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
@@ -274,7 +253,7 @@ struct VulkanBackend::State {
             return FailVk(operation, counted, " (count)");
         }
 
-        ResizeTo(out, count);
+        Detail::ResizeTo(out, count);
         if (count == 0) {
             return {};
         }
@@ -289,12 +268,26 @@ struct VulkanBackend::State {
                        "wrote",
                        operation, count);
         }
-        ShrinkTo(out, count);
+        Detail::ShrinkTo(out, count);
         return {};
     }
 
     [[nodiscard]] Status BringUp(const Config& config);
     void                 Shutdown();
+
+    /// Creates the debug-utils messenger from `messengerInfo`, or explains why it did not.
+    ///
+    /// **Lifted out of `BringUp`, which is what Task 2's review asked for.** It needs only
+    /// `instance`, the loader and the create-info, so it comes out whole. What deliberately
+    /// stays in `BringUp` is everything whose *storage* the `vkCreateInstance` call reads --
+    /// `messengerInfo` itself, `enabledExtensions` and `applicationInfo` all have to outlive
+    /// that call, so a helper returning one of them would return a dangling pointer.
+    ///
+    /// `messengerInfo` is a parameter and not rebuilt here, because the same value is chained
+    /// into `VkInstanceCreateInfo::pNext` -- and that chaining is load-bearing rather than
+    /// good practice; see the comment at the call site.
+    [[nodiscard]] Status InstallMessenger(
+        const VkDebugUtilsMessengerCreateInfoEXT& messengerInfo);
 
     [[nodiscard]] Status QueryInstanceExtensions(Array<VkExtensionProperties>& out);
     [[nodiscard]] Status QueryInstanceLayers(Array<VkLayerProperties>& out);
@@ -302,6 +295,15 @@ struct VulkanBackend::State {
                                                Array<VkExtensionProperties>& out);
     [[nodiscard]] Status EnumerateRaw(Array<AdapterInfo>& out);
     [[nodiscard]] Status DescribeAdapter(VkPhysicalDevice device, AdapterInfo& out);
+
+    /// The physical device reporting `uuid`, or `ErrorCode::NotFound`.
+    ///
+    /// Re-enumerates rather than caching the mapping from Task 2's `EnumerateRaw`, and that is
+    /// on purpose: a cache from `AdapterUuid` to `VkPhysicalDevice` would be a second thing to
+    /// keep in step with a device list that can change under the process, and device creation
+    /// is not a hot path. What it costs is one `vkEnumeratePhysicalDevices` and one property
+    /// query per device, once, per `CreateDevice`.
+    [[nodiscard]] Status FindPhysicalDevice(const AdapterUuid& uuid, VkPhysicalDevice& out);
 };
 
 Status VulkanBackend::State::BringUp(const Config& config) {
@@ -464,23 +466,8 @@ Status VulkanBackend::State::BringUp(const Config& config) {
     }
 
     if (validationLayerEnabled) {
-        if (!loader.HasDebugUtilsFunctions()) {
-            // The extension was enabled and its entry points did not resolve. That is a broken
-            // implementation rather than a missing SDK, so it is worth an Error even though it
-            // is not fatal: validation still runs, and its output still reaches the messenger
-            // chained into vkCreateInstance for the duration of that call, but nothing after
-            // it is watched. DebugMessengerInstalled() then reports false, which is what Task
-            // 3's "assert the messenger was installed" case reads.
-            MONARC_LOG(Vulkan, Error,
-                       "{} was enabled but its entry points did not resolve; no debug "
-                       "messenger is installed and validation output after instance creation "
-                       "will be lost",
-                       VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-        } else if (const VkResult result = loader.DebugUtils().vkCreateDebugUtilsMessengerEXT(
-                       instance, &messengerInfo, nullptr, &messenger);
-                   result != VK_SUCCESS) {
-            messenger = VK_NULL_HANDLE;
-            return FailVk("vkCreateDebugUtilsMessengerEXT", result);
+        if (Status installed = InstallMessenger(messengerInfo); !installed) {
+            return installed;
         }
     }
 
@@ -491,6 +478,31 @@ Status VulkanBackend::State::BringUp(const Config& config) {
                required.major, required.minor, required.patch,
                validationLayerEnabled ? "on" : "off",
                messenger != VK_NULL_HANDLE ? "installed" : "absent");
+    return {};
+}
+
+Status VulkanBackend::State::InstallMessenger(
+    const VkDebugUtilsMessengerCreateInfoEXT& messengerInfo) {
+    if (!loader.HasDebugUtilsFunctions()) {
+        // The extension was enabled and its entry points did not resolve. That is a broken
+        // implementation rather than a missing SDK, so it is worth an Error even though it is
+        // not fatal: validation still runs, and its output still reaches the messenger chained
+        // into vkCreateInstance for the duration of that call, but nothing after it is
+        // watched. DebugMessengerInstalled() then reports false, which is what Task 3's
+        // "assert the messenger was installed" case reads.
+        MONARC_LOG(Vulkan, Error,
+                   "{} was enabled but its entry points did not resolve; no debug messenger "
+                   "is installed and validation output after instance creation will be lost",
+                   VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        return {};
+    }
+
+    if (const VkResult result = loader.DebugUtils().vkCreateDebugUtilsMessengerEXT(
+            instance, &messengerInfo, nullptr, &messenger);
+        result != VK_SUCCESS) {
+        messenger = VK_NULL_HANDLE;
+        return FailVk("vkCreateDebugUtilsMessengerEXT", result);
+    }
     return {};
 }
 
@@ -686,7 +698,7 @@ Status VulkanBackend::State::DescribeAdapter(VkPhysicalDevice device, AdapterInf
     u32 queueFamilyCount = 0;
     fns.vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, nullptr);
     Array<VkQueueFamilyProperties> queueFamilies(allocator);
-    ResizeTo(queueFamilies, queueFamilyCount);
+    Detail::ResizeTo(queueFamilies, queueFamilyCount);
     if (queueFamilyCount != 0) {
         fns.vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount,
                                                      queueFamilies.Data());
@@ -712,6 +724,49 @@ Status VulkanBackend::State::DescribeAdapter(VkPhysicalDevice device, AdapterInf
 
     out.tier = DetermineTier(out.capabilities);
     return {};
+}
+
+Status VulkanBackend::State::FindPhysicalDevice(const AdapterUuid& uuid,
+                                                VkPhysicalDevice&  out) {
+    out = VK_NULL_HANDLE;
+
+    Array<VkPhysicalDevice> devices(allocator);
+    if (Status enumerated =
+            EnumerateInto("vkEnumeratePhysicalDevices", devices,
+                          [this](u32* count, VkPhysicalDevice* data) {
+                              return loader.Instance().vkEnumeratePhysicalDevices(instance,
+                                                                                  count, data);
+                          });
+        !enumerated) {
+        return enumerated;
+    }
+
+    for (const VkPhysicalDevice device : devices) {
+        VkPhysicalDeviceIDProperties idProperties{};
+        idProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
+
+        VkPhysicalDeviceProperties2 properties{};
+        properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        properties.pNext = &idProperties;
+        loader.Instance().vkGetPhysicalDeviceProperties2(device, &properties);
+
+        AdapterUuid reported{};
+        std::memcpy(reported.bytes, idProperties.deviceUUID, AdapterUuid::kSize);
+        if (reported == uuid) {
+            // The *first* match, which matters on this machine: five physical devices report
+            // two UUIDs, so four of them answer to one. They are the same GPU re-registered by
+            // virtual display adapters, so any of the four would do -- see DeduplicateAdapters
+            // in Monarc/RHI/Adapter.h, which keeps the first for the same reason.
+            out = device;
+            return {};
+        }
+    }
+
+    MONARC_LOG(Vulkan, Warning, "no physical device on this instance reports device UUID {}",
+               ToString(uuid).text);
+    return Err(ErrorCode::NotFound,
+               "no physical device on this instance reports the requested adapter's device "
+               "UUID");
 }
 
 Result<VulkanBackend> VulkanBackend::Create(IAllocator& allocator, const Config& config) {
@@ -815,8 +870,53 @@ Status VulkanBackend::EnumerateAdapters(Array<AdapterInfo>& out) {
         return raw;
     }
     const usize kept = DeduplicateAdapters(std::span<AdapterInfo>(out.Data(), out.Size()));
-    ShrinkTo(out, kept);
+    Detail::ShrinkTo(out, kept);
     return {};
+}
+
+Result<VulkanDevice> VulkanBackend::CreateDevice(IAllocator& allocator,
+                                                 const AdapterInfo&  adapter,
+                                                 const DeviceConfig& config) {
+    if (!IsInitialized()) {
+        return Err(ErrorCode::InvalidArgument,
+                   "VulkanBackend::CreateDevice called on a backend that has been shut down or "
+                   "moved from");
+    }
+
+    VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+    if (Status found = m_state->FindPhysicalDevice(adapter.uuid, physicalDevice); !found) {
+        return std::unexpected(found.error());
+    }
+
+    // Re-described from the driver rather than trusting the argument. Only `adapter.uuid` was
+    // used above, and this is what IDevice::Adapter() reports -- see the header.
+    AdapterInfo described{};
+    if (Status queried = m_state->DescribeAdapter(physicalDevice, described); !queried) {
+        return std::unexpected(queried.error());
+    }
+
+    if (!MeetsTier(described.capabilities, CapabilityTier::Baseline)) {
+        // **A guard with no test, and saying so is the extent of the claim made for it.**
+        // Baseline is Vulkan 1.3 core plus a graphics queue, and both local adapters clear it,
+        // so nothing on this machine can reach this branch -- the same standing as the
+        // below-Vulkan-1.1 guard in EnumerateRaw above. What it prevents is real: without it,
+        // vkCreateDevice would be asked to enable dynamic rendering, synchronization2 and
+        // timeline semaphores on a device that has none of them, and the report would be a
+        // VkResult rather than the tier the device actually failed.
+        MONARC_LOG(Vulkan, Warning,
+                   "\"{}\" reports tier {} and Vulkan {}.{}.{}, below the {} Monarc's renderer "
+                   "requires",
+                   described.name, ToString(described.tier),
+                   described.capabilities.apiVersion.major,
+                   described.capabilities.apiVersion.minor,
+                   described.capabilities.apiVersion.patch,
+                   ToString(CapabilityTier::Baseline));
+        return Err(ErrorCode::Unsupported,
+                   "this adapter does not meet the capability tier Monarc's renderer requires");
+    }
+
+    return Detail::VulkanDeviceFactory::Create(allocator, m_state->loader, physicalDevice,
+                                               described, config);
 }
 
 }  // namespace Monarc::RHI

@@ -6,6 +6,8 @@
 #include <Monarc/Core/Types.h>
 #include <Monarc/RHI/Adapter.h>
 #include <Monarc/RHI/Capabilities.h>
+#include <Monarc/RHI/Device.h>
+#include <Monarc/RHI/Vulkan/VulkanDevice.h>
 
 // namespace Monarc::RHI rather than Monarc::RHI::Vulkan, deliberately. What this module
 // exports is an RHI backend; its Vulkan-ness belongs in the name of the thing, not in the
@@ -26,20 +28,28 @@ namespace Monarc::RHI {
 /// The Vulkan runtime, an instance, and the adapters that instance can see.
 ///
 /// Owns three things: the `vulkan-1.dll` handle and its entry-point tables, the `VkInstance`,
-/// and -- in Debug -- the `VK_EXT_debug_utils` messenger. Nothing here creates a logical
-/// device, a queue or a command buffer; those are Task 3's, along with the `IDevice` this
-/// class will end up sitting behind.
+/// and -- in Debug -- the `VK_EXT_debug_utils` messenger. `CreateDevice` below makes logical
+/// devices on it; the devices own their own queues, command pools and resources.
 ///
-/// **This shape is a stated seam.** The A3 plan's architecture puts an `IBackend` interface in
-/// `Monarc.RHI` with `Monarc.RHI.Vulkan` implementing it, and this is not that -- it is a
-/// concrete move-only class in the backend's own public header. Two reasons, one of them
-/// temporary: there is no `IDevice` yet for virtual dispatch to dispatch *to*, so an interface
-/// now would be one implementation behind one vtable; and `Monarc.Core` has no owning-pointer
-/// type, so returning an `IBackend` would mean inventing an ownership convention in Core to
-/// serve a single caller. Task 3 introduces `IDevice`, and at that point this class becomes
-/// the implementation behind an `IBackend` and `CreateVulkanBackend()` comes back as the
-/// factory. Callers written against `Create` will need to change; saying so here is the point
-/// of writing it down.
+/// **This shape is a stated seam, and Task 3 did not close it.** The A3 plan's architecture
+/// puts an `IBackend` interface in `Monarc.RHI` with `Monarc.RHI.Vulkan` implementing it, and
+/// this is not that -- it is a concrete move-only class in the backend's own public header.
+/// Task 2's version of this comment predicted that Task 3's `IDevice` would change that, and
+/// it was wrong on both halves, for reasons that only became clear with `IDevice` in hand:
+///
+/// - **An `IBackend`'s only reason to be virtual is runtime backend selection**, and there is
+///   one backend. Having an `IDevice` to dispatch *to* does not create that reason; what would
+///   is a second backend, which ADR-0012 schedules immediately after M0.
+/// - **`Monarc.Core` still has no owning-pointer type**, and designing one properly is its own
+///   piece of work rather than a corner of this task: `IAllocator::Deallocate` needs the size
+///   and alignment of what it frees, and for a polymorphic type those are the derived class's,
+///   so the deleter has to carry values captured where the object was made.
+///
+/// So `CreateDevice` returns a concrete `Result<VulkanDevice>` -- polymorphic use without
+/// polymorphic ownership. Both arrive with the second backend, and the `IDevice`, `IQueue` and
+/// `ICommandList` interfaces in Monarc/RHI/Device.h do not change when they do; what changes is
+/// this class's own factory shape. Callers written against `Create` and `CreateDevice` will
+/// need to change, and saying so here is the point of writing it down.
 ///
 /// **Factory construction**, as `Platform::Library::Open` and `Host::Window::Create` both do:
 /// a static `Create` returning a `Result<VulkanBackend>`, a `Shutdown` safe to call
@@ -171,6 +181,33 @@ public:
     /// can see, once each, in the order Vulkan first reported it. This is the list a caller
     /// choosing a device should use.
     [[nodiscard]] Status EnumerateAdapters(Array<AdapterInfo>& out);
+
+    /// Creates a logical device on the adapter `adapter.uuid` names.
+    ///
+    /// **Only the UUID is taken from `adapter`.** Everything else is re-queried from the
+    /// physical device this finds, and the fresh description is what `IDevice::Adapter()`
+    /// returns -- so a caller who hands over a doctored or stale `AdapterInfo` gets a device
+    /// that describes itself truthfully rather than one that agrees with the argument. The UUID
+    /// is the identity the Vulkan spec guarantees, which is why it is the one field trusted;
+    /// see `AdapterUuid` in Monarc/RHI/Adapter.h.
+    ///
+    /// **A returned `VulkanDevice` and not an owned `IDevice`, deliberately.** Polymorphic use
+    /// without polymorphic ownership -- the reasoning is in `IDevice`'s own header, and the
+    /// seam is stated there too: when the second backend arrives this becomes a member of an
+    /// `IBackend` returning an owning handle, and the `IDevice` interface does not change.
+    ///
+    /// `allocator` is used for the device's state and its resource pools and must outlive the
+    /// device. **The device must be destroyed before this backend**, which owns the instance
+    /// and `vulkan-1.dll` -- see `VulkanDevice`'s class comment for what happens otherwise.
+    ///
+    /// Failures are `ErrorCode::InvalidArgument` (this backend is shut down or moved from, or
+    /// `config` sizes a pool at zero), `ErrorCode::NotFound` (no physical device reports that
+    /// UUID), `ErrorCode::Unsupported` (the device does not meet `CapabilityTier::Baseline`, or
+    /// has no memory type or queue family the device needs), `ErrorCode::OutOfMemory` (Monarc's
+    /// allocator returned nothing) or `ErrorCode::BackendFailure`.
+    [[nodiscard]] Result<VulkanDevice> CreateDevice(IAllocator& allocator,
+                                                    const AdapterInfo&  adapter,
+                                                    const DeviceConfig& config);
 
 private:
     /// Everything this class owns lives behind one pointer, allocated from the caller's
