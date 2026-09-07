@@ -904,7 +904,9 @@ the case used to be.** Gained: the check moved from a GPU-only suite into CI, an
 than the old one did — the exact text rather than four `find()`s, both overloads rather than
 one, a mask's hex, and the buffer's capacity. `ToString(PipelineStage)`, `ToString(Access)` and
 `ToString(TextureLayout)` still have a shipped caller, one hop further away: `Barrier.cpp`'s two
-`Describe` overloads call all three, and `VulkanDevice.cpp:617` and `:663` call `Describe`.
+`Describe` overloads call all three, and `VulkanCommandList`'s two handle-resolving `Barrier`
+overloads call `Describe`. *(Named rather than cited by line: the review below moved those two
+out of `VulkanDevice.cpp` and the line numbers this sentence used to carry went with them.)*
 Lost: that the refusal fires *on a device* against a handle a real `DestroyTexture` made stale,
 and that the `MONARC_CHECK` message names a stale handle. Neither is replaced. What softens the
 first is that `Barrier` resolves through the same `Resolve` that `BeginRendering` and
