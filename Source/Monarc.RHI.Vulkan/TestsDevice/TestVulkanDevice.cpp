@@ -838,16 +838,24 @@ TEST_CASE("a stale resource handle is reported rather than resolved to its slot'
     const Monarc::Result<Monarc::RHI::TextureHandle> first =
         device.CreateTexture(textureDescription);
     REQUIRE(first.has_value());
+
+    // One, on the first texture of a fresh device: the slot starts at zero and the claim bumps
+    // it. That is what makes generation zero mean "never claimed" and never name a live
+    // resource, which `Resolve` relies on to refuse a forged `ForTesting(index, 0)` handle --
+    // and, with the release bump below, what makes a live slot's generation odd and a free
+    // one's even.
+    CHECK(first->generation == 1);
+
     device.DestroyTexture(*first);
 
-    // **Destroyed and not yet replaced, which is the half a generation check alone misses.**
-    // The slot's generation is bumped when it is *claimed*, so immediately after a destroy the
-    // handle's generation still matches -- and what refuses it is the slot no longer being
-    // live. Measured: dropping the live check from `Resolve` while keeping the generation check
-    // passed every other assertion in this suite, because every other stale-handle case here
-    // has an intervening creation that bumps the generation. The consequence of the hole is a
-    // VK_NULL_HANDLE image handed to vkCmdCopyImageToBuffer2, which is a validation error and
-    // stops the process.
+    // **Destroyed and not yet replaced, which is the case the generation has to cover on its
+    // own.** Every other stale-handle assertion below has an intervening creation, so the
+    // claim-side bump alone would satisfy them; this one has none. It is here because the
+    // destroyed-but-unreclaimed window was where a claim-only bump left the generation still
+    // matching, and a backend flag was the only refusal -- measured, by dropping the `live`
+    // check from `Resolve`: with the claim-only bump that handed a VK_NULL_HANDLE image to
+    // vkCmdCopyImageToBuffer2 and stopped the process with 204 assertions green and none red.
+    // `DestroyTexture` now bumps too, so this assertion is answered by the generation.
     const Monarc::Result<Monarc::RHI::BufferHandle> scratch =
         device.CreateBuffer(bufferDescription);
     REQUIRE(scratch.has_value());
@@ -879,9 +887,22 @@ TEST_CASE("a stale resource handle is reported rather than resolved to its slot'
     CHECK(second->generation != first->generation);
     CHECK(*second != *first);
 
+    // **Two, and the exact number is the assertion.** One bump for the destroy and one for
+    // the claim, so a version that bumped only on claim -- which is what this branch used to
+    // do -- lands on `first->generation + 1` and turns this red. The inequality above cannot
+    // tell the two designs apart; this can, and it is the only place the destroy-side bump is
+    // observable through the public interface at all.
+    CHECK(second->generation == first->generation + 2);
+
     const Monarc::Result<Monarc::RHI::BufferHandle> buffer =
         device.CreateBuffer(bufferDescription);
     REQUIRE(buffer.has_value());
+
+    // The buffer pool's half of the same fact, and it needs its own assertion: the two pools
+    // have separate claim and release helpers, so a release-side bump present in one and
+    // missing in the other is a live shape. `scratch` held this slot and was destroyed above.
+    CHECK(buffer->index == scratch->index);
+    CHECK(buffer->generation == scratch->generation + 2);
 
     const Monarc::Result<Monarc::RHI::ICommandList*> commands = device.BeginFrame();
     REQUIRE(commands.has_value());
@@ -916,6 +937,22 @@ TEST_CASE("a stale resource handle is reported rather than resolved to its slot'
         list.CopyTextureToBuffer(Monarc::RHI::TextureHandle{}, *buffer);
     REQUIRE_FALSE(invalid.has_value());
     CHECK(invalid.error().code == Monarc::ErrorCode::InvalidArgument);
+
+    // **The one case the generation cannot answer, and the reason the free/occupied flag stays
+    // in `Resolve` alongside it.** A forged handle at generation zero naming a slot no device
+    // has ever claimed *matches* that slot's generation, because a fresh slot's generation is
+    // zero too. Only the slot not being live refuses it. This device has used buffer slot 0
+    // twice and slot 1 never, so slot 1 is the untouched one.
+    //
+    // Asked through `MapBufferForRead` rather than through a command, because that is where the
+    // two answers separate: `InvalidArgument` means the resolve refused it, and `Unsupported`
+    // -- a never-claimed slot's `BufferDescription` is default-constructed, so its location
+    // reads `DeviceLocal` -- means the resolve let it through and something downstream caught
+    // it. Measured: dropping the live check turns this from the first into the second.
+    const Monarc::Result<std::span<const Monarc::u8>> neverClaimed =
+        device.MapBufferForRead(Monarc::RHI::BufferHandle::ForTesting(1, 0));
+    REQUIRE_FALSE(neverClaimed.has_value());
+    CHECK(neverClaimed.error().code == Monarc::ErrorCode::InvalidArgument);
 
     // And the live handle works, so the four refusals above are about staleness rather than
     // about the call being broken.

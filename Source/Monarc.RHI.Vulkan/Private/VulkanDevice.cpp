@@ -83,15 +83,49 @@ struct TextureSlot {
     VkDeviceMemory     memory      = VK_NULL_HANDLE;
     TextureDescription description = {};
 
-    /// Bumped every time this slot is claimed, so a handle from a previous occupant does not
-    /// match. Starts at zero and the first claim makes it one, which is what keeps generation
-    /// zero from ever naming a live resource.
+    /// Bumped on both halves of a slot's life -- once when it is claimed and once when it is
+    /// released -- so that two bumps pass per occupant rather than one. **The release bump is
+    /// what makes the generation sufficient on its own to refuse a handle whose resource has
+    /// been destroyed**, and that is the whole reason it is there.
+    ///
+    /// Bumping only on claim leaves a window, from a destroy until the next claim, in which a
+    /// destroyed handle's generation still matches its slot -- and in that window `live` is the
+    /// only thing refusing it. That was a single point of failure for ADR-0002's guarantee, and
+    /// a measured one: with the claim-only bump, dropping the `live` check from `Resolve`
+    /// handed a VK_NULL_HANDLE image to vkCmdCopyImageToBuffer2 and stopped the process
+    /// ("srcImage is VK_NULL_HANDLE"), with 204 assertions green and none red. With the release
+    /// bump in, the same mutation is refused by the generation and turns assertions red instead.
+    ///
+    /// **`JobSystem::ClaimSlotLocked` bumps on claim only, and that is not a precedent for
+    /// doing the same here.** The mechanics match; the safety argument does not. There `done`
+    /// is both the free/occupied flag and the semantic answer, a stale job handle's correct
+    /// answer is "complete" (`JobSystem::IsCompleteLocked`), and nothing is dereferenced -- so
+    /// a wrong flag yields a benign default. Here the stale answer must be "refuse", and a
+    /// wrong flag yields a null image. Same shape, opposite failure mode.
+    ///
+    /// What one bump per occupant bought was tidiness: a slot's generation changed exactly
+    /// once per occupant. What it cost was the invariant the counter exists for.
+    ///
+    /// Zero means never claimed, and no handle a device issued names it -- the first claim
+    /// makes it one, which the device test asserts directly. A live slot's generation is
+    /// therefore odd and a free slot's even, since claim and release alternate and each moves
+    /// it by one; that parity is a consequence of the two bumps rather than a separate rule,
+    /// and nothing relies on it.
+    ///
+    /// The counter is 32 bits and wraps. Two bumps per occupant reach the wrap in 2^31
+    /// create/destroy cycles on one slot rather than 2^32 -- **untested, and stated as
+    /// arithmetic rather than as a guard**, because provoking it needs those two billion cycles
+    /// on a single slot and no test can. It is halved here rather than introduced here: a
+    /// wrapped counter collides with a far-later occupant exactly as it did before.
     u32 generation = 0;
 
+    /// Whether this slot has an occupant. An allocator concern: it is what the claim helpers
+    /// scan for and what `Shutdown` releases by. `Resolve` consults it too, but only for the
+    /// forged-handle case the generation cannot answer -- see `Resolve(TextureHandle)`.
     bool live = false;
 };
 
-/// One buffer's pool slot. `TextureSlot`'s generation rule applies unchanged.
+/// One buffer's pool slot. `TextureSlot`'s two-bump generation rule applies unchanged.
 struct BufferSlot {
     VkBuffer          buffer      = VK_NULL_HANDLE;
     VkDeviceMemory    memory      = VK_NULL_HANDLE;
@@ -268,6 +302,12 @@ TextureSlot* VulkanDeviceState::Resolve(TextureHandle handle) {
         return nullptr;
     }
     TextureSlot& slot = textures[handle.index];
+    // Two independent refusals, and the generation is the one that carries ADR-0002 on its
+    // own -- see `TextureSlot::generation` for why it is bumped on release as well as on
+    // claim. `live` is kept for the one case the generation cannot answer: a *forged* handle
+    // naming a slot no device has ever claimed, whose generation is still zero and which
+    // `Handle::ForTesting(index, 0)` therefore matches. No device issues such a handle, so
+    // that is not a use-after-destroy -- but the answer must still be "refuse".
     if (!slot.live || slot.generation != handle.generation) {
         return nullptr;
     }
@@ -279,6 +319,7 @@ BufferSlot* VulkanDeviceState::Resolve(BufferHandle handle) {
         return nullptr;
     }
     BufferSlot& slot = buffers[handle.index];
+    // `Resolve(TextureHandle)`'s two refusals, unchanged.
     if (!slot.live || slot.generation != handle.generation) {
         return nullptr;
     }
@@ -297,9 +338,10 @@ VulkanCommandList* VulkanDeviceState::FindOwnList(ICommandList* list) {
 u32 VulkanDeviceState::ClaimTextureSlot() {
     for (usize index = 0; index < textures.Size(); ++index) {
         if (!textures[index].live) {
-            // Bumped on claim, not on release, so that a slot's generation changes exactly
-            // once per occupant and generation zero never names a live one. JobSystem's
-            // ClaimSlotLocked does the same, for the same reason.
+            // One of the two bumps a slot's occupant costs; `ReleaseTextureSlot` does the
+            // other. This one is what keeps generation zero from ever naming a live slot;
+            // that one is what makes the generation sufficient on its own to refuse a
+            // destroyed handle. `TextureSlot::generation` has the whole argument.
             ++textures[index].generation;
             textures[index].live = true;
             return static_cast<u32>(index);
@@ -364,7 +406,13 @@ void VulkanDeviceState::ReleaseTextureSlot(TextureSlot& slot) {
         slot.memory = VK_NULL_HANDLE;
     }
     slot.description = TextureDescription{};
-    slot.live        = false;
+
+    // The release-side bump. Every handle this slot ever issued is now stale by generation
+    // alone, with no wait for the next claim -- see `TextureSlot::generation`. Reached from
+    // `DestroyTexture`, from `CreateTexture`'s failure paths, and from `Shutdown`; all three
+    // are "this slot becomes free", which is the event the bump is about.
+    ++slot.generation;
+    slot.live = false;
 }
 
 void VulkanDeviceState::ReleaseBufferSlot(BufferSlot& slot) {
@@ -384,7 +432,10 @@ void VulkanDeviceState::ReleaseBufferSlot(BufferSlot& slot) {
         slot.memory = VK_NULL_HANDLE;
     }
     slot.description = BufferDescription{};
-    slot.live        = false;
+
+    // `ReleaseTextureSlot`'s release-side bump, for the buffer pool.
+    ++slot.generation;
+    slot.live = false;
 }
 
 void VulkanDeviceState::Shutdown() {
@@ -1254,8 +1305,8 @@ void VulkanDevice::DestroyTexture(TextureHandle texture) {
     if (slot == nullptr) {
         // An invalid, unknown or already-destroyed handle is a no-op rather than a report,
         // because "destroy what may or may not still exist" is exactly what a teardown path
-        // has. The generation is not bumped here -- the next claim does that, so a slot's
-        // generation changes once per occupant.
+        // has. Nothing is bumped on this path and nothing should be: the slot did not change
+        // hands, so bumping would invalidate handles the *current* occupant issued.
         return;
     }
     m_state->ReleaseTextureSlot(*slot);

@@ -16,9 +16,12 @@ struct TextureTag;
 ///
 /// A pool slot is reused once its resource is destroyed, so the index alone cannot tell a
 /// resource apart from whatever is created into that same slot next. The generation can: the
-/// device bumps it every time a slot is recycled, so a handle whose generation no longer
-/// matches its slot resolves to a failure rather than to whatever now occupies the memory --
-/// see ADR-0002, which is also why these are handles and not pointers at all.
+/// device bumps it whenever a slot changes hands -- on the destroy *and* on the next claim, so
+/// a handle goes stale the moment its resource is destroyed rather than when the slot is next
+/// filled -- and a handle whose generation no longer matches its slot resolves to a failure
+/// rather than to whatever now occupies the memory. See ADR-0002, which is also why these are
+/// handles and not pointers at all, and `IDevice::DestroyTexture` for why the destroy half of
+/// that is load-bearing.
 ///
 /// `Tag` carries no data and is never instantiated. Its only job is to make BufferHandle and
 /// TextureHandle *different types*, so that passing one where the other is expected is a

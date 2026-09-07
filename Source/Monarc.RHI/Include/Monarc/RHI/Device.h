@@ -379,11 +379,20 @@ public:
     [[nodiscard]] virtual Result<TextureHandle> CreateTexture(
         const TextureDescription& description) = 0;
 
-    /// Destroys the texture `texture` names and recycles its slot, bumping the slot's
-    /// generation so every existing handle to it becomes stale.
+    /// Destroys the texture `texture` names and frees its slot for reuse, bumping the slot's
+    /// generation so that every handle to it is stale from this call onwards rather than from
+    /// the next creation onwards.
     ///
-    /// Safe on an invalid handle and on one already destroyed: both are no-ops, because
-    /// "destroy what may or may not still exist" is what a teardown path actually has.
+    /// **The timing is the guarantee, and it is the reason the bump is here at all.** A slot
+    /// whose generation moved only when it was next claimed would leave a window -- destroyed,
+    /// not yet reclaimed -- in which a stale handle's generation still matched, and a backend's
+    /// free/occupied flag would be the only thing refusing it. That was measured to be a real
+    /// hole rather than a theoretical one; see `TextureSlot::generation` in
+    /// Monarc.RHI.Vulkan/Private/VulkanDevice.cpp for the measurement and for what it cost.
+    ///
+    /// Safe on an invalid handle and on one already destroyed: both are no-ops that bump
+    /// nothing, because "destroy what may or may not still exist" is what a teardown path
+    /// actually has.
     ///
     /// **The caller must ensure the GPU is finished with it.** Nothing here tracks in-flight
     /// use; `IQueue::Wait` is how a caller knows.
@@ -393,8 +402,8 @@ public:
     [[nodiscard]] virtual Result<BufferHandle> CreateBuffer(
         const BufferDescription& description) = 0;
 
-    /// `DestroyTexture` for buffers, with the same tolerance of stale handles and the same
-    /// requirement about in-flight use.
+    /// `DestroyTexture` for buffers: the same generation bump with the same timing, the same
+    /// tolerance of stale handles, and the same requirement about in-flight use.
     virtual void DestroyBuffer(BufferHandle buffer) = 0;
 
     /// Maps a `MemoryLocation::HostVisible` buffer and returns a read-only view of the whole
