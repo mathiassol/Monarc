@@ -367,8 +367,10 @@ Tasks 3 and 4.
 - **The Vulkan runtime is opened by us**, `vulkan-1.dll` through `Platform::Library`, with every
   entry point resolved through `vkGetInstanceProcAddr` into X-macro-generated tables. Nothing
   links `vulkan-1.lib`, and `VK_NO_PROTOTYPES` makes a direct call a compile error rather than
-  a discipline. Two tables, global and instance; the device table arrives with Task 3's
-  `VkDevice`, and `Loader.h` says so rather than shipping an empty third one
+  a discipline. Three tables — global, instance, and the `VK_EXT_debug_utils` pair kept apart
+  because those two are the only entry points in the module whose absence is not an error. A
+  device table would be the fourth and arrives with Task 3's `VkDevice`; `Loader.h` says so
+  rather than shipping an empty one now
 - **Vulkan headers come from `FetchContent` at `vulkan-sdk-1.4.357.0`**, not
   `find_package(Vulkan)`, so a machine with no SDK — which is every CI runner — still
   configures and builds. Recorded as a row in
@@ -379,8 +381,22 @@ Tasks 3 and 4.
   warning naming which half is absent and a degraded instance, not a failure
 - **Validation errors stop the process**, and the guard was provoked rather than assumed — see
   below
-- **`ErrorCode::BackendFailure`** in `Monarc.Core`, carrying the `VkResult`'s own spelling and
-  its numeric value in the message
+- **`ErrorCode::BackendFailure`** in `Monarc.Core`, whose message is the `VkResult`'s own
+  spelling; the operation that returned it and its numeric value are on the `MONARC_LOG` line
+  beside it
+- **Factory construction for both classes.** `Detail::Loader::Open` and
+  `VulkanBackend::Create` return a `Result<T>`, the shape `Platform::Library::Open` and
+  `Host::Window::Create` already use. Every failure message is a string literal, because
+  `Error::message` is a non-owning view and a factory that returns no object has nowhere else
+  to point; the composed detail — which library, which operation, which numeric `VkResult`,
+  which version was reported — goes to the log at the failure site. `VulkanBackend` allocates
+  its state inside `Create`, so a backend with no state cannot be handed to a caller.
+  **This departs from the plan's wording** for the loader's device-free test, which asks for
+  "`ErrorCode::NotFound` with a message naming it". The code and the test name the *missing
+  entry point* — a literal — and not the library, whose name is caller-supplied. The same
+  checkbox also asks for "the same shape as `Platform::Library`'s own tests", and
+  `Platform::Library::Open` returns the bare literal `"could not load library"`; the two halves
+  of that requirement pull in opposite directions, and this is the half that was kept
 - **`AdapterInfo`, `DeduplicateAdapters` and a three-rung capability tier** in `Monarc.RHI`, all
   pure and all tested with no device — which is what makes CI cover them
 - **`Monarc.FirstLight --adapters`**, which is also the `Monarc.RHI.Vulkan.Probe` CTest entry
@@ -441,16 +457,29 @@ same signature `JobSystem::Wait`'s worker guard produces. Verified twice over:
   chained create-info is load-bearing rather than good practice — without it, an
   instance-creation validation error is exactly the output that scrolls past.
 
-**Every new guard was violated on purpose and watched fail.** Eleven produced test failures:
+**Every new guard was violated on purpose and watched fail.** Twelve produced test failures:
 adjacent-only deduplication (caught by the A-B-A-B-A case and *not* by the four-identical-Intel
-case, which is why both exist); UUID comparison stopping at the first zero byte (caught at byte
-6 of the real Intel UUID); two tiers given distinct but descending values; one bindless
-requirement dropped; the loader leaving a library mapped and reporting a message naming
-nothing; both formats mapped to one `VkFormat`; the version decoded with the pre-Vulkan-SC
-open-coded shifts (caught *only* by the variant-bits case, since for variant 0 the old layout
-and the macros agree); `DeduplicateAdapters`' returned count ignored; a move-assignment that
-adopted without releasing; one accessor's null check removed (a SIGSEGV in the moved-from
-case); and the validation-default generator expression's polarity flipped.
+case); the in-place compaction deleted (caught *only* by the A-A-B case, which is the one whose
+survivors do not start at their final indices — the other cases' do, so all of them pass with
+the assignment gone while a real GPU would be dropped in favour of a duplicate); UUID
+comparison stopping at the first zero byte (caught at byte 6 of the real Intel UUID); two tiers
+given distinct but descending values; one bindless requirement dropped; a failed
+`VulkanBackend::Create` that did not deallocate its state (`CHECK( 152 == 0 )`); both formats
+mapped to one `VkFormat`; the version decoded with the pre-Vulkan-SC open-coded shifts (caught
+*only* by the variant-bits case, since for variant 0 the old layout and the macros agree);
+`DeduplicateAdapters`' returned count ignored; a move-assignment that adopted without
+releasing; one accessor's null check removed (a SIGSEGV in the moved-from case); and the
+validation-default generator expression's polarity flipped — which turns exactly the four
+non-Debug legs red and leaves both Debug legs green, because in Debug the correct answer and a
+hardcoded `true` are the same answer.
+
+**One expected mechanism turned out not to exist.** `Error::message` is a non-owning view, and
+the factory shape depends on every message being a string literal, so a message re-pointed at
+a buffer inside `VulkanBackend::State` was read after that state had been destroyed and
+deallocated. **`clang-asan` reported nothing at all** — the freed storage still held its bytes
+and the read went unnoticed. What failed was the test's exact-text comparison. So those two
+cases compare the whole message rather than searching it for a substring; a `find()` or a
+non-empty check would let the dangling case through on all six presets.
 
 Two produced **compile errors rather than test failures**, and the comments now say that rather
 than claiming a test covers them: two tiers given the same value — `error C2196: case value
@@ -461,9 +490,17 @@ decision a property of the build rather than a discipline.
 
 - Green on all six presets: 9 CTest entries each, including the device tests actually running
   against this machine's two adapters
-- 62 device-free doctest cases and 334 assertions across `Monarc.RHI.Tests` (33 cases, 212
-  assertions) and `Monarc.RHI.Vulkan.Tests` (29 / 122), plus 9 device-required cases and 37
+- 57 device-free doctest cases and 304 assertions across `Monarc.RHI.Tests` (34 cases, 217
+  assertions) and `Monarc.RHI.Vulkan.Tests` (23 / 87), plus 12 device-required cases and 56
   assertions — that last number scales with how many adapters a machine has
+- **Where those numbers moved, and why.** `VulkanBackend` is a factory, so a backend exists
+  only if it came up: move construction, move assignment, `Shutdown` and the accessors'
+  behaviour on a moved-from backend cannot be reached without a Vulkan implementation, and
+  those four cases are in `TestsDevice/` rather than `Tests/`. That is a real cost — the
+  moved-from accessor guard is one of the twelve above, and it no longer runs where there is no
+  device. It bought a state that cannot exist: a backend whose allocation failed used to be
+  reachable as `Initialize` returning `OutOfMemory`, and now `Create` returns that error with
+  no object attached at all
 
 **What CI will report is not yet known and is deliberately not claimed here.** The probe entry
 exists so that the runners' answer becomes an observed fact; reading it and writing it down is

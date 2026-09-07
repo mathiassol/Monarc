@@ -58,9 +58,9 @@ anywhere in the build. Implemented in Phase A3 Task 2 (`Monarc.RHI.Vulkan/Privat
 The reason is not purity. Linking the import library makes a missing Vulkan runtime a *Windows
 loader failure* — the process dies before `main` with a system dialog naming a DLL, which is
 useless to a player and unrecoverable by us. Loading it ourselves makes the same situation an
-ordinary `Result` with a message naming the library, which is what a shipped game needs and
-what [`Monarc.Host.Headless`](../Architecture/Module-Graph.md) needs in order to link no
-graphics API at all.
+ordinary `Result` a caller can act on, which is what a shipped game needs and what
+[`Monarc.Host.Headless`](../Architecture/Module-Graph.md) needs in order to link no graphics API
+at all.
 
 Two things make that a property rather than a discipline:
 
@@ -70,6 +70,35 @@ Two things make that a property rather than a discipline:
 - **Only the `Vulkan::Headers` interface target is linked**, from a pinned `FetchContent` tag
   rather than `find_package(Vulkan)`. A CI runner with no SDK still configures and builds — see
   [ADR-0014](../Architecture/Decisions/ADR-0014-dependency-policy.md).
+
+### The lifecycle is a factory, and the messages are literals
+
+`Detail::Loader::Open` and `VulkanBackend::Create` are static functions returning a
+`Result<T>`, the same shape `Platform::Library::Open` and `Host::Window::Create` use. Teardown
+(`Close`, `Shutdown`) is safe to call unconditionally and repeatedly, and bringing a loader or
+a backend back up means calling the factory again rather than re-initialising the object.
+`VulkanBackend` allocates its state inside `Create`, before anything is constructed, so a
+backend with no state is not a thing a caller can hold.
+
+`Error::message` is a non-owning view over storage that must outlive the error, and a factory
+that returns *no object* on failure has nowhere to point but static storage. So every failure
+message here is a string literal: the name of the missing entry point (from the X-macro's
+`#name`), the name of the missing instance extension (`VK_KHR_SURFACE_EXTENSION_NAME` and the
+platform's own are both literals), the `VkResult`'s spelling (`Detail::ToString` returns a
+pointer to one), and a bare sentence for the library that would not open — matching
+`Platform::Library::Open`'s own `"could not load library"`, since the library name is
+caller-supplied and the caller already has it.
+
+Composition goes to `MONARC_LOG` at the failure site instead: which library, which operation,
+the numeric `VkResult` alongside its spelling, and the version actually reported. **Nothing in
+Monarc branches on message text** — the `ErrorCode` carries what is branchable and the log
+carries what a human reads.
+
+A note on how thin the safety net is here. A message that *did* dangle — re-pointed at a
+buffer inside the backend's state and read after that state was freed — produced no
+`clang-asan` report at all when it was tried: the freed bytes were still there and the read
+went unnoticed. The tests therefore compare the whole message text rather than searching it,
+because that comparison is the only thing that catches it.
 
 ## Adapter identity is the device UUID, and only that
 
@@ -139,6 +168,15 @@ Loader diagnostics are marked GENERAL rather than VALIDATION and are logged with
 anything — an implicit overlay layer built against an older API version is a fact about a
 machine, not a bug in Monarc. A validation finding is a bug in Monarc's use of Vulkan, every
 time.
+
+The type qualifier is an **accepted narrowing**, not a free one. A finding the layer chose to
+type GENERAL rather than VALIDATION would be logged at Error and would not stop the process,
+indistinguishable here from the overlay-layer diagnostics. Khronos types its findings
+VALIDATION, so the risk is small against a certain cost: keying on severity alone would abort
+on every one of the several GENERAL loader errors a machine with implicit overlay layers emits
+per process start, which is a fatal messenger that cannot be run at all. Nothing tests this
+edge, because whether a finding is typed GENERAL is the layer's choice and not Monarc's to
+provoke.
 
 The messenger's create-info is also chained into `VkInstanceCreateInfo::pNext`, and that turns
 out to be load-bearing rather than good practice. Measured with a deliberately invalid
