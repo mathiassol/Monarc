@@ -457,7 +457,7 @@ same signature `JobSystem::Wait`'s worker guard produces. Verified twice over:
   chained create-info is load-bearing rather than good practice — without it, an
   instance-creation validation error is exactly the output that scrolls past.
 
-**Every new guard was violated on purpose and watched fail.** Twelve produced test failures:
+**Every new guard was violated on purpose and watched fail.** Fourteen produced test failures:
 adjacent-only deduplication (caught by the A-B-A-B-A case and *not* by the four-identical-Intel
 case); the in-place compaction deleted (caught *only* by the A-A-B case, which is the one whose
 survivors do not start at their final indices — the other cases' do, so all of them pass with
@@ -468,10 +468,14 @@ given distinct but descending values; one bindless requirement dropped; a failed
 mapped to one `VkFormat`; the version decoded with the pre-Vulkan-SC open-coded shifts (caught
 *only* by the variant-bits case, since for variant 0 the old layout and the macros agree);
 `DeduplicateAdapters`' returned count ignored; a move-assignment that adopted without
-releasing; one accessor's null check removed (a SIGSEGV in the moved-from case); and the
+releasing; one accessor's null check removed (a SIGSEGV in the moved-from case); the
 validation-default generator expression's polarity flipped — which turns exactly the four
 non-Debug legs red and leaves both Debug legs green, because in Debug the correct answer and a
-hardcoded `true` are the same answer.
+hardcoded `true` are the same answer; `Loader`'s two move operators defaulted again, which
+turns `CHECK( AllTablesEmpty(*source) )` red in both loader-move cases and in neither of the
+`IsOpen()` assertions beside them; and `Loader::operator=`'s `this != &other` guard removed,
+which turns both checks in the self-assignment case red — `x = std::move(x)` closes the
+library and then adopts the nulls `Close()` had just written.
 
 **One expected mechanism turned out not to exist.** `Error::message` is a non-owning view, and
 the factory shape depends on every message being a string literal, so a message re-pointed at
@@ -490,29 +494,44 @@ a property of the build rather than a discipline; and `VulkanBackend backend;`, 
 `error C2512: 'Monarc::RHI::VulkanBackend': no appropriate default constructor available` — the
 factory is the only way to come by one.
 
-**One header comment was wrong about the code it sat on, and measurement is what caught it.**
-`Loader`'s move is defaulted, and the class comment was written to say that a moved-from Loader
-is a closed one with every table null. It is not: `Platform::Library`'s move nulls the source's
-module handle, but the three entry-point tables are trivially copyable, so the defaulted move
-*copies* them and the source keeps the pointers. Observed — `IsOpen()` false while
-`Global().vkCreateInstance` is still non-null — and the comment now says that, with an
-assertion in the device suite pinning it. `IsOpen()` is the query that separates the two
-states; nothing in Monarc reads a table off a Loader it has moved from, so the move is left
-defaulted rather than hand-written to clear them.
+**One header comment was wrong about the code it sat on, and the code is what moved to meet
+it.** `Loader`'s move was defaulted, and the class comment claimed a moved-from Loader was a
+closed one with every table null. It was not: `Platform::Library`'s move nulls the source's
+module handle, but the three entry-point tables are trivially copyable, so a defaulted move
+*copies* them and the source keeps the pointers — `IsOpen()` false while
+`Global().vkCreateInstance` still non-null, observed rather than reasoned about. The first
+answer was to document that, on the grounds that nothing in Monarc reads a table off a Loader
+it has moved from; but that is a claim about today's callers rather than about the type, and
+Tasks 3 and 4 add callers. So both move operators are now written out and both clear the
+source, which makes a moved-from Loader indistinguishable from a default-constructed one.
+
+The hazard being closed is a real one and not tidiness: the source's copied pointers address a
+module it no longer owns, so a call through one after the destination is destroyed is a
+use-after-unload — and the ASan finding above is the evidence that nothing mechanical in this
+codebase would report it. `VulkanBackend::State::BringUp` is the caller that produces such a
+moved-from Loader in shipped code, at `loader = std::move(*opened)`.
 
 - Green on all six presets: 9 CTest entries each, including the device tests actually running
   against this machine's two adapters
 - 57 device-free doctest cases and 304 assertions across `Monarc.RHI.Tests` (34 cases, 217
-  assertions) and `Monarc.RHI.Vulkan.Tests` (23 / 87), plus 12 device-required cases and 57
+  assertions) and `Monarc.RHI.Vulkan.Tests` (23 / 87), plus 14 device-required cases and 68
   assertions — that last number scales with how many adapters a machine has
 - **Where those numbers moved, and why.** `VulkanBackend` is a factory, so a backend exists
   only if it came up: move construction, move assignment, `Shutdown` and the accessors'
   behaviour on a moved-from backend cannot be reached without a Vulkan implementation, and
   those four cases are in `TestsDevice/` rather than `Tests/`. That is a real cost — the
-  moved-from accessor guard is one of the twelve above, and it no longer runs where there is no
-  device. It bought a state that cannot exist: a backend whose allocation failed used to be
+  moved-from accessor guard is one of the fourteen above, and it no longer runs where there is
+  no device. It bought a state that cannot exist: a backend whose allocation failed used to be
   reachable as `Initialize` returning `OutOfMemory`, and now `Create` returns that error with
   no object attached at all
+- **`Loader`'s three move cases are device-only for the same shape of reason**, and it is not
+  the module handle: a default-constructed `Loader` is closed with no Vulkan present, so the
+  device-free suite can build one, but telling a move that *clears* the source's tables from
+  one that copies them needs a source whose tables were populated — and `Open` is the only
+  writer of those private members. With every table already null, the hand-written move, a
+  defaulted one and a `memcpy` produce identical objects, so an assertion placed in `Tests/`
+  could not fail. `Tests/TestVulkanLoader.cpp` says so at the foot of the file rather than
+  carrying a case that always passes
 
 **What CI will report is not yet known and is deliberately not claimed here.** The probe entry
 exists so that the runners' answer becomes an observed fact; reading it and writing it down is
