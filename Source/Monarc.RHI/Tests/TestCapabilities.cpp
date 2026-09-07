@@ -26,20 +26,25 @@ constexpr CapabilityTier kTiers[] = {
 
 /// Capabilities that satisfy every requirement, and are therefore Advanced. Each test below
 /// takes this and removes exactly one thing.
+///
+/// `maxBindlessSampledImages` is 1048576 -- what both development-machine devices actually
+/// report -- and deliberately *not* `kMinBindlessSampledImages`. It used to be the floor
+/// exactly, which made the "exactly at the floor" subcase re-assign the value it already had:
+/// a subcase that removed nothing. Sitting comfortably above the floor means the two subcases
+/// either side of it both move the value.
 [[nodiscard]] Capabilities Everything() {
     Capabilities capabilities{};
-    capabilities.apiVersion               = ApiVersion{1, 3, 0};
-    capabilities.timelineSemaphores       = true;
-    capabilities.dynamicRendering         = true;
-    capabilities.synchronization2         = true;
-    capabilities.nonUniformIndexing       = true;
-    capabilities.runtimeDescriptorArray   = true;
+    capabilities.apiVersion                = ApiVersion{1, 3, 0};
+    capabilities.timelineSemaphores        = true;
+    capabilities.dynamicRendering          = true;
+    capabilities.synchronization2          = true;
+    capabilities.nonUniformIndexing        = true;
+    capabilities.runtimeDescriptorArray    = true;
     capabilities.partiallyBoundDescriptors = true;
-    capabilities.maxBindlessSampledImages = Monarc::RHI::kMinBindlessSampledImages;
-    capabilities.queueFamilyCount         = 3;
-    capabilities.graphicsQueueFamilyCount = 1;
-    capabilities.meshShading              = true;
-    capabilities.rayTracing               = true;
+    capabilities.maxBindlessSampledImages  = 1048576;
+    capabilities.graphicsQueueFamilyCount  = 1;
+    capabilities.meshShading               = true;
+    capabilities.rayTracing                = true;
     return capabilities;
 }
 
@@ -47,22 +52,18 @@ constexpr CapabilityTier kTiers[] = {
 /// family, every descriptor-indexing feature, a million update-after-bind sampled images,
 /// and no mesh shading or ray tracing.
 [[nodiscard]] Capabilities IntelUhd730() {
-    Capabilities capabilities        = Everything();
-    capabilities.apiVersion         = ApiVersion{1, 3, 275};
-    capabilities.maxBindlessSampledImages = 1048576;
-    capabilities.queueFamilyCount   = 2;
-    capabilities.meshShading        = false;
-    capabilities.rayTracing         = false;
+    Capabilities capabilities = Everything();
+    capabilities.apiVersion   = ApiVersion{1, 3, 275};
+    capabilities.meshShading  = false;
+    capabilities.rayTracing   = false;
     return capabilities;
 }
 
 /// The RTX 3070 Ti as measured: Vulkan 1.4.351, sixteen graphics queues in the first of six
 /// families, and mesh shading and ray tracing both present.
 [[nodiscard]] Capabilities Rtx3070Ti() {
-    Capabilities capabilities             = Everything();
-    capabilities.apiVersion               = ApiVersion{1, 4, 351};
-    capabilities.maxBindlessSampledImages = 1048576;
-    capabilities.queueFamilyCount         = 6;
+    Capabilities capabilities = Everything();
+    capabilities.apiVersion   = ApiVersion{1, 4, 351};
     return capabilities;
 }
 
@@ -81,50 +82,52 @@ TEST_CASE("kTiers lists every CapabilityTier enumerator") {
           std::string_view(Monarc::RHI::ToString(static_cast<CapabilityTier>(4242))));
 }
 
-TEST_CASE("the tiers are distinct and strictly ascending") {
+TEST_CASE("the tiers are strictly ascending") {
     // MeetsTier is literally `DetermineTier(capabilities) >= tier`, so the enumerator values
-    // *are* the comparison. Distinct but descending values -- Bindless = 5 and Advanced = 3
-    // -- compile without a warning and make a device that meets Bindless also report as
-    // meeting Advanced. Verified by doing exactly that: this case and two of the knock-out
-    // cases below went red together.
+    // *are* the comparison, and this one line is what pins them. Distinct but descending
+    // values -- Bindless = 5 and Advanced = 3 -- compile without a warning and make a device
+    // that meets Bindless also report as meeting Advanced. Measured, by setting exactly that:
+    // this assertion goes red at i = 3, and two of the knock-out cases below go with it.
     //
-    // The other way to break the order, giving two enumerators the same value, never reaches
-    // a test: ToString's `default`-less switch in Capabilities.cpp then has two cases with
-    // one value and the module does not compile (MSVC C2196). Also verified.
+    // Distinctness needs no assertion of its own. `<` implies it, and the way it actually gets
+    // broken -- two enumerators with the *same* value -- never reaches a test at all:
+    // ToString's `default`-less switch in Capabilities.cpp then has two cases with one value
+    // and the module does not compile (MSVC C2196). Also verified.
+    //
+    // What this case used to also carry was twenty assertions of trichotomy and transitivity
+    // of `<` over u32-backed enumerators, described as "what makes 'total order' a checked
+    // claim rather than a word in a comment". They check the language: they hold for every
+    // possible assignment of enumerator values. Measured with Bindless = 5, Advanced = 3 --
+    // exactly 1 of that case's 26 assertions failed, and it was this one.
     for (Monarc::usize i = 1; i < std::size(kTiers); ++i) {
         CHECK(kTiers[i - 1] < kTiers[i]);
-        CHECK(kTiers[i - 1] != kTiers[i]);
-    }
-
-    // Antisymmetry and transitivity over every pair and triple. Cheap, and it is what makes
-    // "total order" a checked claim rather than a word in a comment.
-    for (const CapabilityTier a : kTiers) {
-        for (const CapabilityTier b : kTiers) {
-            CHECK(((a < b) + (a == b) + (a > b)) == 1);
-            for (const CapabilityTier c : kTiers) {
-                if (a < b && b < c) {
-                    CHECK(a < c);
-                }
-            }
-        }
     }
 }
 
-TEST_CASE("MeetsTier is monotone: meeting a tier means meeting every tier below it") {
-    // Checked across a spread of capability sets rather than one, because monotonicity is a
-    // property of the requirement ladder and not of any single device.
-    const Capabilities sets[] = {Capabilities{}, Everything(), IntelUhd730(), Rtx3070Ti()};
-    for (const Capabilities& capabilities : sets) {
-        const CapabilityTier reached = DetermineTier(capabilities);
-        for (const CapabilityTier tier : kTiers) {
-            CHECK(MeetsTier(capabilities, tier) == (tier <= reached));
-        }
-    }
-}
+// **There is no "MeetsTier is monotone" case, and that is a measurement rather than an
+// oversight.** It read
+// `CHECK(MeetsTier(capabilities, tier) == (tier <= reached))` with
+// `reached = DetermineTier(capabilities)`, over four capability sets. Since MeetsTier *is*
+// `DetermineTier(...) >= tier`, that reduces to `(reached >= tier) == (tier <= reached)`,
+// which holds for any requirement ladder whatsoever. Capabilities.h:151-156 explains why
+// monotonicity is structural: reaching Advanced means falling through the Bindless test
+// first, so "meets a tier without meeting the one below it" is unrepresentable.
+//
+// Measured twice. Making DetermineTier return Advanced where Baseline is right -- precisely
+// the case that comment called unrepresentable -- left all 16 of its assertions green while
+// five in the knock-out cases below went red. And the one thing it did pin, that MeetsTier
+// uses `>=` and not `>`, is already pinned three times over elsewhere: the `>` mutation turns
+// `MeetsTier(nothing, Unsupported)` red below, plus the two `MeetsTier(..., Bindless)`
+// assertions in "no mesh shading" and in the development-machine case. A fourth copy of one
+// fact is what this branch is removing, not adding.
 
 TEST_CASE("a default-constructed capability set is Unsupported, and meets only that") {
     const Capabilities nothing{};
     CHECK(DetermineTier(nothing) == CapabilityTier::Unsupported);
+
+    // This line is one of the three that carry the `>=`-not-`>` fact -- see the note above.
+    // `Unsupported > Unsupported` is false, so MeetsTier written with `>` fails here. Worth
+    // saying, because it reads like a restatement of the line above it and is not one.
     CHECK(MeetsTier(nothing, CapabilityTier::Unsupported));
     CHECK_FALSE(MeetsTier(nothing, CapabilityTier::Baseline));
     CHECK_FALSE(MeetsTier(nothing, CapabilityTier::Bindless));
@@ -180,15 +183,22 @@ TEST_CASE("a device missing one bindless requirement stops at Baseline") {
         capabilities.partiallyBoundDescriptors = false;
         CHECK(DetermineTier(capabilities) == CapabilityTier::Baseline);
     }
-    SUBCASE("a descriptor heap one below the floor") {
+}
+
+TEST_CASE("the bindless descriptor floor is inclusive") {
+    // Its own case rather than two subcases of "a device missing one bindless requirement
+    // stops at Baseline", because half of it asserts Advanced and that title says otherwise.
+    // Both subcases move maxBindlessSampledImages away from Everything()'s 1048576, so both
+    // are genuinely setting the value they name.
+    SUBCASE("one below the floor stops at Baseline") {
         // One below, not zero: the comparison is `>=`, and off-by-one in either direction is
         // the mistake a threshold invites.
-        Capabilities capabilities = Everything();
+        Capabilities capabilities             = Everything();
         capabilities.maxBindlessSampledImages = Monarc::RHI::kMinBindlessSampledImages - 1;
         CHECK(DetermineTier(capabilities) == CapabilityTier::Baseline);
     }
-    SUBCASE("a descriptor heap exactly at the floor") {
-        Capabilities capabilities = Everything();
+    SUBCASE("exactly at the floor reaches Advanced") {
+        Capabilities capabilities             = Everything();
         capabilities.maxBindlessSampledImages = Monarc::RHI::kMinBindlessSampledImages;
         CHECK(DetermineTier(capabilities) == CapabilityTier::Advanced);
     }

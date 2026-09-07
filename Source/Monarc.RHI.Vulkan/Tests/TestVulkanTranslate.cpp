@@ -55,15 +55,6 @@ constexpr Format kAllFormats[] = {
 /// underlying type.
 constexpr Format kNotAFormat = static_cast<Format>(4242);
 
-/// Every VkPhysicalDeviceType, including the MAX_ENUM sentinel every generated Vulkan enum
-/// carries. The sentinel is in the list because it is an enumerator, and because it is the one
-/// the `default`-less switch in Translate.cpp had to be given a case for.
-constexpr VkPhysicalDeviceType kAllPhysicalDeviceTypes[] = {
-    VK_PHYSICAL_DEVICE_TYPE_OTHER,       VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU,
-    VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU, VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU,
-    VK_PHYSICAL_DEVICE_TYPE_CPU,          VK_PHYSICAL_DEVICE_TYPE_MAX_ENUM,
-};
-
 }  // namespace
 
 TEST_CASE("every format maps to the Vulkan format that spells the same thing") {
@@ -156,12 +147,11 @@ TEST_CASE("the MAX_ENUM sentinel and an unrecognised value both mean Other") {
     CHECK(ToDeviceType(VK_PHYSICAL_DEVICE_TYPE_MAX_ENUM) == DeviceType::Other);
     CHECK(ToDeviceType(static_cast<VkPhysicalDeviceType>(4242)) == DeviceType::Other);
 
-    // And nothing in the list translates to a value outside DeviceType's own enumerators,
-    // which is what "maps to exactly one Vulkan enumerator" means in this direction.
-    for (const VkPhysicalDeviceType type : kAllPhysicalDeviceTypes) {
-        CHECK_FALSE(std::string_view(Monarc::RHI::ToString(ToDeviceType(type))) ==
-                    "<invalid DeviceType>");
-    }
+    // A loop over every VkPhysicalDeviceType asserting that none of them translates to a
+    // value outside DeviceType's enumerator set used to sit here. It was six assertions with
+    // no behaviour of their own: the only way to fail it is a case returning an out-of-range
+    // static_cast, and such a case fails one of the five direct assertions in "every Vulkan
+    // device type maps to the RHI device kind of the same name" first.
 }
 
 TEST_CASE("a packed Vulkan version decodes to its three parts") {
