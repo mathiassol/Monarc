@@ -88,10 +88,14 @@ TEST_CASE("order is preserved when nothing is a duplicate") {
     CHECK(NameOf(adapters[2]) == "third");
 }
 
-TEST_CASE("a duplicate that is not adjacent to its original still collapses, in place") {
-    // A B A B A. Compacting has to move survivors *forward* here, which the adjacent-only
-    // case above never exercises: an implementation that only compared each entry with the
-    // one before it would return 5.
+TEST_CASE("a duplicate that is not adjacent to its original still collapses") {
+    // A B A B A. What this exercises is the *span* of the duplicate check: every entry is
+    // measured against the whole kept prefix rather than against the entry before it, and an
+    // implementation that compared only with the previous survivor would return 5 here.
+    //
+    // It does not exercise the compaction. Both survivors are already at indices 0 and 1, so
+    // `kept != i` is false on every iteration and nothing is ever moved -- which is true of
+    // every case in this file except the one below it.
     AdapterInfo adapters[] = {
         Adapter("nvidia-1", kNvidiaUuid), Adapter("intel-1", kIntelUuid),
         Adapter("nvidia-2", kNvidiaUuid), Adapter("intel-2", kIntelUuid),
@@ -103,6 +107,33 @@ TEST_CASE("a duplicate that is not adjacent to its original still collapses, in 
     REQUIRE(kept == 2);
     CHECK(NameOf(adapters[0]) == "nvidia-1");
     CHECK(NameOf(adapters[1]) == "intel-1");
+}
+
+TEST_CASE("a duplicate ahead of a distinct entry does not displace it") {
+    // A A B, and it is the only case here whose survivors do *not* start at their final
+    // indices: the NVIDIA card has to be moved from index 2 to index 1 by the compaction.
+    //
+    // That makes this the case that fails when `adapters[kept] = adapters[i]` is deleted.
+    // Without it the array is left as [intel-1, intel-2, nvidia] and the returned count is
+    // still 2, so `VulkanBackend::EnumerateAdapters` -- which calls ShrinkTo(out, kept) --
+    // would hand a caller two Intel entries and drop the NVIDIA card. A driver reporting its
+    // devices in that order is all it takes; this machine's happens to report the distinct
+    // one first, and CI has no devices at all, so the defect is invisible on both.
+    AdapterInfo adapters[] = {
+        Adapter("intel-1", kIntelUuid),
+        Adapter("intel-2", kIntelUuid),
+        Adapter("nvidia", kNvidiaUuid),
+    };
+
+    const Monarc::usize kept = DeduplicateAdapters(std::span<AdapterInfo>(adapters));
+
+    // The count is not the assertion. The count is 2 either way -- it is the identities that
+    // say *which* two, and the second survivor is the card, not the duplicate.
+    REQUIRE(kept == 2);
+    CHECK(NameOf(adapters[0]) == "intel-1");
+    CHECK(NameOf(adapters[1]) == "nvidia");
+    CHECK(adapters[0].uuid == kIntelUuid);
+    CHECK(adapters[1].uuid == kNvidiaUuid);
 }
 
 TEST_CASE("two UUIDs differing by a single byte are two adapters, at every byte position") {
