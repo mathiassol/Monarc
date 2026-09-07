@@ -10,8 +10,18 @@ monarc_app(
     TIER         3
     PRIVATE_DEPS Monarc.Core Monarc.RHI Monarc.RHI.Vulkan Monarc.Host.Windowed)
 
-# No monarc_test_module(): Monarc.FirstLight has no Tests/ directory, and would be the wrong
-# place for one. It is an integration proof that currently exits non-zero on purpose, so
-# registering it with CTest would fail the suite for the one reason the suite must stay
-# sensitive to. Task 4 gives it a window and a zero exit; the tests that assert on that live
-# in the modules doing the work.
+# Monarc.FirstLight itself is deliberately not a CTest entry. It is an integration proof that
+# currently exits non-zero on purpose -- the window arrives in Task 4 -- so registering it
+# would fail the suite for the one reason the suite must stay sensitive to.
+#
+# Its `--adapters` mode is a different program with a different contract: it reports what
+# Vulkan sees on this machine and exits zero whatever it finds, including on a machine with no
+# Vulkan at all. That is exactly the probe the Phase A3 plan asks for, so it is registered as
+# one rather than reimplemented as one -- a second copy of "print the adapter lists" would be
+# a second thing to keep true, and the probe's whole value is that its output is trustworthy.
+#
+# Always runs, always passes, and its findings are read rather than asserted on. The gate for
+# adapter enumeration is Monarc.RHI.Vulkan.DeviceTests, which reports Skipped when there is no
+# device; this entry is what makes "the runner has no Vulkan" an observed fact in the CI log
+# instead of an assumption in a plan.
+monarc_probe_test(Monarc.RHI.Vulkan.Probe $<TARGET_FILE:Monarc.FirstLight> --adapters)

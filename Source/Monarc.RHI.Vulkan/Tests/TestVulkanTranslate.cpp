@@ -1,0 +1,202 @@
+#include <doctest/doctest.h>
+
+#include <Monarc/RHI/Capabilities.h>
+#include <Monarc/RHI/Types.h>
+
+#include <Translate.h>
+
+#include <iterator>
+#include <string_view>
+
+using Monarc::RHI::ApiVersion;
+using Monarc::RHI::DeviceType;
+using Monarc::RHI::Format;
+using Monarc::RHI::Detail::FromVulkan;
+using Monarc::RHI::Detail::ToApiVersion;
+using Monarc::RHI::Detail::ToDeviceType;
+using Monarc::RHI::Detail::ToVulkan;
+
+namespace {
+
+/// Every enumerator of Format, once. Same list and same reasoning as TestTypes.cpp's: the
+/// `default`-less switch in Translate.cpp already refuses a new enumerator nobody gave a case
+/// to, and this list covers the half the compiler cannot -- that the case it was given returns
+/// the *right* Vulkan format rather than a neighbouring row's.
+constexpr Format kAllFormats[] = {
+    Format::Unknown,
+    Format::R8G8B8A8_UNORM,
+    Format::B8G8R8A8_UNORM,
+};
+
+/// A value Format can hold that no enumerator names. Well-defined: Format has a fixed
+/// underlying type.
+constexpr Format kNotAFormat = static_cast<Format>(4242);
+
+/// Every VkPhysicalDeviceType, including the MAX_ENUM sentinel every generated Vulkan enum
+/// carries. The sentinel is in the list because it is an enumerator, and because it is the one
+/// the `default`-less switch in Translate.cpp had to be given a case for.
+constexpr VkPhysicalDeviceType kAllPhysicalDeviceTypes[] = {
+    VK_PHYSICAL_DEVICE_TYPE_OTHER,       VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU,
+    VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU, VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU,
+    VK_PHYSICAL_DEVICE_TYPE_CPU,          VK_PHYSICAL_DEVICE_TYPE_MAX_ENUM,
+};
+
+}  // namespace
+
+TEST_CASE("every format maps to the Vulkan format that spells the same thing") {
+    CHECK(ToVulkan(Format::Unknown) == VK_FORMAT_UNDEFINED);
+    CHECK(ToVulkan(Format::R8G8B8A8_UNORM) == VK_FORMAT_R8G8B8A8_UNORM);
+    CHECK(ToVulkan(Format::B8G8R8A8_UNORM) == VK_FORMAT_B8G8R8A8_UNORM);
+}
+
+TEST_CASE("kAllFormats lists every Format enumerator") {
+    // The list is only worth iterating if it is complete, and C++ cannot ask an enum how many
+    // enumerators it has. Same indirect check as TestTypes.cpp's: the index one past the end
+    // of the list must not name a format, which ToString answers by returning its
+    // not-a-format marker. Append an enumerator without extending this list and that index
+    // becomes a named format, and this fails.
+    const Format onePastTheList = static_cast<Format>(std::size(kAllFormats));
+    CHECK(std::string_view(Monarc::RHI::ToString(onePastTheList)) ==
+          std::string_view(Monarc::RHI::ToString(kNotAFormat)));
+}
+
+TEST_CASE("no two formats map to one Vulkan format") {
+    // The pair this matters for is B8G8R8A8_UNORM and R8G8B8A8_UNORM: they differ only in
+    // channel order, so a copy-paste in Translate.cpp giving them one VkFormat is invisible to
+    // every other test here and is exactly the confusion Task 3's exact-value readback exists
+    // to catch. Unknown is excluded because VK_FORMAT_UNDEFINED is legitimately shared with
+    // every value that is not a format at all.
+    for (const Format outer : kAllFormats) {
+        for (const Format inner : kAllFormats) {
+            if (outer != inner && outer != Format::Unknown && inner != Format::Unknown) {
+                CHECK(ToVulkan(outer) != ToVulkan(inner));
+            }
+        }
+    }
+}
+
+TEST_CASE("every format round-trips through Vulkan and back") {
+    // The property a swapchain format negotiated against a surface actually depends on: Task 4
+    // asks the surface what it supports, gets VkFormats back, and has to turn them into
+    // something Monarc can name.
+    for (const Format format : kAllFormats) {
+        CHECK(FromVulkan(ToVulkan(format)) == format);
+    }
+}
+
+TEST_CASE("a Vulkan format Monarc does not model comes back as Unknown, not as a guess") {
+    CHECK(FromVulkan(VK_FORMAT_R16G16B16A16_SFLOAT) == Format::Unknown);
+    CHECK(FromVulkan(VK_FORMAT_D24_UNORM_S8_UINT) == Format::Unknown);
+    // The near-misses matter most: these differ from a format Monarc does model by one letter,
+    // and a `default` that fell through to the wrong row would be caught here and nowhere else.
+    CHECK(FromVulkan(VK_FORMAT_R8G8B8A8_SRGB) == Format::Unknown);
+    CHECK(FromVulkan(VK_FORMAT_B8G8R8A8_SRGB) == Format::Unknown);
+    CHECK(FromVulkan(VK_FORMAT_R8G8B8A8_SNORM) == Format::Unknown);
+    CHECK(FromVulkan(VK_FORMAT_UNDEFINED) == Format::Unknown);
+}
+
+TEST_CASE("a value that is not a Format translates to undefined rather than to a real format") {
+    CHECK(ToVulkan(kNotAFormat) == VK_FORMAT_UNDEFINED);
+}
+
+TEST_CASE("every Vulkan device type maps to the RHI device kind of the same name") {
+    CHECK(ToDeviceType(VK_PHYSICAL_DEVICE_TYPE_OTHER) == DeviceType::Other);
+    CHECK(ToDeviceType(VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) == DeviceType::IntegratedGpu);
+    CHECK(ToDeviceType(VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) == DeviceType::DiscreteGpu);
+    CHECK(ToDeviceType(VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU) == DeviceType::VirtualGpu);
+    CHECK(ToDeviceType(VK_PHYSICAL_DEVICE_TYPE_CPU) == DeviceType::Cpu);
+}
+
+TEST_CASE("the four real device kinds map to four different RHI kinds") {
+    // Discrete and integrated are the two that actually occur on the development machine, and
+    // conflating them would make the tier report and any future device-selection heuristic
+    // silently wrong on a laptop. Other and MAX_ENUM are excluded: both legitimately mean
+    // "nothing better to say" and share DeviceType::Other.
+    constexpr VkPhysicalDeviceType kReal[] = {VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU,
+                                              VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU,
+                                              VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU,
+                                              VK_PHYSICAL_DEVICE_TYPE_CPU};
+    for (const VkPhysicalDeviceType outer : kReal) {
+        for (const VkPhysicalDeviceType inner : kReal) {
+            if (outer != inner) {
+                CHECK(ToDeviceType(outer) != ToDeviceType(inner));
+            }
+        }
+    }
+}
+
+TEST_CASE("the MAX_ENUM sentinel and an unrecognised value both mean Other") {
+    // MAX_ENUM is not a device kind and no driver returns it, but it is an enumerator, so the
+    // `default`-less switch in Translate.cpp had to be given a case for it. This pins where
+    // that case goes.
+    CHECK(ToDeviceType(VK_PHYSICAL_DEVICE_TYPE_MAX_ENUM) == DeviceType::Other);
+    CHECK(ToDeviceType(static_cast<VkPhysicalDeviceType>(4242)) == DeviceType::Other);
+
+    // And nothing in the list translates to a value outside DeviceType's own enumerators,
+    // which is what "maps to exactly one Vulkan enumerator" means in this direction.
+    for (const VkPhysicalDeviceType type : kAllPhysicalDeviceTypes) {
+        CHECK_FALSE(std::string_view(Monarc::RHI::ToString(ToDeviceType(type))) ==
+                    "<invalid DeviceType>");
+    }
+}
+
+TEST_CASE("a packed Vulkan version decodes to its three parts") {
+    CHECK(ToApiVersion(VK_MAKE_API_VERSION(0, 1, 3, 0)) == ApiVersion{1, 3, 0});
+    CHECK(ToApiVersion(VK_API_VERSION_1_3) == ApiVersion{1, 3, 0});
+    CHECK(ToApiVersion(VK_MAKE_API_VERSION(0, 1, 3, 275)) == ApiVersion{1, 3, 275});
+    CHECK(ToApiVersion(VK_MAKE_API_VERSION(0, 1, 4, 351)) == ApiVersion{1, 4, 351});
+}
+
+TEST_CASE("the packed versions the development machine actually reports decode correctly") {
+    // 4206867 and 4211039 are the integers `vulkaninfo` printed beside "1.3.275" and
+    // "1.4.351" for the two devices on this machine. Written as literals rather than built
+    // with VK_MAKE_API_VERSION on purpose: the case above already checks that the decoder
+    // agrees with the encoder, which would still hold if both had the same bug. These are the
+    // numbers a driver put in a struct.
+    CHECK(ToApiVersion(4206867) == ApiVersion{1, 3, 275});
+    CHECK(ToApiVersion(4211039) == ApiVersion{1, 4, 351});
+}
+
+TEST_CASE("the variant bits are dropped rather than folded into the version") {
+    // Variant 1 is Vulkan SC, a different specification Monarc does not target. A decoder that
+    // read the variant bits as part of the major version would report 1.3.0 here as something
+    // else entirely, and the difference is only visible on a value no ordinary driver produces.
+    CHECK(ToApiVersion(VK_MAKE_API_VERSION(1, 1, 3, 0)) == ApiVersion{1, 3, 0});
+    CHECK(ToApiVersion(VK_MAKE_API_VERSION(1, 1, 3, 0)) ==
+          ToApiVersion(VK_MAKE_API_VERSION(0, 1, 3, 0)));
+}
+
+TEST_CASE("a VkResult Monarc can receive is named by its own spelling") {
+    using Monarc::RHI::Detail::ToString;
+    CHECK(std::string_view(ToString(VK_SUCCESS)) == "VK_SUCCESS");
+    CHECK(std::string_view(ToString(VK_INCOMPLETE)) == "VK_INCOMPLETE");
+    CHECK(std::string_view(ToString(VK_ERROR_OUT_OF_HOST_MEMORY)) ==
+          "VK_ERROR_OUT_OF_HOST_MEMORY");
+    CHECK(std::string_view(ToString(VK_ERROR_OUT_OF_DEVICE_MEMORY)) ==
+          "VK_ERROR_OUT_OF_DEVICE_MEMORY");
+    CHECK(std::string_view(ToString(VK_ERROR_INITIALIZATION_FAILED)) ==
+          "VK_ERROR_INITIALIZATION_FAILED");
+    CHECK(std::string_view(ToString(VK_ERROR_LAYER_NOT_PRESENT)) ==
+          "VK_ERROR_LAYER_NOT_PRESENT");
+    CHECK(std::string_view(ToString(VK_ERROR_EXTENSION_NOT_PRESENT)) ==
+          "VK_ERROR_EXTENSION_NOT_PRESENT");
+    CHECK(std::string_view(ToString(VK_ERROR_INCOMPATIBLE_DRIVER)) ==
+          "VK_ERROR_INCOMPATIBLE_DRIVER");
+}
+
+TEST_CASE("a VkResult outside Monarc's table says so rather than guessing") {
+    using Monarc::RHI::Detail::ToString;
+    // Translate.h is explicit that this table is not exhaustive and cannot usefully be. What
+    // matters is that the fallback is honest: an unrecognised result must not be reported as
+    // VK_SUCCESS, and it must not be reported as any other real result either. The numeric
+    // value reaches the log through the call site, which is what keeps this actionable.
+    const std::string_view unknown = ToString(static_cast<VkResult>(-987654));
+    CHECK_FALSE(unknown.empty());
+    CHECK(unknown != "VK_SUCCESS");
+    CHECK(unknown.find("not in Monarc's table") != std::string_view::npos);
+
+    // VK_ERROR_DEVICE_LOST is a real result that Task 3's submissions can return and Task 2's
+    // calls cannot, so it is deliberately absent from the table today. Pinned here so that
+    // adding it is a visible change to this case rather than a silent one.
+    CHECK(std::string_view(ToString(VK_ERROR_DEVICE_LOST)) == unknown);
+}
