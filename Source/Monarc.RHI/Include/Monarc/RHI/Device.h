@@ -293,31 +293,41 @@ public:
     /// another with no padding, so the byte at `(x, y)` is at
     /// `(y * width + x) * BytesPerPixel(format)`.
     ///
-    /// `source` must be in `TextureLayout::TransferSource` and `destination` must be at least
-    /// that many bytes and have `BufferUsage::TransferDestination`.
+    /// `source` must have been created with `TextureUsage::TransferSource` and must be in
+    /// `TextureLayout::TransferSource`; `destination` must have been created with
+    /// `BufferUsage::TransferDestination` and must be at least that many bytes.
     ///
     /// Whole-texture rather than a region, and one mip level, because that is what A3 needs
     /// and a region struct nothing fills would be a guess about mip chains and sub-rect
     /// uploads that a later phase has to undo. A region-taking overload is an addition.
     ///
     /// Fails with `ErrorCode::InvalidArgument` for a list that is not recording, inside a
-    /// rendering pass, for either handle being unknown or stale, or for a destination too
-    /// small to hold the texture. `BeginRendering`'s note on the stale-handle case applies
-    /// here unchanged.
+    /// rendering pass, for either handle being unknown or stale, for either resource missing
+    /// the usage above, or for a destination too small to hold the texture.
+    /// `BeginRendering`'s note on the stale-handle case applies here unchanged.
+    ///
+    /// **The layout is the caller's and the two usages are checked, which is not an
+    /// inconsistency.** A usage is a fact about how the resource was created, so this call can
+    /// read it off the description it was given; a layout is state the caller's own barriers
+    /// moved, and nothing here tracks per-texture layout -- that is the render graph's job, for
+    /// the reason `RenderingDescription` gives. So the two preconditions are checkable here and
+    /// the layout one is not.
     [[nodiscard]] virtual Status CopyTextureToBuffer(TextureHandle source,
                                                      BufferHandle  destination) = 0;
 
 protected:
     ICommandList() = default;
 
-    // Protected and defaulted rather than absent. Deleting the copy operations above suppresses
-    // the implicit move operations too, so a derived class that needs to be movable would find
-    // the base's *deleted copy* constructor instead of a move. `VulkanDevice` is the one that
-    // needs it -- it is returned by value from a factory -- and declaring these on all three
-    // interfaces keeps movability a decision the derived class makes rather than one the
-    // interface forecloses.
-    ICommandList(ICommandList&&)            = default;
-    ICommandList& operator=(ICommandList&&) = default;
+    // **No move operations, and `IDevice` below has them for a reason this class does not
+    // share.** Deleting the copy operations above suppresses the implicit moves, so a derived
+    // class that needed to be movable would find the deleted copy constructor instead -- which
+    // is exactly why `IDevice` declares them: a `VulkanDevice` is returned by value from a
+    // factory. Nothing derived from this one is ever moved. The only implementation,
+    // `VulkanCommandList`, lives as an array member of a heap-allocated device state whose
+    // *pointer* is what moves, so declaring them here would be two lines with no user --
+    // measured, by deleting them and finding all six presets green. They come back with the
+    // first derived class that is moved, which is the rule this header states for its own
+    // enumerators.
 };
 
 /// A queue commands are submitted to, and the timeline that says when they finished.
@@ -340,9 +350,12 @@ public:
     /// Submits `commands` and returns the timeline value this submission will signal when it
     /// completes. The value is greater than every value returned before it on this queue.
     ///
-    /// `commands` must have been `End`ed and must have come from this queue's own device --
-    /// a list from another device is `ErrorCode::InvalidArgument`, not undefined behaviour,
-    /// which matters on a machine with two adapters and therefore two devices.
+    /// Fails with `ErrorCode::InvalidArgument` for a list still recording, for a list that has
+    /// recorded nothing since `IDevice::BeginFrame` handed it out, and for a list belonging to
+    /// another device -- none of the three is undefined behaviour. The last matters on a
+    /// machine with two adapters and therefore two devices; the middle one is what a frame loop
+    /// with an early-out between `BeginFrame` and `Begin` hits, and it is a distinct condition
+    /// from the first because a list that never began recording is not recording either.
     [[nodiscard]] virtual Result<u64> Submit(ICommandList& commands) = 0;
 
     /// Blocks until the timeline has reached `value`, or until `timeoutNanoseconds` elapses.
@@ -383,8 +396,8 @@ public:
 protected:
     IQueue() = default;
 
-    IQueue(IQueue&&)            = default;
-    IQueue& operator=(IQueue&&) = default;
+    // `ICommandList`'s note on the absent move operations, unchanged: the one implementation is
+    // a member of a device state that is never moved.
 };
 
 /// A logical device: one adapter, one graphics queue, the resources created on it, and the
@@ -500,7 +513,9 @@ protected:
     IDevice() = default;
 
     // See ICommandList's own note. A VulkanDevice is returned by value from a factory, so
-    // unlike the two interfaces above this one genuinely needs its move operations to exist.
+    // unlike the two interfaces above this one genuinely needs its move operations to exist --
+    // and `VulkanDevice`'s own move constructor names `IDevice(std::move(other))`, so deleting
+    // these two lines does not build.
     IDevice(IDevice&&)            = default;
     IDevice& operator=(IDevice&&) = default;
 };

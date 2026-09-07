@@ -73,7 +73,16 @@ constexpr u64 kTimelineWaitTimeoutNanoseconds = 5'000'000'000ULL;
 
 /// No pool slot ever has this index. Returned by the claim helpers when a pool is full, and
 /// the same convention `JobSystem::kNoSlot` uses.
+///
+/// **Pool slots only.** `FindGraphicsQueueFamily` has `kNoQueueFamily` of its own rather than
+/// borrowing this: a queue family index is a different domain, and one constant standing for
+/// "not a slot" and "not a family" at once would compare equal across the two by coincidence
+/// rather than by meaning.
 constexpr u32 kNoSlot = static_cast<u32>(-1);
+
+/// No queue family ever has this index. Returned by `FindGraphicsQueueFamily` when a physical
+/// device reports no family that can do graphics.
+constexpr u32 kNoQueueFamily = static_cast<u32>(-1);
 
 }  // namespace
 
@@ -147,9 +156,17 @@ struct FrameSlot {
     VkCommandPool   pool          = VK_NULL_HANDLE;
     VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
 
-    /// Zero until this slot has been submitted once. `BeginFrame` waits on it before resetting
-    /// the pool, and zero unambiguously means "never submitted" because the timeline starts at
-    /// zero and no submission signals it.
+    /// The value this slot's outstanding submission will signal, or zero when it has none.
+    /// `BeginFrame` waits on it before resetting the pool, and zero unambiguously means "there
+    /// is nothing to wait for" because the timeline starts at zero and no submission signals
+    /// it.
+    ///
+    /// Stamped by `IQueue::Submit` and cleared by the `BeginFrame` whose wait on it returned,
+    /// so the field describes what is still pending rather than what once was. Clearing is
+    /// what keeps "zero means nothing to wait for" true of a slot that was begun and never
+    /// submitted: without it such a slot carries an already-signalled value and the next wrap
+    /// waits on it again -- harmless, since the wait returns at once, but no longer the
+    /// meaning the field claims.
     u64 timelineValue = 0;
 };
 
@@ -166,10 +183,26 @@ public:
     /// state into the next frame.
     void Reset();
 
+    /// Forgets the command buffer as well as the recording state. `VulkanDeviceState::Shutdown`
+    /// calls this after destroying the command pools, which is what makes every recording call
+    /// on a shut-down device refuse rather than dispatch through a freed `VkCommandBuffer` --
+    /// see that function.
+    void Detach();
+
     [[nodiscard]] VkCommandBuffer Buffer() const { return m_buffer; }
     [[nodiscard]] u32             FrameIndex() const { return m_frameIndex; }
     [[nodiscard]] bool            IsRecording() const { return m_recording; }
     [[nodiscard]] bool            IsRendering() const { return m_rendering; }
+
+    /// Whether `Begin` and then `End` have both run since this list was last reset, so its
+    /// command buffer holds a recording a queue may submit.
+    ///
+    /// **Separate from `!IsRecording()`, and that is the whole point.** A list straight out of
+    /// `BeginFrame` is not recording either, because `BeginFrame` reset the pool and returned
+    /// its command buffer to Vulkan's initial state -- submitting that is
+    /// `VUID-vkQueueSubmit2-commandBuffer-03874` and stops the process. Only this says the
+    /// difference between "finished recording" and "never started".
+    [[nodiscard]] bool IsRecorded() const { return m_recorded; }
 
     [[nodiscard]] Status Begin() override;
     [[nodiscard]] Status End() override;
@@ -198,6 +231,7 @@ private:
     u32                m_frameIndex = 0;
     bool               m_recording  = false;
     bool               m_rendering  = false;
+    bool               m_recorded   = false;
 };
 
 class VulkanQueue final : public IQueue {
@@ -419,9 +453,13 @@ void VulkanDeviceState::ReleaseTextureSlot(TextureSlot& slot) {
 
 void VulkanDeviceState::ReleaseBufferSlot(BufferSlot& slot) {
     if (slot.mapped != nullptr) {
-        // Freeing memory that is still mapped is legal in Vulkan but leaves the caller holding
-        // a span into unmapped pages. Unmapping here means a caller that forgot cannot be
-        // handed one.
+        // Freeing memory that is still mapped is legal in Vulkan and draws no validation
+        // error, so what this branch prevents is not a leak: it is a caller left holding a
+        // span into unmapped pages, and a *slot* whose `mapped` still points at the previous
+        // occupant's mapping. The second half is the observable one -- with this branch gone,
+        // the next buffer to claim the slot is refused by `MapBufferForRead` as "already
+        // mapped", which is the assertion "destroying a mapped buffer unmaps it, so its slot
+        // can be mapped again" makes.
         functions.vkUnmapMemory(device, slot.memory);
         slot.mapped = nullptr;
     }
@@ -488,6 +526,20 @@ void VulkanDeviceState::Shutdown() {
         slot.timelineValue = 0;
     }
 
+    // **The lists are detached with the pools they point into, and that is not tidiness.** A
+    // `VulkanCommandList` a caller still holds from `BeginFrame` keeps its `m_recording` flag
+    // and its `VkCommandBuffer` across a shutdown, so a recording call made afterwards would
+    // dispatch a `vkCmd*` through a freed buffer on a destroyed `VkDevice`. `Shutdown` is
+    // documented as safe to call unconditionally and more than once, which puts that ordering
+    // in a teardown path rather than only behind a dangling pointer -- and
+    // Monarc/RHI/Vulkan/VulkanDevice.h promises every surface this class hands out answers
+    // safely on a shut-down device. Measured: with this loop absent,
+    // `BeginFrame -> Begin -> Shutdown -> Barrier(GlobalBarrier{})` exits 0xC0000409 where the
+    // same sequence without the barrier exits zero.
+    for (VulkanCommandList& list : lists) {
+        list.Detach();
+    }
+
     if (timeline != VK_NULL_HANDLE) {
         functions.vkDestroySemaphore(device, timeline, nullptr);
         timeline = VK_NULL_HANDLE;
@@ -517,11 +569,21 @@ void VulkanCommandList::Attach(VulkanDeviceState* state, u32 frameIndex) {
     m_buffer     = state->frames[frameIndex].commandBuffer;
     m_recording  = false;
     m_rendering  = false;
+    m_recorded   = false;
 }
 
 void VulkanCommandList::Reset() {
     m_recording = false;
     m_rendering = false;
+    // Cleared here and set in `End`, which is what makes `IQueue::Submit` able to tell a list
+    // that finished recording from one whose pool `BeginFrame` has just reset.
+    m_recorded = false;
+}
+
+void VulkanCommandList::Detach() {
+    Reset();
+    // The command buffer is gone with its pool, and this is what `Begin` and `CanRecord` see.
+    m_buffer = VK_NULL_HANDLE;
 }
 
 bool VulkanCommandList::CanRecord(const char* operation) const {
@@ -576,6 +638,9 @@ Status VulkanCommandList::End() {
         return m_state->FailVk("vkEndCommandBuffer", result);
     }
     m_recording = false;
+    // Set only after vkEndCommandBuffer succeeded, so a failed End leaves the list
+    // unsubmittable rather than claiming a recording the driver rejected.
+    m_recorded = true;
     return {};
 }
 
@@ -715,12 +780,26 @@ Status VulkanCommandList::BeginRendering(const RenderingDescription& description
                        "ICommandList::BeginRendering names a texture this device does not "
                        "have, or one whose handle is stale");
         }
-        if (slot->view == VK_NULL_HANDLE) {
+        if (!HasAny(slot->description.usage, TextureUsage::ColorAttachment)) {
             // A texture created without `TextureUsage::ColorAttachment` has no image view, and
             // dynamic rendering needs one -- see `CreateTexture`, where the eager version of
             // that view was a validation error on a transfer-only texture. Refusing here names
             // the missing usage; passing VK_NULL_HANDLE through would be
             // VUID-VkRenderingInfo-colorAttachmentCount-06087 and would stop the process.
+            //
+            // **The usage and not `slot->view == VK_NULL_HANDLE`, which is equivalent only for
+            // as long as `ColorAttachment` is the one view-compatible usage `TextureUsage`
+            // has.** `CreateTexture` says that changes: `Sampled` and `Storage` are
+            // view-compatible too and join the condition that makes a view, at which point a
+            // `Sampled`-only texture *has* a view, passes a null check, and becomes the
+            // validation error this refusal exists to prevent. The message names the usage, so
+            // the test is the usage.
+            //
+            // Measured: the two forms are observationally identical today -- with the null-view
+            // test back in, the device suite is green at 36 cases and 350 assertions -- so this
+            // is a change no test can distinguish and is stated as such rather than claimed to
+            // be caught. What *is* caught, by "a copy into a buffer too small to hold the
+            // texture is refused", is either form being removed altogether.
             return Err(ErrorCode::InvalidArgument,
                        "ICommandList::BeginRendering names a texture created without "
                        "TextureUsage::ColorAttachment, so it has no view to render into");
@@ -793,6 +872,24 @@ Status VulkanCommandList::CopyTextureToBuffer(TextureHandle source, BufferHandle
                    "device has, or its handle is stale");
     }
 
+    // **Both usages, refused by name, for `BeginRendering`'s reason one paragraph up in this
+    // file.** A copy out of an image with no `VK_IMAGE_USAGE_TRANSFER_SRC_BIT` is
+    // `VUID-VkCopyImageToBufferInfo2-srcImage-00186` and a copy into a buffer with no
+    // `VK_BUFFER_USAGE_TRANSFER_DST_BIT` is `VUID-…-dstBuffer-00191`; both stop the process
+    // with the fatal messenger installed, and both are the same class of caller mistake as an
+    // attachment created without `TextureUsage::ColorAttachment`, which is already a returned
+    // `Status`. The descriptions are on the slots, so each is one `HasAny`.
+    if (!HasAny(texture->description.usage, TextureUsage::TransferSource)) {
+        return Err(ErrorCode::InvalidArgument,
+                   "ICommandList::CopyTextureToBuffer's source texture was created without "
+                   "TextureUsage::TransferSource, so it cannot be copied out of");
+    }
+    if (!HasAny(buffer->description.usage, BufferUsage::TransferDestination)) {
+        return Err(ErrorCode::InvalidArgument,
+                   "ICommandList::CopyTextureToBuffer's destination buffer was created without "
+                   "BufferUsage::TransferDestination, so it cannot be copied into");
+    }
+
     const u64 required = static_cast<u64>(texture->description.extent.width) *
                          texture->description.extent.height *
                          BytesPerPixel(texture->description.format);
@@ -852,6 +949,18 @@ Result<u64> VulkanQueue::Submit(ICommandList& commands) {
         return Err(ErrorCode::InvalidArgument,
                    "IQueue::Submit was given a command list that is still recording; call End "
                    "first");
+    }
+    if (!list->IsRecorded()) {
+        // **The list straight out of `BeginFrame`, with nothing recorded into it.** Not the
+        // same condition as the one above: `BeginFrame` resets the whole pool, which returns
+        // the command buffer to Vulkan's initial state, and a list in that state is not
+        // recording either. Submitting one is `VUID-vkQueueSubmit2-commandBuffer-03874`
+        // ("is unrecorded and contains no commands") and, with the fatal messenger installed,
+        // stops the process -- so this is the refusal that keeps a frame loop with an early-out
+        // between `BeginFrame` and recording a returned Status instead.
+        return Err(ErrorCode::InvalidArgument,
+                   "IQueue::Submit was given a command list that has recorded nothing since "
+                   "BeginFrame; call Begin and End first");
     }
 
     const u64 signalValue = m_state->lastSubmittedValue + 1;
@@ -949,7 +1058,8 @@ u64 VulkanQueue::LastSubmittedValue() const {
 
 namespace {
 
-/// Index of the first queue family on `physicalDevice` that can do graphics, or `kNoSlot`.
+/// Index of the first queue family on `physicalDevice` that can do graphics, or
+/// `kNoQueueFamily`.
 ///
 /// First and not best: A3 has one queue and submits everything to it, so there is nothing to
 /// optimise between families. A transfer-only or async-compute family is a later phase's
@@ -959,7 +1069,7 @@ namespace {
     u32 count = 0;
     loader.Instance().vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &count, nullptr);
     if (count == 0) {
-        return kNoSlot;
+        return kNoQueueFamily;
     }
 
     Array<VkQueueFamilyProperties> families(allocator);
@@ -972,7 +1082,7 @@ namespace {
             return index;
         }
     }
-    return kNoSlot;
+    return kNoQueueFamily;
 }
 
 /// Creates the `VkDevice`, one graphics queue, the timeline semaphore and the per-frame command
@@ -1097,7 +1207,7 @@ Result<VulkanDevice> VulkanDeviceFactory::Create(IAllocator& allocator, const Lo
     }
 
     const u32 queueFamily = FindGraphicsQueueFamily(loader, allocator, physicalDevice);
-    if (queueFamily == kNoSlot) {
+    if (queueFamily == kNoQueueFamily) {
         // Reachable only on a device whose capabilities said it had a graphics family and then
         // did not, since VulkanBackend::CreateDevice checks the tier first. Kept because the
         // two facts come from two different queries.
@@ -1497,14 +1607,19 @@ Result<ICommandList*> VulkanDevice::BeginFrame() {
 
     if (slot.timelineValue != 0) {
         // The wait that makes the pool reset below legal: resetting a command pool whose
-        // buffers are still executing is undefined behaviour. Zero means this slot has never
-        // been submitted, so there is nothing to wait for.
+        // buffers are still executing is undefined behaviour. Zero means this slot has nothing
+        // outstanding, so there is nothing to wait for.
         if (Status waited =
                 m_state->queue.Wait(slot.timelineValue,
                                     Detail::kTimelineWaitTimeoutNanoseconds);
             !waited) {
             return std::unexpected(waited.error());
         }
+        // Cleared only once the wait has returned, which is the point at which the slot has
+        // nothing outstanding -- see `FrameSlot::timelineValue`. A wait that failed leaves the
+        // value in place, so the next attempt on this slot waits again rather than resetting a
+        // pool whose buffers may still be executing.
+        slot.timelineValue = 0;
     }
 
     if (const VkResult result =
