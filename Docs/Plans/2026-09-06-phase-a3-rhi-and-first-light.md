@@ -331,6 +331,23 @@ stop being premature. Neither is a defect today.
 - [ ] `Monarc.FirstLight`'s main loop: acquire, barrier undefined → colour attachment, begin
       rendering with a clear, end, barrier → present, submit, present, advance the timeline.
 - [ ] Clean shutdown: wait on the timeline, destroy in reverse order, and exit zero.
+- [ ] **Turn `VulkanCommandList`'s four state flags into one `enum class State`, and do it
+      while adding the fifth state rather than after.** Task 3 enumerated the machine —
+      `Reset`, `Recording`, `Recorded`, `Submitted`, tracked by `m_recording`, `m_recorded`,
+      `m_submitted` and `m_rendering` — and closing that table found **three** reachable holes,
+      each of which was a named VUID in Debug and **silent undefined behaviour in Release**,
+      where validation is off. The table and its transitions are written down in
+      `Private/VulkanDeviceState.h` and [Status.md](../Status.md).
+
+      Four bools cannot make an unaudited method a compile error; an exhaustive `switch` over
+      a `State` enum can, because `/w44062` is on. That is the same class of guarantee as
+      `TextureBarrier`'s required layout pair and `VK_NO_PROTOTYPES` — not testable by
+      assertion, demonstrable by writing the bad code and watching it fail to compile.
+
+      Deliberately deferred to here rather than done in Task 3, for one reason: **the
+      swapchain adds the fifth state.** A list holding an acquired image is a state the machine
+      does not yet have, and designing the enum with it in hand beats designing it blind and
+      bolting the state on. Roughly sixty mechanical lines across two files.
 
 ### Tests
 
