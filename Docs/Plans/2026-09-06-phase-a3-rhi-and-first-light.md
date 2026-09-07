@@ -287,6 +287,29 @@ This is the task that makes the phase automatable. Everything here runs without 
 **Verification.** `ctest -L gpu` green locally on both adapters; `ctest` in CI reports the gpu
 tests as **skipped**, not passed. Confirm the skip appears in CI's output by reading it.
 
+### Notes carried over from Task 2's code-quality review
+
+Two things Task 2's review found and deliberately left alone, because Task 3 is where they
+stop being premature. Neither is a defect today.
+
+- [ ] **Consolidate the resolve macros.** `MONARC_VK_RESOLVE_GLOBAL` and
+      `MONARC_VK_RESOLVE_INSTANCE` in `Private/Loader.cpp` differ only in the table they write
+      and two words of wording. A third copy for the device table is the point at which
+      parameterising pays — not before, which is why Task 2 left two.
+
+      Related, and larger: today "optional" means "its own table". That works for the one
+      extension Monarc asks for (`VK_EXT_debug_utils`, whose absence is not an error) and
+      multiplies badly once mesh-shader, ray-tracing and swapchain entry points arrive with
+      *per-adapter* availability. `Private/Loader.h`'s three-table comment anticipates the
+      device table but not per-function optionality; a resolved-or-null flag per entry, or a
+      `Resolve(..., Required | Optional)` parameter, is the shape to consider when the device
+      table lands.
+- [ ] **Extract the messenger block from `BringUp`.** `Private/VulkanBackend.cpp`'s messenger
+      creation needs only `instance`, `messengerInfo` and the loader, and comes out cleanly.
+      `BringUp`'s remaining length is partly forced and should stay: `messengerInfo`,
+      `enabledExtensions` and `applicationInfo` must all outlive the `vkCreateInstance` call
+      that reads them, so they cannot move into helpers that return.
+
 ---
 
 ## Task 4: A window, a surface, a swapchain, and first light
@@ -341,6 +364,25 @@ That capture is the proof that the pixels came from where we think they did.
 - [ ] Update [RHI.md](../Rendering/RHI.md) where A3 turned an intention into a fact —
       particularly the loader decision and the adapter-identity rule.
 - [ ] Update [M0](../Milestones/M0-First-Light.md) to mark A3 complete.
+
+### Notes carried over from Task 2's code-quality review
+
+- [ ] **Decide whether `TestsRuntime/` earns a third binary — after reading the probe's real CI
+      output, not before.** Six cases in `TestsDevice/TestVulkanDevice.cpp` need a Vulkan
+      **runtime**, not a **device**: the three `Loader` move cases, "opening a library that is
+      not the Vulkan loader still fails on a machine that has one", the instance-version case,
+      and the validation-implication case. They sit behind `main`'s `adapters.IsEmpty()` gate,
+      so on a machine with `vulkan-1.dll` and no registered ICD all six are skipped though
+      every one could have run. Whether that is worth a third outcome depends entirely on what
+      the runners actually have, which is the checkbox above this one.
+
+      Related, and independent of that decision: **in CI the X-macro resolution loops are
+      compiled and never executed**, because the device-free suite stops at `Loader::Open`'s
+      second check — no `vulkan-1.dll`, no resolution. A test-only DLL exporting a stub
+      `vkGetInstanceProcAddr` that returns null for one named function would make the
+      "returned null for X" branch executable in CI, and would also make `Loader.cpp`'s
+      table-clearing on partial failure observable. Task 2 proved that path by mutation
+      instead, which is not the same as covering it.
 
 ---
 

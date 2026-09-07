@@ -448,7 +448,13 @@ whose whole job is being the honest account cannot be.
 **Three test outcomes, because a suite that silently runs nothing while showing green is the
 failure mode this phase is shaped to avoid.** `ctest` now reports nine entries under four
 labels: `unit` (five, device-free, run everywhere), `gpu` (one, `SKIP_RETURN_CODE 77`),
-`probe` (one, always runs and always passes) and `architecture` (two).
+`probe` (one, always runs and passes on any finding) and `architecture` (two).
+
+"Passes on any finding" rather than "always passes", and the distinction is real: the probe
+exits zero whatever it observes about the machine, including no Vulkan at all, but in Debug it
+runs with validation on and the fatal messenger installed — so a VALIDATION-type error stops
+it at `0x80000003` and CTest reports the entry **Failed**. What it declines to gate on is the
+machine, not Monarc's use of Vulkan while looking at it.
 
 The skip machinery was demonstrated in both directions rather than trusted. Pointing the
 registered `gpu` command at a library that cannot exist:
@@ -490,8 +496,10 @@ adjacent-only deduplication (caught by the A-B-A-B-A case and *not* by the four-
 case); the in-place compaction deleted (caught *only* by the A-A-B case, which is the one whose
 survivors do not start at their final indices — the other cases' do, so all of them pass with
 the assignment gone while a real GPU would be dropped in favour of a duplicate); UUID
-comparison stopping at the first zero byte (caught at byte 6 of the real Intel UUID); two tiers
-given distinct but descending values; one bindless requirement dropped; a failed
+comparison stopping at the first zero byte (caught at byte 6 of the real Intel UUID — that
+mutation is no longer expressible, since `AdapterUuid::operator==` is now defaulted; see the
+review pass below); two tiers given distinct but descending values; one bindless requirement
+dropped; a failed
 `VulkanBackend::Create` that did not deallocate its state (`CHECK( 152 == 0 )`); both formats
 mapped to one `VkFormat`; the version decoded with the pre-Vulkan-SC open-coded shifts (caught
 *only* by the variant-bits case, since for variant 0 the old layout and the macros agree);
@@ -541,9 +549,12 @@ moved-from Loader in shipped code, at `loader = std::move(*opened)`.
 
 - Green on all six presets: 9 CTest entries each, including the device tests actually running
   against this machine's two adapters
-- 57 device-free doctest cases and 304 assertions across `Monarc.RHI.Tests` (34 cases, 217
-  assertions) and `Monarc.RHI.Vulkan.Tests` (23 / 87), plus 14 device-required cases and 68
-  assertions — that last number scales with how many adapters a machine has
+- 67 device-free doctest cases and 247 assertions across `Monarc.RHI.Tests` (36 cases, 128
+  assertions) and `Monarc.RHI.Vulkan.Tests` (31 / 119), plus 15 device-required cases and 80
+  assertions — that last number scales with how many adapters a machine has. Ten more
+  device-free cases than the task first delivered and 57 fewer assertions, which is the
+  review pass below: the new cases test things that were untestable, and the removed
+  assertions could not fail
 - **Where those numbers moved, and why.** `VulkanBackend` is a factory, so a backend exists
   only if it came up: move construction, move assignment, `Shutdown` and the accessors'
   behaviour on a moved-from backend cannot be reached without a Vulkan implementation, and
@@ -564,6 +575,83 @@ moved-from Loader in shipped code, at `loader = std::move(*opened)`.
 **What CI will report is not yet known and is deliberately not claimed here.** The probe entry
 exists so that the runners' answer becomes an observed fact; reading it and writing it down is
 A3 Task 5's checkbox.
+
+### A3 Task 2's code-quality review, and the three defects it found
+
+A mutation-based review of the delivered task caught 13 of 15 behavioural mutations. It also
+found three real defects, and every fix below was demonstrated by breaking the thing it guards
+and watching the failure.
+
+**A hand-sized stack array that the next edit overran.** `enabledExtensions[3]` in
+`VulkanBackend::State::BringUp` was sized by hand to match a `requiredExtensions` declared two
+lines *later*, and both `enabledExtensionCount++` sites are unchecked. Adding one required
+instance extension — Task 4 wants `VK_KHR_get_surface_capabilities2`, which this machine has —
+compiled clean on all six presets at `/W4 /WX` and produced, under `clang-asan`:
+
+```
+==16392==ERROR: AddressSanitizer: stack-buffer-overflow ... WRITE of size 8
+    [304, 328) 'enabledExtensions' (line 332) <== Memory access at offset 328 overflows this variable
+SUMMARY: ... VulkanBackend.cpp:370 in Monarc::RHI::VulkanBackend::State::BringUp
+```
+
+The size is now derived from the list, so the same edit grows the array. **No `static_assert`
+beside it**: with the size derived, an assertion that the list fits cannot fail, which is the
+category this same review pass deleted twenty of. `enabledLayers[1]` had the same shape and
+became an array that *is* its initialiser, with a count of 1 or 0 to select it — no counter to
+increment at all.
+
+**A half-populated entry-point table, called into unguarded.**
+`Loader::LoadInstanceFunctions` returned on the first name that would not resolve without
+clearing `m_instance`, on an object whose `IsOpen()` stays true —`Loader::Open`'s own comment
+promises that "nothing partially resolved leaves this function". And `vkDestroyInstance` is
+*first* in `MONARC_VK_INSTANCE_FUNCTIONS`, while `BringUp` creates the instance before
+resolving the table, so the likeliest half-populated table is the one missing the entry point
+its own teardown needs — which `State::Shutdown` then called with no null check. With
+`vkDestroyInstance` forced null on a machine that has Vulkan, `FirstLight --adapters` exited
+`0xC0000005`. Fixed on both sides; with both guards and the same forced null it exits 0,
+reports the leak at Error and returns `NotFound` naming the function.
+
+**Three `VkResult`s meaning "the capability is absent" were reported as `BackendFailure`.**
+`FailVk` funnelled every non-success result to it, including `VK_ERROR_INCOMPATIBLE_DRIVER`,
+`VK_ERROR_LAYER_NOT_PRESENT` and `VK_ERROR_EXTENSION_NOT_PRESENT`. The first is the standard
+outcome of `vkCreateInstance` on a machine with `vulkan-1.dll` and no registered ICD — very
+plausibly what CI is — so a caller written to fall back on `Unsupported` was not firing on the
+result that most deserves it. `Detail::ToErrorCode` now maps those three, tested; mapping them
+back turns 3 of 3 assertions red. Both out-of-memory results deliberately stay
+`BackendFailure`, because Monarc's `OutOfMemory` means *Monarc's* allocator returned nothing.
+
+**Two documented behaviours had no test at all, proven by mutation passing both suites.**
+Deleting `out.Clear()` from `EnumerateAdaptersRaw`, whose header states the contract, and
+moving `CopyName`'s bound from `kMaxAdapterNameLength - 1` to `kMaxAdapterNameLength` — a
+one-byte overrun of a fixed array. Both are now caught: the first turns 6 assertions red across
+2 cases (`7 == 5`, `3 == 2`), the second turns 4 red (`256 == 255`, `97 == 0`, and a clobbered
+guard). Four functions moved out of anonymous namespaces to make that possible — `CopyName`
+became `Monarc::RHI::CopyAdapterName` beside the field whose contract it implements, and
+`ContainsExtension`, `ContainsLayer` and `SeverityToLogLevel` moved into `Private/Translate.h`.
+
+The second of those needed a test *shape* as well as a location. With the destination as a bare
+local, the mutation is stack corruption and MSVC Debug stops at a runtime-check dialog before
+doctest reports anything — a hang, not a red assertion. Behind a run of guard bytes the stray
+byte lands in memory the test owns and the assertions simply fail.
+
+**Forty-five assertions were deleted for being unable to fail, each measured rather than
+argued.** The whole "MeetsTier is monotone" case reduced to `(reached >= tier) == (tier <=
+reached)`: making `DetermineTier` return `Advanced` where `Baseline` is right left all 16 of
+its assertions green while five in the knock-out cases went red. Twenty of the "total order"
+case's twenty-six were trichotomy and transitivity of `<` over `u32`-backed enumerators — with
+`Bindless = 5, Advanced = 3`, exactly 1 of 26 failed, and it was `kTiers[i-1] < kTiers[i]`,
+which is what survives. Six more went from `TestVulkanTranslate.cpp`, where a loop over every
+`VkPhysicalDeviceType` could only fail after five direct assertions above it had already
+failed. And `AdapterUuid`'s sixteen-position case, 64 assertions, became one at the byte
+position that matters: `operator==` is now defaulted, so the two bugs the comment cited as the
+reason for hand-writing it are not expressible, and byte 15 of the real Intel UUID is the zero
+byte a comparison in `DeduplicateAdapters` could still stop at.
+
+One instruction in the review was not followed, on evidence. It asked to keep a single
+assertion of the `>=`-not-`>` fact from the monotonicity case; measuring the `>` mutation showed
+it already turns three assertions red in other cases, so a fourth copy was the redundancy the
+rest of the pass was removing. The case that carries it now says so, to keep it from reading
+like a restatement of the line above it.
 
 ## Verification gates
 
