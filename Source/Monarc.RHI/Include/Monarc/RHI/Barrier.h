@@ -4,6 +4,7 @@
 #include <Monarc/RHI/Handles.h>
 
 #include <concepts>
+#include <string_view>
 
 namespace Monarc::RHI {
 
@@ -136,14 +137,19 @@ enum class TextureLayout : u32 {
 
 /// The enumerator's own spelling, for logs and test failures. Never nullptr.
 ///
-/// **The shipped caller of all three is a backend's barrier refusal.** When
-/// `ICommandList::Barrier` is handed a resource handle it cannot resolve it has no return
-/// value to report through, so the `MONARC_LOG` beside its `MONARC_CHECK` is where the
-/// barrier gets identified -- and identifying a barrier means naming its layout pair and its
-/// two synchronisation scopes. Monarc.RHI.Vulkan/Private/VulkanDevice.cpp's two
-/// handle-resolving `Barrier` overloads are that caller; a `MONARC_CHECK` message is a string
-/// literal by house rule, so the composed half has to live in a log line, and this is what
-/// composes it.
+/// **The shipped caller of all three is `Describe` at the foot of this header, and the shipped
+/// caller of `Describe` is a backend's barrier refusal.** When `ICommandList::Barrier` is
+/// handed a resource handle it cannot resolve it has no return value to report through, so
+/// the `MONARC_LOG` beside its `MONARC_CHECK` is where the barrier gets identified -- and
+/// identifying a barrier means naming its layout pair and its two synchronisation scopes.
+/// Monarc.RHI.Vulkan/Private/VulkanDevice.cpp's two handle-resolving `Barrier` overloads are
+/// where that log line is emitted; a `MONARC_CHECK` message is a string literal by house rule,
+/// so the composed half has to live in a log line, and `Describe` is what composes it.
+///
+/// The chain matters because the far end of it is fatal and therefore untestable in process:
+/// the refusal ends with `std::abort()` (see `ICommandList::Barrier` in Device.h), so no test
+/// can watch that log line being emitted and then go on to read it. `Describe` is the half
+/// that can be tested, and `Tests/TestBarrier.cpp` tests it with no device anywhere in sight.
 ///
 /// **A mask of several stages is not an enumerator and does not have a spelling here.**
 /// `ToString(Copy | Blit)` reports the not-a-stage name, exactly as a value no enumerator
@@ -326,5 +332,85 @@ private:
 // commands directly and A4's render graph is what will have a reason to overlap a transition
 // with unrelated work. The shape above is what a split barrier is built from either way, so
 // this is a field or a pair of calls added later rather than a different model.
+
+// ---------------------------------------------------------------------------------------
+// Describing a barrier in words.
+// ---------------------------------------------------------------------------------------
+//
+// **Why this is in Monarc.RHI and not in the backend that needs it.** Its only shipped caller
+// is Monarc.RHI.Vulkan's barrier refusal, and the obvious home was that module's
+// Private/Translate.h, whose stated membership rule -- total, allocation-free, touching no
+// Vulkan *state* -- these two functions satisfy. They are here instead for a reason that rule
+// does not cover: every other function in Translate.h names a Vulkan type in its signature,
+// and these name none. A `BufferBarrier` in and text out involves nothing Vulkan-shaped at
+// any point, so putting it behind a Vulkan module's private header would mean a second
+// backend either duplicates the composition or includes a header it has no business seeing.
+//
+// The narrower reason is that this is `ToString(PipelineStage)`'s own kind of function one
+// level up -- the spelling of a whole barrier rather than of one enumerator -- and those live
+// in Private/Barrier.cpp beside it. Keeping them together makes the shipped-caller chain a
+// single hop within one module: shipped code calls `Describe`, `Describe` calls all three
+// `ToString`s.
+//
+// The practical consequence is the one that decided it: Monarc.RHI's own test suite links no
+// Vulkan at all, so the composition is checked in CI on a machine with no GPU. That was not
+// true of the device-suite case this replaced.
+//
+// There is deliberately no `Describe(const GlobalBarrier&)`. A global barrier names no
+// resource, so it has no handle to resolve and no refusal path, and a third overload would be
+// one nothing calls -- which is the rule this module already applies to itself elsewhere (see
+// `TextureUsage` in Device.h, whose absent `TransferDestination` says the same thing).
+
+/// Chars a `BarrierDescription` holds, including the terminator.
+///
+/// Sized so that no description can be truncated, and the arithmetic is worth writing down
+/// because the widest description is not the one anyone would guess. The texture form is the
+/// longer of the two: 85 chars of fixed text, two `u32`s in decimal (10 each), two layout
+/// names, and four synchronisation fields that each carry a name *and* a hex mask. The longest
+/// name in each set belongs to a not-a-value marker rather than to any real enumerator --
+/// `<not a single PipelineStage>` is 28 chars where the longest stage, `ColorAttachmentOutput`,
+/// is 21 -- so a bound read off the enumerator lists would be too small for exactly the
+/// barrier this description exists to report. 85 + 20 + 2*23 + 2*(28 + 8) + 2*(27 + 8) + 1 is
+/// 294, and 320 is that with room to add a field without recomputing.
+///
+/// That is an *upper* bound and not the length of anything: it treats each field's longest
+/// name and its widest hex as independent, and they are not -- a name and a number are two
+/// views of one value. Measured, the widest description that actually exists is 283 chars for
+/// a texture barrier and 223 for a buffer one. Tests/TestBarrier.cpp builds both and asserts
+/// neither was clipped, so the constant is pinned rather than trusted.
+inline constexpr usize kBarrierDescriptionLength = 320;
+
+/// One barrier's identity and content, in words.
+///
+/// A returned struct rather than a `std::span<char>` out-parameter, which is
+/// `AdapterUuidString`'s shape in Adapter.h and is chosen for its reason: there is no buffer
+/// size to get wrong at a call site and nothing to document about one. It is filled through
+/// `std::format_to_n` and never allocates, which is ADR-0003's condition on `<format>` in
+/// runtime code.
+struct BarrierDescription {
+    char text[kBarrierDescriptionLength] = {};
+
+    [[nodiscard]] std::string_view View() const { return std::string_view(text); }
+};
+
+/// Describes `barrier`: which buffer, and both synchronisation scopes by name with each mask's
+/// hex beside it.
+///
+/// The hex is not decoration. A `syncBefore` of several stages is a mask and not an
+/// enumerator, so `ToString` reports its not-a-single-value name for one -- see the note on
+/// `ToString(PipelineStage)` above -- and the number is what keeps the line decodable when
+/// that happens.
+[[nodiscard]] BarrierDescription Describe(const BufferBarrier& barrier);
+
+/// Describes `barrier`: which texture, its layout pair, and both synchronisation scopes by
+/// name with each mask's hex.
+///
+/// The layout pair leads, because it is the half that is never a mask -- a texture is in
+/// exactly one layout -- so those two words are always real spellings. "Undefined ->
+/// ColorAttachment on a stale texture" names the transition the caller meant unambiguously,
+/// where a refusal that said only "a texture handle was stale" would leave whoever reads it
+/// to guess which of a frame's barriers it was. The layouts carry no hex for the same reason
+/// they lead: there is no mask to decode.
+[[nodiscard]] BarrierDescription Describe(const TextureBarrier& barrier);
 
 }  // namespace Monarc::RHI

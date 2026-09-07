@@ -221,9 +221,10 @@ public:
     /// and a command list that quietly skipped them would be deciding on the caller's behalf
     /// with less information than the caller had.
     ///
-    /// **A stale or unknown handle here is reported through the assertion handler and the
-    /// barrier is not recorded, where `BeginRendering` and `CopyTextureToBuffer` return
-    /// `ErrorCode::InvalidArgument` for the same condition. That asymmetry follows from the
+    /// **A stale or unknown handle here is reported through the assertion handler and the log
+    /// line beside it, and the process does not continue past the call (see below), where
+    /// `BeginRendering` and `CopyTextureToBuffer` return `ErrorCode::InvalidArgument` for the
+    /// same condition and their caller carries on. That asymmetry follows from the
     /// void return and from nothing else** -- not from a judgement that a bad handle matters
     /// more in a barrier than in a copy. These three return void because Vulkan's and D3D12's
     /// barrier commands do, which is the shape a render graph batching hundreds of them per
@@ -232,14 +233,27 @@ public:
     /// barrier naming a resource that does not exist -- undefined behaviour, and a validation
     /// error on the backend that has one -- or to refuse and say so out of band. It refuses.
     ///
-    /// Under the default assertion handler that ends the process, and it was measured rather
-    /// than assumed: a stale `TextureBarrier` prints `[assert] ... names a texture this device
-    /// does not have, or one whose handle is stale` and never returns to the caller, because
-    /// the handler asks for a debug break and an unhandled break is fatal. It is the *handler*
-    /// that decides, though, not this interface -- `MONARC_CHECK` alters no control flow of
-    /// its own, so a process that installed a handler returning false gets the report and a
-    /// barrier that was skipped. Assert.h makes the handler replaceable on purpose; what this
-    /// interface promises is the refusal, not the death.
+    /// **The refusal ends the process, and not at the handler's discretion.** `MONARC_CHECK`
+    /// alters no control flow of its own, so the check is followed by an unconditional
+    /// `MONARC_DEBUG_BREAK(); std::abort();` -- the house pattern from `JobSystem::Wait`
+    /// (see Docs/Runtime/Threading.md) and from the Vulkan backend's debug messenger, applied
+    /// here for the same reason. Without it, a handler that declines to break --
+    /// Shipping, or any test harness -- would get the report and then a *skipped barrier*, and
+    /// the rest of the frame would record as though the barrier had been asked for. A dropped
+    /// barrier is not a refused operation: it is a synchronisation hole whose symptom is wrong
+    /// pixels or a hang on some driver, and nothing in the resulting capture points back to
+    /// the call that caused it. `BeginRendering` and `CopyTextureToBuffer` do not need this
+    /// because their `Status` reaches the caller in every configuration.
+    ///
+    /// Measured, both ways, out of process, because in process there is nothing left to
+    /// measure with: a program that installs a handler returning `false` and issues a barrier
+    /// against a handle a real `DestroyTexture` made stale ends at `0x80000003` -- the debug
+    /// break, which is what stops it before `std::abort()` is reached -- and its next line
+    /// never runs; with the `return` this replaced, the same program reached that line and
+    /// exited zero. Docs/Status.md records both runs. The same fact is why the log line's
+    /// content is composed by `Describe` in Barrier.h rather than open-coded in the backend:
+    /// no test can survive the call to read what was logged, so the composition is tested
+    /// where it needs neither a device nor Vulkan.
     ///
     /// What is *not* asymmetric is the part ADR-0002 requires: all three paths **detect** the
     /// stale handle rather than dereferencing it. The difference is only in what they can say

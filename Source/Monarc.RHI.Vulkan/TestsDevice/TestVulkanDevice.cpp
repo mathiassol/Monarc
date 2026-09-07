@@ -39,7 +39,6 @@
 #include <Loader.h>
 #include <LoaderTables.h>
 
-#include <string>
 #include <string_view>
 #include <utility>
 
@@ -448,70 +447,6 @@ struct DeviceUnderTest {
 
     Monarc::SystemAllocator                   allocator;
     Monarc::Result<Monarc::RHI::VulkanDevice> created;
-};
-
-/// What one refused `ICommandList::Barrier` said, through both of the channels it has.
-///
-/// **This is what makes that refusal testable at all.** `Barrier` returns void, so it reports
-/// through `MONARC_CHECK` plus the `MONARC_LOG` beside it -- and under the default assertion
-/// handler the check's debug break ends the process, which was measured rather than assumed.
-/// A handler that declines to break is the only way a test can watch the refusal happen and
-/// then keep going, and Assert.h makes the handler replaceable for exactly that reason.
-/// Monarc.Core's TestAssert.cpp and TestLog.cpp are where both scoped-installer shapes come
-/// from.
-struct BarrierRefusal {
-    bool        assertFired = false;
-    std::string assertMessage;
-
-    /// The `VulkanDevice` error line, which is where the barrier gets identified.
-    ///
-    /// Messages from the `VulkanValidation` category are dropped rather than landing here, so
-    /// that a general-category line from the loader cannot overwrite the one this test reads.
-    /// **Not** because a validation error is expected: it cannot reach this sink and be
-    /// observed, since `VulkanBackend.cpp`'s messenger follows its `MONARC_CHECK` with an
-    /// unconditional `std::abort()` precisely so a declining handler cannot carry on. That is
-    /// measured -- neutering the texture resolve so the barrier really is recorded ends the
-    /// process after four assertions -- and it is why this case has no assertion about
-    /// validation staying quiet: there is no run in which such an assertion could be reached
-    /// and fail. What says the barrier was refused rather than recorded is that the case
-    /// finishes at all, and that the submission below completes.
-    std::string deviceLog;
-};
-
-BarrierRefusal g_refusal;
-
-bool DecliningAssertHandler(const char*, const char*, int, const char* message) {
-    g_refusal.assertFired   = true;
-    g_refusal.assertMessage = message != nullptr ? message : "";
-    return false;   // false: do not break, so the caller's own early return is what happens
-}
-
-void CapturingLogSink(const Monarc::LogRecord& record) {
-    if (record.level < Monarc::LogLevel::Error) {
-        return;
-    }
-    if (record.category != "VulkanValidation") {
-        g_refusal.deviceLog = std::string(record.message);
-    }
-}
-
-struct ScopedRefusalCapture {
-    Monarc::AssertHandler previousHandler;
-    Monarc::LogSink       previousSink;
-
-    ScopedRefusalCapture()
-        : previousHandler(Monarc::SetAssertHandler(&DecliningAssertHandler)),
-          previousSink(Monarc::SetLogSink(&CapturingLogSink)) {
-        g_refusal = BarrierRefusal{};
-    }
-
-    ~ScopedRefusalCapture() {
-        Monarc::SetLogSink(previousSink);
-        Monarc::SetAssertHandler(previousHandler);
-    }
-
-    ScopedRefusalCapture(const ScopedRefusalCapture&)            = delete;
-    ScopedRefusalCapture& operator=(const ScopedRefusalCapture&) = delete;
 };
 
 }  // namespace
@@ -1032,69 +967,42 @@ TEST_CASE("a stale resource handle is reported rather than resolved to its slot'
     device.DestroyBuffer(*buffer);
 }
 
-TEST_CASE("a stale handle in a barrier is refused out of band, naming the barrier") {
-    // **The other side of the asymmetry `IDevice`'s `Barrier` documents.** `BeginRendering` and
-    // `CopyTextureToBuffer` return `ErrorCode::InvalidArgument` for a stale handle; `Barrier`
-    // returns void and so reports through `MONARC_CHECK` and the log line beside it. That
-    // difference follows from the return type and not from a view about severity, and this is
-    // where the void half is pinned -- until now nothing exercised it, so the claim in the
-    // header rested on reading the code.
-    //
-    // It is also the shipped caller of `ToString(PipelineStage)`, `ToString(Access)` and
-    // `ToString(TextureLayout)`: the message the log composes is what identifies which barrier
-    // was wrong, and these assertions are what say those three are reached from shipped code
-    // rather than only from Monarc.RHI's own tests.
-    DeviceUnderTest held(Adapters()[0]);
-    REQUIRE(held.created.has_value());
-    Monarc::RHI::IDevice& device = *held.created;
-
-    Monarc::RHI::TextureDescription textureDescription{};
-    textureDescription.extent = kReadbackExtent;
-    textureDescription.format = kReadbackFormat;
-    textureDescription.usage  = Monarc::RHI::TextureUsage::ColorAttachment |
-                               Monarc::RHI::TextureUsage::TransferSource;
-
-    const Monarc::Result<Monarc::RHI::TextureHandle> texture =
-        device.CreateTexture(textureDescription);
-    REQUIRE(texture.has_value());
-    device.DestroyTexture(*texture);
-
-    const Monarc::Result<Monarc::RHI::ICommandList*> commands = device.BeginFrame();
-    REQUIRE(commands.has_value());
-    Monarc::RHI::ICommandList& list = **commands;
-    REQUIRE(list.Begin().has_value());
-
-    {
-        ScopedRefusalCapture capture;
-        list.Barrier(Monarc::RHI::TextureBarrier(
-            *texture, Monarc::RHI::TextureLayout::Undefined,
-            Monarc::RHI::TextureLayout::ColorAttachment, Monarc::RHI::PipelineStage::None,
-            Monarc::RHI::PipelineStage::ColorAttachmentOutput, Monarc::RHI::Access::None,
-            Monarc::RHI::Access::ColorAttachmentWrite));
-
-        CHECK(g_refusal.assertFired);
-        CHECK(g_refusal.assertMessage.find("whose handle is stale") != std::string::npos);
-
-        // The layout pair, by name, which is the half that is never a mask. A refusal that
-        // logged only "a texture handle was stale" would leave the caller to guess which of a
-        // frame's barriers it was; these two words say which transition was meant.
-        CHECK(g_refusal.deviceLog.find("layout Undefined -> ColorAttachment") !=
-              std::string::npos);
-
-        // And the synchronisation scopes, one from each of the other two `ToString`s.
-        CHECK(g_refusal.deviceLog.find("sync None") != std::string::npos);
-        CHECK(g_refusal.deviceLog.find("ColorAttachmentOutput") != std::string::npos);
-        CHECK(g_refusal.deviceLog.find("ColorAttachmentWrite") != std::string::npos);
-    }
-
-    // The list survived the refusal and is still a list, which is the other half of "refused"
-    // rather than "recorded": a command buffer that had taken a barrier against a destroyed
-    // image would not submit cleanly.
-    REQUIRE(list.End().has_value());
-    const Monarc::Result<Monarc::u64> submitted = device.GraphicsQueue().Submit(list);
-    REQUIRE(submitted.has_value());
-    CHECK(device.GraphicsQueue().Wait(*submitted, 5'000'000'000ULL).has_value());
-}
+// **A stale handle in `ICommandList::Barrier` has no case here, and cannot have one.** There
+// was one, and it worked by installing an assertion handler that declined to break so that the
+// refusal could be watched and the case could carry on. `Barrier`'s refusal now ends with
+// `MONARC_DEBUG_BREAK()` and an unconditional `std::abort()` -- Monarc/RHI/Device.h argues it
+// at length, and the short version is that `MONARC_CHECK` alters no control flow, so the plain
+// `return` that case relied on meant a *skipped barrier* under any handler that declined to
+// break, and a dropped barrier is a synchronisation hole rather than a refused operation.
+// There is no handler under which a test can survive the call, so there is nothing left for an
+// in-process case to assert. `Array<T>::OnAllocationFailed` and `JobSystem::PopQueueLocked` are
+// in the same position -- a fatal guard with no case in either suite -- and neither is a gap
+// this file can close.
+//
+// **What was lost, exactly**, so that no comment here claims coverage that is gone:
+//
+//   - That the refusal fires *on a device*, against a handle a real `DestroyTexture` made
+//     stale, rather than against a forged one. Nothing replaces this. The generation-and-live
+//     resolve it goes through is the same one `BeginRendering` and `CopyTextureToBuffer` use,
+//     and the case above -- "a stale resource handle is reported rather than resolved to its
+//     slot's new owner" -- covers those two on a real device with a real destroyed texture,
+//     so what is unobserved is `Barrier`'s dispatch to `Resolve` and not `Resolve` itself.
+//   - That the `MONARC_CHECK` message names a stale handle. Nothing replaces this; the
+//     message is a string literal inside the same `if` as the `Resolve` that failed.
+//
+// **What moved rather than being lost**, and moved into CI where there is no GPU: the whole
+// content of the log line beside that check. It is composed by `Describe` in Monarc.RHI now,
+// and Monarc.RHI/Tests/TestBarrier.cpp pins it in four cases with no Vulkan linked -- the
+// texture form's layout pair, both forms' synchronisation scopes with every mask's hex, a mask
+// that has no enumerator name and so is readable only by its number, and the fixed buffer's
+// capacity against the widest description either form can produce. That also keeps
+// `ToString(PipelineStage)`, `ToString(Access)` and `ToString(TextureLayout)` honestly
+// shipped-called: `Describe` calls all three, and `VulkanDevice.cpp`'s two handle-resolving
+// `Barrier` overloads call `Describe`.
+//
+// The abort itself was measured out of process rather than asserted here -- a declining
+// handler installed, a stale-handle barrier issued against a real device, and the process
+// gone. Docs/Status.md records the run and its exit code.
 
 TEST_CASE("a full resource pool reports rather than growing") {
     // The pools are fixed at device creation and never grown -- JobSystem's discipline, so

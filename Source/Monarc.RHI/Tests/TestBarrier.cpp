@@ -9,10 +9,13 @@
 #include <type_traits>
 
 using Monarc::RHI::Access;
+using Monarc::RHI::BarrierDescription;
 using Monarc::RHI::BufferBarrier;
 using Monarc::RHI::BufferHandle;
+using Monarc::RHI::Describe;
 using Monarc::RHI::GlobalBarrier;
 using Monarc::RHI::HasAny;
+using Monarc::RHI::kBarrierDescriptionLength;
 using Monarc::RHI::PipelineStage;
 using Monarc::RHI::TextureBarrier;
 using Monarc::RHI::TextureHandle;
@@ -332,6 +335,140 @@ TEST_CASE("a buffer barrier reports every field it was given, in the right place
     CHECK(barrier.syncAfter == PipelineStage::Host);
     CHECK(barrier.accessBefore == Access::TransferWrite);
     CHECK(barrier.accessAfter == Access::HostRead);
+}
+
+// ---------------------------------------------------------------------------------------
+// `Describe`, which is the text a backend's barrier refusal logs.
+// ---------------------------------------------------------------------------------------
+//
+// **These four cases are here, with no device and no Vulkan, because the shipped caller of
+// `Describe` cannot be tested at all.** `ICommandList::Barrier` refuses a stale handle by
+// logging the description and then ending the process -- `MONARC_DEBUG_BREAK()` and
+// `std::abort()`, unconditionally, because `MONARC_CHECK` alters no control flow and a
+// *skipped* barrier is a synchronisation hole rather than a refused operation (Device.h says
+// it at length). Nothing survives that call to read the line it wrote, on any handler.
+//
+// So the composition is what gets tested, and the composition is pure. Until this change the
+// property lived in Monarc.RHI.Vulkan's device suite, which needs a GPU and therefore never
+// ran in CI; these run everywhere. What was lost in the move is stated in
+// Monarc.RHI.Vulkan/TestsDevice/TestVulkanDevice.cpp, where the case used to be.
+//
+// **Whole-string comparisons and not `find()`**, which is the rule
+// Monarc.RHI.Vulkan/Tests/TestVulkanBackend.cpp:112 and TestVulkanLoader.cpp:40 arrived at the
+// hard way -- Docs/Status.md records why those two compare a whole message: a `find()` had let
+// a dangling `Error::message` through on all six presets, `clang-asan` included. The same
+// looseness costs more here, not less. A description clipped by `format_to_n` is right up to
+// the point it was cut, so every `find()` for something before the cut still passes; and a
+// description carrying an extra field nobody asked for passes every `find()` there is.
+//
+// The case that pinned this before searched for four substrings: the layout pair, `sync None`,
+// `ColorAttachmentOutput` and `ColorAttachmentWrite`. Not one of them looked at a number, so
+// dropping every hex from the description would have left all four green -- and dropping
+// `accessBefore` would too, since `sync None` is the *other* `None`. Both change the string,
+// so both turn a comparison below red.
+
+TEST_CASE("a texture barrier's description names its layout pair and both scopes, with hex") {
+    // The barrier the device suite used to refuse, so the text pinned here is the text the
+    // shipped path composes: `ColorAttachmentOutput` is `1 << 5` and `ColorAttachmentWrite`
+    // is `1 << 8`, which is where `0x20` and `0x100` come from.
+    //
+    // Every pair is asymmetric on purpose, as in the accessor case above: `Undefined` against
+    // `ColorAttachment`, `None` against a real stage, `None` against a real access. A
+    // `Describe` that had its before and after arguments the wrong way round produces a
+    // different string here rather than the same one.
+    constexpr TextureBarrier barrier(kTexture, TextureLayout::Undefined,
+                                     TextureLayout::ColorAttachment, PipelineStage::None,
+                                     PipelineStage::ColorAttachmentOutput, Access::None,
+                                     Access::ColorAttachmentWrite);
+
+    const BarrierDescription description = Describe(barrier);
+    CHECK(description.View() ==
+          "texture (slot 3, generation 1): layout Undefined -> ColorAttachment, "
+          "sync None (0x0) -> ColorAttachmentOutput (0x20), "
+          "access None (0x0) -> ColorAttachmentWrite (0x100)");
+}
+
+TEST_CASE("a buffer barrier's description names both scopes and no layout") {
+    // The other overload, and the barrier is not the texture one with fields removed: a buffer
+    // has no layout in either API the model is shaped from, and the absence of the word here
+    // is what a `Describe(BufferBarrier)` grown a layout pair by copy-paste would break.
+    //
+    // A companion `find("layout") == npos` was written and then deleted. It does go red on
+    // that copy-paste -- measured -- but so does the comparison below it, for the same
+    // mutation and in the same run, so it detected nothing the comparison did not. That is
+    // the test this branch applied to the monotonicity case in
+    // Monarc.RHI/Tests/TestCapabilities.cpp -- whose one real fact was already pinned three
+    // times over -- and it gets the same answer.
+    constexpr BufferBarrier barrier{kBuffer, PipelineStage::Copy, PipelineStage::Host,
+                                    Access::TransferWrite, Access::HostRead};
+
+    const BarrierDescription description = Describe(barrier);
+    CHECK(description.View() ==
+          "buffer (slot 7, generation 2): sync Copy (0x80) -> Host (0x800), "
+          "access TransferWrite (0x1000) -> HostRead (0x2000)");
+}
+
+TEST_CASE("a mask of several stages is described by its hex, which is why the hex is there") {
+    // **The case the hex exists for.** A `syncBefore` of several stages is a mask and not an
+    // enumerator, so `ToString` reports its not-a-single-value name -- honest, and not
+    // decodable on its own. `Copy | Blit` is `0x80 | 0x100`, and `0x180` is what says which
+    // two stages the caller meant.
+    constexpr BufferBarrier barrier{kBuffer, PipelineStage::Copy | PipelineStage::Blit,
+                                    PipelineStage::AllCommands,
+                                    Access::TransferRead | Access::TransferWrite,
+                                    Access::MemoryWrite};
+
+    // The two markers are spelled by `ToString` rather than written out here, exactly as the
+    // cases above identify them through `Name(kFarBit)`: what this case pins is that a mask's
+    // name and its number both reach the line and in that order, not what the marker reads.
+    char       expected[kBarrierDescriptionLength];
+    const auto written = std::format_to_n(
+        expected, sizeof(expected) - 1,
+        "buffer (slot 7, generation 2): sync {} (0x180) -> AllCommands (0x2000), "
+        "access {} (0x1800) -> MemoryWrite (0x10000)",
+        Name(PipelineStage::Copy | PipelineStage::Blit),
+        Name(Access::TransferRead | Access::TransferWrite));
+    *written.out = '\0';
+
+    const BarrierDescription description = Describe(barrier);
+    CHECK(description.View() == std::string_view(expected));
+}
+
+TEST_CASE("the widest description either barrier can produce arrives whole") {
+    // **`kBarrierDescriptionLength`'s arithmetic, checked rather than trusted.** The bound in
+    // Barrier.h is taken with each field's longest name and its widest hex treated as
+    // independent, which they are not -- a name and a number are two views of one value -- so
+    // it is an upper bound and not the length of anything. This builds the widest description
+    // that actually exists and asserts it was not clipped.
+    //
+    // The widest values are not the ones a barrier would normally hold. Two `u32`s at
+    // `0xffffffff` are ten decimal digits each and eight hex digits; a layout and a stage
+    // outside their enumerator sets get the not-a-value markers, which are longer than every
+    // real spelling (`<not a single PipelineStage>` is 28 chars against
+    // `ColorAttachmentOutput`'s 21); and the widest *access* field is not the marker but
+    // `DepthStencilAttachmentWrite`, whose 27 chars plus `400`'s three beat the marker's 21
+    // plus eight by one.
+    constexpr Monarc::u32 kWidestNumber = 0xFFFFFFFFU;
+    constexpr auto        kWidestLayout = static_cast<TextureLayout>(kWidestNumber);
+    constexpr auto        kWidestStage  = static_cast<PipelineStage>(kWidestNumber);
+    constexpr Access      kWidestAccess = Access::DepthStencilAttachmentWrite;
+
+    constexpr TextureBarrier widestTexture(
+        TextureHandle::ForTesting(kWidestNumber, kWidestNumber), kWidestLayout, kWidestLayout,
+        kWidestStage, kWidestStage, kWidestAccess, kWidestAccess);
+    constexpr BufferBarrier widestBuffer{
+        BufferHandle::ForTesting(kWidestNumber, kWidestNumber), kWidestStage, kWidestStage,
+        kWidestAccess, kWidestAccess};
+
+    // `format_to_n` truncates silently, so a description that did not fit is exactly one
+    // character short of the buffer and there is nothing else to see -- which is what these
+    // compare against. Measured at three capacities: at 320 the widest texture description is
+    // 283 chars and the widest buffer one 223, both green; at 240 the texture assertion alone
+    // goes red (`239 < 239`) and the buffer stays green; at 220 both go red. Two assertions
+    // and not one for that middle result: one constant serves two functions, and Barrier.h's
+    // arithmetic is written for the longer of them.
+    CHECK(Describe(widestTexture).View().size() < kBarrierDescriptionLength - 1);
+    CHECK(Describe(widestBuffer).View().size() < kBarrierDescriptionLength - 1);
 }
 
 // ---------------------------------------------------------------------------------------

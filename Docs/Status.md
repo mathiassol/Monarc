@@ -816,7 +816,7 @@ wrong in a way Vulkan itself objects to:
 | `Resolve` ignoring the generation | 1 red |
 | `Resolve` ignoring the `live` flag | 1 red — see the generation note below |
 | `Resolve` ignoring both | `vkCmdCopyImageToBuffer2` VUID → process stopped |
-| A barrier's stale-handle log naming `layoutAfter` twice | 1 red |
+| A barrier's stale-handle log naming `layoutAfter` twice | 1 red (in the device suite then; in `Monarc.RHI.Tests` now — see the fatal-refusal note below) |
 | The queue reusing its last timeline value | `vkQueueSubmit2(): pSubmits[0].pSignalSemaphoreInfos` VUID → stopped |
 | Any command list treated as this device's own | `vkQueueSubmit2(): pSubmits[0].pCommandBufferInfos` VUID → stopped |
 | `BeginFrame` never waiting; `Submit` never stamping the frame slot | `vkResetCommandPool(): (VkCommandBuffer …)` VUID → stopped |
@@ -864,17 +864,56 @@ counter exists for. The flag stays in `Resolve` for the one case the generation 
 a forged handle at generation zero naming a slot no device has ever claimed — and that case now
 has its own assertion, which is what turns the dropped flag red instead of silent.
 
-**A stale handle in `ICommandList::Barrier` now has a test, and it needed a declining assertion
-handler to have one.** `Barrier` returns void, so it reports through `MONARC_CHECK` plus a log
-line, and under the default handler the debug break ends the process — measured: the refusal
-prints and never returns to the caller. Installing a handler that declines to break is the only
-way to watch the refusal and continue, which is what `SetAssertHandler` is for. The same case
-pins `ToString(PipelineStage)`, `ToString(Access)` and `ToString(TextureLayout)` as having a
-*shipped* caller rather than only a test one: the log line beside that check is what identifies
-which barrier was wrong, and the header previously claimed a log use that did not exist. There
-is deliberately no assertion that validation stayed quiet in that window — `VulkanBackend.cpp`'s
-messenger follows its `MONARC_CHECK` with an unconditional `std::abort()`, so a recorded barrier
-ends the process after four assertions and no such assertion could be reached to fail.
+**`ICommandList::Barrier`'s stale-handle refusal is now fatal, and the test that used to watch
+it happen has been replaced by one that runs in CI.** The refusal was `MONARC_CHECK(false, …)`
+followed by `return`. `MONARC_CHECK` reports and optionally breaks and never alters control
+flow, so under any handler that declines to break — Shipping, or a test harness — that `return`
+*skipped the barrier* and the rest of the frame recorded as though it had been asked for. A
+dropped barrier is not a refused operation: it is a synchronisation hole whose symptom is wrong
+pixels or a GPU hang on some driver, with nothing in the capture pointing back to the call. It
+is `JobSystem::Wait`'s fall-through again, and it takes the same house pattern —
+`MONARC_DEBUG_BREAK(); std::abort();`, unconditionally.
+
+**Measured both ways, out of process, on the RTX 3070 Ti.** A program that brings up a real
+device, destroys a texture, installs a handler returning `false` and issues a barrier against
+the stale handle: with the fix, both overloads print the refusal and the process is gone with
+`0x80000003` — the debug break, which is what ends it before `std::abort()` is reached — and
+the line after the call never runs. With the `return` restored, the same program printed
+`*** BARRIER RETURNED ***` and exited zero, for both the buffer and the texture overload. That
+control is what says the abort is doing the stopping.
+
+**Because nothing survives the call, the device case that pinned the refusal could not stay.**
+It installed a declining handler, read the log line and then asserted the list still submitted
+— every one of which now requires a process that is already dead. So the composition of that
+log line was extracted into `Describe(const BufferBarrier&)` and `Describe(const
+TextureBarrier&)` in **`Monarc.RHI`**, filled through `std::format_to_n` into a fixed
+`BarrierDescription` (`AdapterUuidString`'s shape, and ADR-0003's condition on `<format>`), and
+four cases in `Monarc.RHI/Tests/TestBarrier.cpp` pin it with no Vulkan linked at all. It lives
+in `Monarc.RHI` rather than in `Monarc.RHI.Vulkan/Private/Translate.h`, whose membership rule it
+satisfies, because it names no Vulkan type in either direction — a second backend would
+otherwise duplicate it or include a header it has no business seeing.
+
+**That trade is a gain on two counts and a loss on one, and the loss is named in the file where
+the case used to be.** Gained: the check moved from a GPU-only suite into CI, and it pins more
+than the old one did — the exact text rather than four `find()`s, both overloads rather than
+one, a mask's hex, and the buffer's capacity. `ToString(PipelineStage)`, `ToString(Access)` and
+`ToString(TextureLayout)` still have a shipped caller, one hop further away: `Barrier.cpp`'s two
+`Describe` overloads call all three, and `VulkanDevice.cpp:617` and `:663` call `Describe`.
+Lost: that the refusal fires *on a device* against a handle a real `DestroyTexture` made stale,
+and that the `MONARC_CHECK` message names a stale handle. Neither is replaced. What softens the
+first is that `Barrier` resolves through the same `Resolve` that `BeginRendering` and
+`CopyTextureToBuffer` use, and the stale-handle case above still exercises those two on a real
+device, so what is now unobserved is `Barrier`'s call to `Resolve` and not `Resolve` itself.
+
+Five mutations of the new cases were run to check they can fail, each rebuilt from a touched
+source rather than a restored one: the layout pair swapped (the texture case's comparison,
+alone); `syncAfter` dropped from the buffer form (the buffer case and the mask case); the hex
+dropped from the buffer form's `syncBefore` (the same two, and the mask case's failure text —
+`sync <not a single PipelineStage> -> AllCommands` — is the argument for the hex existing);
+`kBarrierDescriptionLength` cut to 240 (the texture capacity assertion alone, `239 < 239`) and
+to 220 (both). A sixth, a `find("layout") == npos` guard on the buffer description, was written,
+measured, and **deleted**: it goes red on the copy-paste it was written for, but so does the
+comparison above it, in the same run, so it detected nothing new.
 
 **A mapped span's length is asserted against a 250-byte buffer and not a 256-byte one**, because
 Vulkan rounds an allocation up to the memory type's alignment: at 256 the buffer's size and the
@@ -899,12 +938,17 @@ The following tests did not run:
 ```
 
 - Green on all six presets, zero warnings, 9 CTest entries each
-- **104 device-free cases** — `Monarc.RHI.Tests` 47 and `Monarc.RHI.Vulkan.Tests` 57 — plus
-  **32 device-required cases**, and Task 2 left 67 device-free, so Task 3 adds 37 device-free
-  cases and 32 that need a GPU.
+- **108 device-free cases** — `Monarc.RHI.Tests` 51 and `Monarc.RHI.Vulkan.Tests` 57 — plus
+  **31 device-required cases**, and Task 2 left 67 device-free, so Task 3 adds 41 device-free
+  cases and 31 that need a GPU.
+
+  **Four of those device-free cases and one of the missing device-required ones are the same
+  change**: `Barrier`'s fatal refusal, above, moved the barrier-description check out of the
+  device suite and into `Monarc.RHI`'s, where CI runs it. The device suite went from 32 cases
+  to 31 and from 309 assertions to 296.
 
   **Cases and not assertions, and the change of unit is the point.** The assertion totals are
-  493 device-free (169 + 324) and 309 device-required, and an earlier draft of this section
+  498 device-free (174 + 324) and 296 device-required, and an earlier draft of this section
   quoted 1061 and 290 — a number that was 572 higher because four `O(n²)` loops each contributed
   one assertion per *pair* of enumerators. Measured, those loops did not detect 572 things: a
   mutation duplicating a Vulkan access bit turned 3 of 153 red, and one duplicating a `ToString`
@@ -917,11 +961,11 @@ The following tests did not run:
 - **What only runs with a device, and is therefore invisible in CI**: everything through
   `VulkanBackend::CreateDevice` — device creation on each adapter, the readback itself, the
   frame/pool/timeline cycle, every resource-pool and stale-handle assertion, the cross-device
-  submission refusal, and the mapping rules. That is 32 cases. What CI *does* cover of Task 3 is
-  the whole barrier model's translation in both directions, the resource-description and
-  rendering enums, `FindMemoryType` against memory layouts this machine does not have, the
-  `Array` operations the device's pools are built on, and every type-level property of
-  `TextureBarrier`
+  submission refusal, and the mapping rules. That is 31 cases. What CI *does* cover of Task 3 is
+  the whole barrier model's translation in both directions, the text a barrier refusal logs,
+  the resource-description and rendering enums, `FindMemoryType` against memory layouts this
+  machine does not have, the `Array` operations the device's pools are built on, and every
+  type-level property of `TextureBarrier`
 - Two functions became testable rather than staying unreachable: `ResizeTo` and `ShrinkTo` moved
   out of `VulkanBackend.cpp`'s anonymous namespace into `Private/ArrayOps.h`, which is where the
   second caller (the device's pools) made them worth sharing. Task 2's review found mutations

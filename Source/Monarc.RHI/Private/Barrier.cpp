@@ -1,5 +1,7 @@
 #include <Monarc/RHI/Barrier.h>
 
+#include <format>
+
 namespace Monarc::RHI {
 
 // All three switches below are deliberately `default`-less, the same shape
@@ -70,6 +72,48 @@ const char* ToString(TextureLayout layout) {
         case TextureLayout::TransferDestination:    return "TransferDestination";
     }
     return "<invalid TextureLayout>";
+}
+
+// `std::format_to_n` and not `std::format`, which is ADR-0003's condition on `<format>` in
+// runtime code: format into a fixed buffer, never allocate a `std::string`. `Detail::Format`
+// in Monarc/Core/Log.h and `JobSystem.cpp`'s worker naming are the precedents.
+//
+// The terminator is written explicitly even though `BarrierDescription::text` value-initialises
+// its array and the byte is therefore already zero -- Adapter.cpp's `ToString(AdapterUuid)`
+// says why, and it is the same reason here: this function's contract should not depend on a
+// member initialiser in a different file staying as it is. `sizeof(text) - 1` is what leaves
+// the byte to write it into, so `written.out` is in bounds even when the format fills the
+// buffer.
+
+BarrierDescription Describe(const BufferBarrier& barrier) {
+    BarrierDescription description;
+    const auto         written = std::format_to_n(
+        description.text, sizeof(description.text) - 1,
+        "buffer (slot {}, generation {}): sync {} (0x{:x}) -> {} (0x{:x}), access {} (0x{:x}) "
+        "-> {} (0x{:x})",
+        barrier.buffer.index, barrier.buffer.generation, ToString(barrier.syncBefore),
+        static_cast<u32>(barrier.syncBefore), ToString(barrier.syncAfter),
+        static_cast<u32>(barrier.syncAfter), ToString(barrier.accessBefore),
+        static_cast<u32>(barrier.accessBefore), ToString(barrier.accessAfter),
+        static_cast<u32>(barrier.accessAfter));
+    *written.out = '\0';
+    return description;
+}
+
+BarrierDescription Describe(const TextureBarrier& barrier) {
+    BarrierDescription description;
+    const auto         written = std::format_to_n(
+        description.text, sizeof(description.text) - 1,
+        "texture (slot {}, generation {}): layout {} -> {}, sync {} (0x{:x}) -> {} (0x{:x}), "
+        "access {} (0x{:x}) -> {} (0x{:x})",
+        barrier.Texture().index, barrier.Texture().generation,
+        ToString(barrier.LayoutBefore()), ToString(barrier.LayoutAfter()),
+        ToString(barrier.SyncBefore()), static_cast<u32>(barrier.SyncBefore()),
+        ToString(barrier.SyncAfter()), static_cast<u32>(barrier.SyncAfter()),
+        ToString(barrier.AccessBefore()), static_cast<u32>(barrier.AccessBefore()),
+        ToString(barrier.AccessAfter()), static_cast<u32>(barrier.AccessAfter()));
+    *written.out = '\0';
+    return description;
 }
 
 }  // namespace Monarc::RHI

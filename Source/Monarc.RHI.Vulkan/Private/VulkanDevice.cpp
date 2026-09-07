@@ -32,12 +32,14 @@
 #include <Monarc/Core/Assert.h>
 #include <Monarc/Core/Containers/Array.h>
 #include <Monarc/Core/Log.h>
+#include <Monarc/RHI/Barrier.h>
 
 #include <ArrayOps.h>
 #include <Loader.h>
 #include <Translate.h>
 #include <VulkanDeviceFactory.h>
 
+#include <cstdlib>
 #include <new>
 #include <utility>
 
@@ -607,22 +609,37 @@ void VulkanCommandList::Barrier(const BufferBarrier& barrier) {
         // to come from here. The scopes are what identify it: a frame records several buffer
         // barriers and "a buffer handle was stale" does not say which.
         //
-        // A `syncBefore` of several stages is a mask and not an enumerator, so `ToString`
-        // reports its not-a-single-value name for one -- Barrier.h says why. The hex beside
-        // each name is what keeps the line decodable when that happens.
+        // `Describe` and not a format string open-coded here, and the reason is the abort
+        // below: this line cannot be observed by any test, because nothing survives the call
+        // to read it. Composing the text in Monarc.RHI -- where it needs no device and no
+        // Vulkan -- is what puts that composition under a test that runs in CI. See the note
+        // at the foot of Monarc/RHI/Barrier.h.
+        const BarrierDescription described = Describe(barrier);
         MONARC_LOG(LogCategories::VulkanDevice, Error,
-                   "the buffer in this barrier is not one this device has, or its handle is "
-                   "stale (slot {}, generation {}): sync {} (0x{:x}) -> {} (0x{:x}), access {} "
-                   "(0x{:x}) -> {} (0x{:x})",
-                   barrier.buffer.index, barrier.buffer.generation,
-                   ToString(barrier.syncBefore), static_cast<u32>(barrier.syncBefore),
-                   ToString(barrier.syncAfter), static_cast<u32>(barrier.syncAfter),
-                   ToString(barrier.accessBefore), static_cast<u32>(barrier.accessBefore),
-                   ToString(barrier.accessAfter), static_cast<u32>(barrier.accessAfter));
+                   "this barrier names a resource this device does not have, or one whose "
+                   "handle is stale -- {}",
+                   described.View());
         MONARC_CHECK(false,
                      "ICommandList::Barrier(BufferBarrier) names a buffer this device does "
                      "not have, or one whose handle is stale");
-        return;
+        // Unconditional, and for the reason the whole house rule exists: MONARC_CHECK reports
+        // and optionally breaks, never altering control flow, so under a handler that declines
+        // to break -- Shipping, or any test harness -- a plain `return` here *skips the
+        // barrier* and records the rest of the frame without it. A dropped barrier is not a
+        // refused operation; it is a synchronisation hole whose symptom is wrong pixels or a
+        // GPU hang on some driver, days later, with nothing pointing back here.
+        //
+        // This is JobSystem::Wait's guard again (Docs/Runtime/Threading.md) and the debug
+        // messenger's a few files over: where the return type cannot carry a refusal, the
+        // process stops rather than continuing as though the call had not happened.
+        //
+        // Measured both ways rather than reasoned about, and Docs/Status.md records the run:
+        // with a declining handler installed and a stale handle passed in, this ends the
+        // process (0x80000003, the debug break) and the caller's next line never runs; with
+        // the `return` this replaced, the same program printed `BARRIER RETURNED` and exited
+        // zero.
+        MONARC_DEBUG_BREAK();
+        std::abort();
     }
 
     const VkBufferMemoryBarrier2 translated = ToVulkan(barrier, slot->buffer);
@@ -640,24 +657,23 @@ void VulkanCommandList::Barrier(const TextureBarrier& barrier) {
     }
     const TextureSlot* slot = m_state->Resolve(barrier.Texture());
     if (slot == nullptr) {
-        // `Barrier(BufferBarrier)`'s reasoning, with the layout pair in front. That pair is
-        // the half that identifies the barrier exactly: a layout is one value and never a
-        // mask, so these two names are always real spellings, and "Undefined -> ColorAttachment
-        // on a stale texture" names the transition the caller meant unambiguously.
+        // `Barrier(BufferBarrier)`'s reasoning, and `Describe`'s texture overload puts the
+        // layout pair in front for the reason Barrier.h gives: a layout is one value and never
+        // a mask, so those two names are always real spellings.
+        const BarrierDescription described = Describe(barrier);
         MONARC_LOG(LogCategories::VulkanDevice, Error,
-                   "the texture in this barrier is not one this device has, or its handle is "
-                   "stale (slot {}, generation {}): layout {} -> {}, sync {} (0x{:x}) -> {} "
-                   "(0x{:x}), access {} (0x{:x}) -> {} (0x{:x})",
-                   barrier.Texture().index, barrier.Texture().generation,
-                   ToString(barrier.LayoutBefore()), ToString(barrier.LayoutAfter()),
-                   ToString(barrier.SyncBefore()), static_cast<u32>(barrier.SyncBefore()),
-                   ToString(barrier.SyncAfter()), static_cast<u32>(barrier.SyncAfter()),
-                   ToString(barrier.AccessBefore()), static_cast<u32>(barrier.AccessBefore()),
-                   ToString(barrier.AccessAfter()), static_cast<u32>(barrier.AccessAfter()));
+                   "this barrier names a resource this device does not have, or one whose "
+                   "handle is stale -- {}",
+                   described.View());
         MONARC_CHECK(false,
                      "ICommandList::Barrier(TextureBarrier) names a texture this device does "
                      "not have, or one whose handle is stale");
-        return;
+        // `Barrier(BufferBarrier)`'s reasoning, and a layout transition dropped silently is
+        // the worse half of it: the image stays in whatever layout it was in, and the next
+        // command reads it as though the transition had happened. Measured the same way, and
+        // with the same two outcomes.
+        MONARC_DEBUG_BREAK();
+        std::abort();
     }
 
     const VkImageMemoryBarrier2 translated = ToVulkan(barrier, slot->image);
