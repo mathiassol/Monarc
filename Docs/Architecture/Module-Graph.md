@@ -117,9 +117,9 @@ enforced:
 - **An app has no `Include/` directory** — rule 9 below, and the layout gate *forbids* one
   rather than merely excusing its absence. An app exports nothing, so there is no public
   header for anyone to include. Merely exempting it would leave a trap: `monarc_app()` does
-  not glob an app's `Include/`, so a header placed there would never be compiled while the
-  package-boundary and platform-containment gates went on policing it — a file that is
-  simultaneously governed and dead.
+  not glob an app's `Include/`, so nothing in the build would ever read a header placed
+  there, while the package-boundary and platform-containment gates went on policing it — a
+  file that is simultaneously governed and dead.
 
 | App | Kind | Tier | Depends on | Responsibility |
 |---|---|---|---|---|
@@ -178,8 +178,11 @@ These are build failures or test failures, not conventions:
 9. **Layout.** Every module has a `Private/` directory; a library has an `Include/`
    directory and an app does not.
 
-Rules 4, 5, 6, and 7 are the ones that would decay silently without automation, so they are
-gates in [M0](../Milestones/M0-First-Light.md#verification-gates) rather than later additions.
+All of these would decay silently without automation, and all but rule 2 have a numbered gate
+in [M0](../Milestones/M0-First-Light.md#verification-gates): rule 6 is gate 1, rules 1 and 3
+share gate 2, rule 4 is gate 3, rule 5 is gate 9, rule 7 is gate 10, rule 8 is gate 12 and
+rule 9 is gate 13. Rule 2 is the exception because CMake refuses it at configure time, which
+is earlier than a gate could catch it.
 
 The two mechanisms divide the rules as follows. `monarc_validate_modules()` refuses rules 2,
 3 and 8 at configure time, which is where a developer wants to hear about them.

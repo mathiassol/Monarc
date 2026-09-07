@@ -209,9 +209,10 @@ def gate_layout(modules: dict, root: pathlib.Path) -> Gate:
         # An app is a link target, not an interface: nothing may depend on it, so it has no
         # public headers. Note the direction -- an app is not merely excused from having
         # Include/, it is forbidden one. An exemption alone would leave a trap: monarc_app()
-        # does not glob an app's Include/, so a header put there would never be compiled,
-        # while these gates would still scan it and police it. A rule that says which of the
-        # two is right has no such gap, and it costs nothing to state.
+        # does not glob an app's Include/, so nothing in the build ever reads a header put
+        # there, while gates 3 and 10 go on scanning and policing it -- a file that is
+        # simultaneously governed and dead. A rule that says which of the two is right has no
+        # such gap, and it costs nothing to state.
         #
         # `.get` rather than `[...]`: a module-graph.json written before the key existed
         # still loads, and so do the hand-built graphs in test_check_architecture.py.
@@ -238,13 +239,15 @@ def main() -> int:
     print(f"Monarc architecture gates | {len(modules)} module(s) | engine {graph['engineVersion']}")
 
     # Reported in gate-number order, so the output reads as a checklist rather than as
-    # whatever order the functions happen to be defined in.
+    # whatever order the functions happen to be defined in. Kept by writing the list in that
+    # order rather than sorting at run time: the numbers are literals a few lines up in this
+    # same file, and a sort would be machinery standing in for reading them.
     gates = [
-        gate_acyclic(modules),
-        gate_package_boundary(modules, root),
-        gate_layout(modules, root),
-        gate_platform_containment(modules, root),
-        gate_app_leaves(modules),
+        gate_acyclic(modules),  # 2
+        gate_package_boundary(modules, root),  # 3
+        gate_platform_containment(modules, root),  # 10
+        gate_app_leaves(modules),  # 12
+        gate_layout(modules, root),  # 13
     ]
 
     results = [g.report() for g in gates]

@@ -101,8 +101,10 @@ function(_monarc_declare target_type)
     set(MONARC_PLATFORM_DIR "${_monarc_platform}" CACHE INTERNAL "")
 
     # An app has no Include/ to glob: it exports nothing, so there is no public header for
-    # anyone to include. Globbing it anyway would compile a stray header that is not on
-    # any include path, which reads as support for something that does not work.
+    # anyone to include. Globbing one anyway would put a header in the target's source list
+    # where it changes nothing -- a .h is never compiled -- while reading as support for a
+    # public interface an app does not have. The layout gate forbids an app's Include/
+    # outright rather than merely tolerating its absence, which is what closes the gap.
     set(_globs
         "${CMAKE_CURRENT_SOURCE_DIR}/Private/*.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/Private/*.h")

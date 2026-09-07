@@ -50,13 +50,22 @@ int main() {
                Monarc::RHI::ToString(kSurfaceFormat),
                Monarc::RHI::BytesPerPixel(kSurfaceFormat));
 
+    // Both numbers in the summary below are counted here rather than one of them being
+    // written into the message. Tasks 2 through 4 turn these steps green one at a time and
+    // Task 5 adds more, and a hardcoded total is the kind of thing that survives that as
+    // "1 of 2" long after there are three. The steps stay written out one per block, each
+    // with its result type spelled in full, because being a visible call into the module it
+    // names is this app's whole job -- see the file comment.
+    int steps         = 0;
     int unimplemented = 0;
 
+    ++steps;
     if (const Monarc::Status backend = Monarc::RHI::CreateVulkanBackend(); !backend) {
         Report("Vulkan backend", backend.error());
         ++unimplemented;
     }
 
+    ++steps;
     if (const Monarc::Result<Monarc::Host::Window> window =
             Monarc::Host::Window::Create(kWindow);
         !window) {
@@ -66,7 +75,8 @@ int main() {
 
     if (unimplemented != 0) {
         MONARC_LOG(FirstLight, Error,
-                   "first light is not lit: {} of 2 steps are not implemented yet", unimplemented);
+                   "first light is not lit: {} of {} steps are not implemented yet",
+                   unimplemented, steps);
         return 1;
     }
 
