@@ -766,12 +766,13 @@ pure-function test.
   by name. This is a fair test of the messenger's premise: the mistake was mine, it was in a
   path the readback itself never took, and it was caught the first time anything walked it.
 - **A destroyed-but-not-yet-reclaimed handle was caught only by accident.** `Resolve` checks
-  both the slot's `live` flag and its generation, and the generation is bumped on *claim* — so
-  immediately after a destroy the old handle's generation still matches and only the `live`
-  flag refuses it. Every stale-handle assertion in the suite happened to create a replacement
-  first, which bumps the generation; dropping the `live` check therefore passed all of them.
-  Found by mutation, and the suite now destroys a texture and a buffer and uses both handles
-  with no intervening creation.
+  both the slot's `live` flag and its generation, and the generation was originally bumped on
+  *claim* only — so immediately after a destroy the old handle's generation still matched and
+  only the `live` flag refused it. Every stale-handle assertion in the suite happened to create
+  a replacement first, which bumps the generation; dropping the `live` check therefore passed
+  all of them. Found by mutation. The suite now destroys a texture and a buffer and uses both
+  handles with no intervening creation — and the design changed as well: the generation is
+  bumped on release too, so it no longer depends on a flag. See the note on that below.
 
 **The compile error for a missing layout pair, on both compilers.** Four ways to omit it, all
 tried:
@@ -789,8 +790,8 @@ implicit conversion between them are what buys it. `Tests/TestBarrier.cpp` pins 
 `std::is_constructible_v`, plus the positive form so the negatives cannot be satisfied by a
 type nobody can build.
 
-**Thirty-two behavioural mutations, thirty-one caught and one that would not compile. No
-survivors.** Twenty-three were caught as red assertions and eight by the fatal messenger
+**Thirty-six behavioural mutations, thirty-five caught and one that would not compile. No
+survivors.** Twenty-seven were caught as red assertions and eight by the fatal messenger
 stopping the process at a named VUID, which is a different and stronger signal — the code was
 wrong in a way Vulkan itself objects to:
 
@@ -810,9 +811,12 @@ wrong in a way Vulkan itself objects to:
 | `LoadOp::Clear` translating to `LOAD` | 1 red |
 | Host-visible memory no longer asking for `HOST_COHERENT` | 1 red |
 | **The clear's red and blue channels swapped** | 6 red |
-| A pool slot's generation never bumped | 3 red |
+| A pool slot's generation never bumped on claim | 3 red |
+| A pool slot's generation never bumped on release (texture pool; buffer pool) | 1 red each |
 | `Resolve` ignoring the generation | 1 red |
-| `Resolve` ignoring the `live` flag | `vkCmdCopyImageToBuffer2` VUID → process stopped |
+| `Resolve` ignoring the `live` flag | 1 red — see the generation note below |
+| `Resolve` ignoring both | `vkCmdCopyImageToBuffer2` VUID → process stopped |
+| A barrier's stale-handle log naming `layoutAfter` twice | 1 red |
 | The queue reusing its last timeline value | `vkQueueSubmit2(): pSubmits[0].pSignalSemaphoreInfos` VUID → stopped |
 | Any command list treated as this device's own | `vkQueueSubmit2(): pSubmits[0].pCommandBufferInfos` VUID → stopped |
 | `BeginFrame` never waiting; `Submit` never stamping the frame slot | `vkResetCommandPool(): (VkCommandBuffer …)` VUID → stopped |
@@ -840,6 +844,38 @@ credited to the wrong mutation, and a stale binary made the unmutated suite look
 harness now stamps the restored file with the current time, and the numbers above come from a
 run that starts from a scratch `Build/msvc-debug`.
 
+**A pool slot's generation is now bumped on release as well as on claim, and the `live` flag is
+no longer the only thing refusing a destroyed handle.** With the claim-only bump there was a
+window — destroyed, not yet reclaimed — in which a stale handle's generation still matched its
+slot, so `live` alone stood between a caller and a `VK_NULL_HANDLE` image. That was not
+hypothetical. Dropping the `live` check from `Resolve` under the old design handed
+`vkCmdCopyImageToBuffer2` a null `srcImage` and stopped the process with **204 assertions green
+and none red**; the same mutation with the release bump in place produces no Vulkan call at all
+and one red assertion. Neutering the generation check as well brings the crash straight back,
+which is what says the generation — and not something else — is doing the refusing.
+
+`JobSystem::ClaimSlotLocked` bumps on claim only and was cited as the precedent. The mechanics
+match and the safety argument does not: there `done` is both the free/occupied flag and the
+semantic answer, a stale job handle's correct answer is "complete", and nothing is
+dereferenced — a wrong flag yields a benign default. For a resource the stale answer must be
+"refuse" and a wrong flag yields a null image. What the one-bump version bought was tidiness:
+a slot's generation changed exactly once per occupant. What it cost was the invariant the
+counter exists for. The flag stays in `Resolve` for the one case the generation cannot answer —
+a forged handle at generation zero naming a slot no device has ever claimed — and that case now
+has its own assertion, which is what turns the dropped flag red instead of silent.
+
+**A stale handle in `ICommandList::Barrier` now has a test, and it needed a declining assertion
+handler to have one.** `Barrier` returns void, so it reports through `MONARC_CHECK` plus a log
+line, and under the default handler the debug break ends the process — measured: the refusal
+prints and never returns to the caller. Installing a handler that declines to break is the only
+way to watch the refusal and continue, which is what `SetAssertHandler` is for. The same case
+pins `ToString(PipelineStage)`, `ToString(Access)` and `ToString(TextureLayout)` as having a
+*shipped* caller rather than only a test one: the log line beside that check is what identifies
+which barrier was wrong, and the header previously claimed a log use that did not exist. There
+is deliberately no assertion that validation stayed quiet in that window — `VulkanBackend.cpp`'s
+messenger follows its `MONARC_CHECK` with an unconditional `std::abort()`, so a recorded barrier
+ends the process after four assertions and no such assertion could be reached to fail.
+
 **A mapped span's length is asserted against a 250-byte buffer and not a 256-byte one**, because
 Vulkan rounds an allocation up to the memory type's alignment: at 256 the buffer's size and the
 allocation's size are the same number and the assertion could not tell them apart.
@@ -863,14 +899,25 @@ The following tests did not run:
 ```
 
 - Green on all six presets, zero warnings, 9 CTest entries each
-- **1061 device-free assertions across 104 cases** — `Monarc.RHI.Tests` 47 cases / 453
-  assertions and `Monarc.RHI.Vulkan.Tests` 57 / 608 — plus **31 device-required cases and 290
-  assertions**, that last number scaling with how many adapters a machine has. Task 2 left 67
-  device-free cases and 247 assertions, so Task 3 adds 37 cases and 814 assertions device-free
+- **104 device-free cases** — `Monarc.RHI.Tests` 47 and `Monarc.RHI.Vulkan.Tests` 57 — plus
+  **32 device-required cases**, and Task 2 left 67 device-free, so Task 3 adds 37 device-free
+  cases and 32 that need a GPU.
+
+  **Cases and not assertions, and the change of unit is the point.** The assertion totals are
+  493 device-free (169 + 324) and 309 device-required, and an earlier draft of this section
+  quoted 1061 and 290 — a number that was 572 higher because four `O(n²)` loops each contributed
+  one assertion per *pair* of enumerators. Measured, those loops did not detect 572 things: a
+  mutation duplicating a Vulkan access bit turned 3 of 153 red, and one duplicating a `ToString`
+  case turned 1 of 286. Each is now a single assertion that names the colliding pair
+  (`IndexRead[2] and UniformRead[8] collide`), with the same detection power — 3 reds and 1 red
+  respectively — and the layout loop's 28 comparisons were deleted outright rather than
+  collapsed, because the eight spot checks above them are exhaustive and the round-trip case
+  catches a duplicate a second time. An assertion count nobody can interpret is a number that
+  gets quoted as coverage, so this section quotes cases.
 - **What only runs with a device, and is therefore invisible in CI**: everything through
   `VulkanBackend::CreateDevice` — device creation on each adapter, the readback itself, the
   frame/pool/timeline cycle, every resource-pool and stale-handle assertion, the cross-device
-  submission refusal, and the mapping rules. That is 31 cases. What CI *does* cover of Task 3 is
+  submission refusal, and the mapping rules. That is 32 cases. What CI *does* cover of Task 3 is
   the whole barrier model's translation in both directions, the resource-description and
   rendering enums, `FindMemoryType` against memory layouts this machine does not have, the
   `Array` operations the device's pools are built on, and every type-level property of
