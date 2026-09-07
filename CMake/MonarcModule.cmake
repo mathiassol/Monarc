@@ -102,9 +102,10 @@ function(_monarc_declare target_type)
 
     # An app has no Include/ to glob: it exports nothing, so there is no public header for
     # anyone to include. Globbing one anyway would put a header in the target's source list
-    # where it changes nothing -- a .h is never compiled -- while reading as support for a
-    # public interface an app does not have. The layout gate forbids an app's Include/
-    # outright rather than merely tolerating its absence, which is what closes the gap.
+    # where it changes nothing -- a .h there is never compiled -- while reading as support
+    # for a public interface an app does not have. Not globbing it is not enough on its own
+    # either, since check_architecture.py's gates walk Include/ for every module: the layout
+    # gate therefore forbids an app's Include/ outright rather than tolerating its absence.
     set(_globs
         "${CMAKE_CURRENT_SOURCE_DIR}/Private/*.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/Private/*.h")

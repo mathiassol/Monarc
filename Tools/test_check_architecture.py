@@ -274,9 +274,9 @@ class TestLayout(FixtureTest):
 
     def test_an_app_that_has_an_include_directory_fails(self):
         # Not just unnecessary -- wrong, and quietly so. monarc_app() does not glob an app's
-        # Include/, so nothing in the build ever reads a header left there while gates 3 and
-        # 10 still do. Saying an app must not have one closes that gap; merely excusing it
-        # does not.
+        # Include/, so nothing in the build ever reads a header left there while the gates
+        # still do -- iter_sources walks Include/ for every module, app or not. Saying an app
+        # must not have one closes that gap; merely excusing it does not.
         self.tree.mkdir("A/Include")
         self.tree.mkdir("A/Private")
         self.assertGateFails(

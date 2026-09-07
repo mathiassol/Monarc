@@ -41,9 +41,9 @@ private:
 // non-template type there is no strong technical reason either way; this is the house form,
 // and that is the whole of it.
 //
-// Saying so explicitly because this comment used to give two reasons, both wrong, and both
-// copied into Monarc.RHI before anyone checked them. What is actually true, measured on cl
-// and clang-cl at /W4 /WX:
+// Saying so explicitly, because this comment used to give two reasons and both were wrong --
+// and both had already been cited verbatim by two files in Monarc.RHI. What is actually
+// true, measured on cl and clang-cl at /W4 /WX:
 //
 //   * A hidden friend is not hidden from ADL. A friend *defined inside* the class is found
 //     by ADL from a template instantiated anywhere, including a template in a wholly

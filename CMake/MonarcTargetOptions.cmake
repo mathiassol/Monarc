@@ -95,10 +95,11 @@ function(monarc_set_target_options target)
             # Verified on a minimal translation unit: `cl /W4 /WX` exits clean, `cl /W4 /WX
             # /w44062` gives "warning C4062: enumerator 'E::C' in switch of enum 'E' is not
             # handled" through C2220. Monarc relies on that error as the mechanism that
-            # forces a new enumerator to be given a case -- Monarc.RHI/Private/Types.cpp,
-            # Monarc.Core/Private/Error.cpp and Log.cpp all write their switches without a
-            # `default` for exactly that reason -- and a guarantee that holds on one of two
-            # supported compilers is not one a developer on msvc-debug can lean on.
+            # forces a new enumerator to be given a case: Monarc.RHI/Private/Types.cpp says
+            # so explicitly, and Monarc.Core/Private/Error.cpp and Log.cpp are written in
+            # the same `default`-less shape, so the flag governs them too. A guarantee that
+            # holds on one of two supported compilers is not one a developer working on
+            # msvc-debug can lean on.
             #
             # Deliberately not /w44061, which fires even when a `default` IS present: it
             # would force every defensive `default` to enumerate all cases and delete the

@@ -210,7 +210,9 @@ def gate_layout(modules: dict, root: pathlib.Path) -> Gate:
         # public headers. Note the direction -- an app is not merely excused from having
         # Include/, it is forbidden one. An exemption alone would leave a trap: monarc_app()
         # does not glob an app's Include/, so nothing in the build ever reads a header put
-        # there, while gates 3 and 10 go on scanning and policing it -- a file that is
+        # there, while the source-reading gates go on scanning and policing it: iter_sources
+        # walks Include/ for every module, app or not, so gate 10 reads such a header always
+        # and gate 3 reads it whenever the app is tier 2. Either way it is a file that is
         # simultaneously governed and dead. A rule that says which of the two is right has no
         # such gap, and it costs nothing to state.
         #

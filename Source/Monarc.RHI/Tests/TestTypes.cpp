@@ -20,8 +20,8 @@ namespace {
 /// size rather than one belonging to a neighbouring row.
 ///
 /// That the list is *complete* is checked by "kAllFormats lists every Format enumerator"
-/// below. It has to be a run-time case rather than a static_assert: the only thing that can
-/// answer whether a value names a format is ToString, which is not constexpr.
+/// below. It has to be a run-time case rather than a static_assert because it asks ToString,
+/// and ToString is not constexpr.
 constexpr Format kAllFormats[] = {
     Format::Unknown,
     Format::R8G8B8A8_UNORM,
@@ -57,8 +57,8 @@ TEST_CASE("kAllFormats lists every Format enumerator") {
     //
     // What it rests on: Format's enumerators are one contiguous run from Unknown = 0, which
     // Types.h keeps by giving no explicit value after it. An enumerator added with a value
-    // outside that run would still slip past. The guard covers the append, which is the only
-    // way a format has been added or is documented to be added.
+    // outside that run would still slip past. The guard covers the append, which is how both
+    // of the formats after Unknown got there.
     const Format onePastTheList = static_cast<Format>(std::size(kAllFormats));
     CHECK(Name(onePastTheList) == Name(kNotAFormat));
 }

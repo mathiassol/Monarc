@@ -118,8 +118,8 @@ enforced:
   rather than merely excusing its absence. An app exports nothing, so there is no public
   header for anyone to include. Merely exempting it would leave a trap: `monarc_app()` does
   not glob an app's `Include/`, so nothing in the build would ever read a header placed
-  there, while the package-boundary and platform-containment gates went on policing it — a
-  file that is simultaneously governed and dead.
+  there, while the gates that walk a module's sources went on policing it — they scan
+  `Include/` for every module, app or not. A file simultaneously governed and dead.
 
 | App | Kind | Tier | Depends on | Responsibility |
 |---|---|---|---|---|
