@@ -38,30 +38,32 @@ namespace Monarc::RHI {
 /// type, so returning an `IBackend` would mean inventing an ownership convention in Core to
 /// serve a single caller. Task 3 introduces `IDevice`, and at that point this class becomes
 /// the implementation behind an `IBackend` and `CreateVulkanBackend()` comes back as the
-/// factory. Callers written against this class will need to change; saying so here is the
-/// point of writing it down.
+/// factory. Callers written against `Create` will need to change; saying so here is the point
+/// of writing it down.
 ///
-/// **Two-phase: construct, then `Initialize`.** Not the house factory shape
-/// (`Platform::Library::Open` and `Host::Window::Create` both return a `Result<T>`), and the
-/// reason is `Error::message`: it is a non-owning view over storage that must outlive the
-/// error, and the messages this class produces name things that are not known until run time
-/// -- the library that would not open, the `VkResult` a call returned, the extension that was
-/// missing. That storage has to live somewhere, and the only somewhere that is neither a
-/// hidden global nor a caller-supplied buffer is this object, which therefore has to exist
-/// before the call that fails. A `Result<VulkanBackend>` would hand back a message pointing
-/// into an object that was never returned.
+/// **Factory construction**, as `Platform::Library::Open` and `Host::Window::Create` both do:
+/// a static `Create` returning a `Result<VulkanBackend>`, a `Shutdown` safe to call
+/// unconditionally, and an `IsInitialized` query. A backend a caller holds is therefore a
+/// backend that came up -- there is no half-built one to hand back, and no allocation failure
+/// to report after the fact, because the allocation happens inside `Create` before anything
+/// is constructed.
 ///
-/// A failure message consequently stays valid **only as long as this object does**, and only
-/// until the next failed call on it. That is as long as a caller inspecting the `Status` it
-/// just received needs, and it is why `Initialize` is called on a backend the caller holds.
+/// `Error::message` is a non-owning view, so every failure this class reports is a string
+/// literal and stays valid as long as the program does. The composed detail -- which library,
+/// which `VkResult` and its numeric value, which version was reported -- goes to `MONARC_LOG`
+/// at the failure site instead. Nothing branches on message text: the `ErrorCode` carries what
+/// is branchable and the log carries what a human reads.
 ///
-/// Move-only and non-copyable, in the shape `Platform::Library` and `Host::Window` use: it
-/// owns resources that must be released exactly once.
+/// Move-only and non-copyable: it owns resources that must be released exactly once. There is
+/// no default constructor -- unlike `Platform::Library`, whose storage is one inline handle, a
+/// backend owns a heap allocation, so a default-constructed one would be a permanently dead
+/// object rather than a cheap closed handle. A backend that has been moved from is that dead
+/// object, and every query below answers on one rather than dereferencing.
 class VulkanBackend {
 public:
     struct Config {
         /// Reported to the driver and to tools as `VkApplicationInfo::pApplicationName`. Not
-        /// owned; must outlive the `Initialize` call. A string literal is the intended use,
+        /// owned; must outlive the `Create` call. A string literal is the intended use,
         /// matching `Error::message` and `Host::WindowDescription::title`.
         const char* applicationName = "Monarc";
 
@@ -85,15 +87,8 @@ public:
         bool validation = ValidationDefault();
     };
 
-    /// `allocator` is used for enumeration scratch space and for this object's own state, and
-    /// must outlive the backend. Nothing here allocates outside it.
-    ///
-    /// This constructor performs the one allocation the class makes. If that allocation
-    /// fails, the object is left unusable rather than aborting: `Initialize` then reports
-    /// `ErrorCode::OutOfMemory` and `IsInitialized()` stays false.
-    explicit VulkanBackend(IAllocator& allocator);
-
-    /// Destroys the messenger, the instance, and the loader, in that order. See `Shutdown`.
+    /// Destroys the messenger, the instance, and the loader, in that order, and then releases
+    /// the state. See `Shutdown`.
     ~VulkanBackend();
 
     VulkanBackend(const VulkanBackend&)            = delete;
@@ -103,24 +98,34 @@ public:
     VulkanBackend& operator=(VulkanBackend&& other) noexcept;
 
     /// Opens the loader, creates the instance, and installs the debug messenger if one was
-    /// asked for and is available.
+    /// asked for and is available. A returned backend is up.
     ///
-    /// On failure nothing is left open: a partially built backend is torn down before this
-    /// returns, so `IsInitialized()` is false and calling `Initialize` again is safe.
-    /// Failures are `ErrorCode::NotFound` (no Vulkan runtime, or a missing entry point),
-    /// `ErrorCode::Unsupported` (the loader or a required extension is too old or absent) or
-    /// `ErrorCode::BackendFailure` (a Vulkan call returned an error, named in the message).
-    [[nodiscard]] Status Initialize(const Config& config);
+    /// `allocator` is used for this object's own state and for enumeration scratch space, and
+    /// must outlive the backend. Nothing here allocates outside it.
+    ///
+    /// Nothing survives a failure: the state is destroyed and deallocated before this
+    /// returns, so a failed `Create` leaves the allocator exactly as it found it. Failures
+    /// are `ErrorCode::OutOfMemory` (the allocator returned nothing), `ErrorCode::NotFound`
+    /// (no Vulkan runtime, or a missing entry point), `ErrorCode::Unsupported` (the loader or
+    /// a required extension is too old or absent) or `ErrorCode::BackendFailure` (a Vulkan
+    /// call returned an error, whose spelling is the message and whose numeric value is in
+    /// the log line beside it).
+    [[nodiscard]] static Result<VulkanBackend> Create(IAllocator&   allocator,
+                                                      const Config& config);
 
-    /// Tears everything down. Safe to call unconditionally and more than once.
+    /// Destroys the messenger, the instance and the loader, in that order. Safe to call
+    /// unconditionally, safe to call more than once, and safe on a backend that has been
+    /// moved from. Bringing one back up means calling `Create` again.
     void Shutdown();
 
+    /// True while the `VkInstance` is alive: true on a backend `Create` returned, false after
+    /// `Shutdown`, and false on one that has been moved from.
     [[nodiscard]] bool IsInitialized() const;
 
     /// The version the *loader* reports, from `vkEnumerateInstanceVersion` -- not any
-    /// device's. `{0, 0, 0}` before a successful `Initialize`. On the development machine this
-    /// is 1.4.357 while one of the two devices is 1.3.275, which is why the two numbers are
-    /// kept apart: it is the device's that decides what may be called on it.
+    /// device's. `{0, 0, 0}` after `Shutdown` and on a moved-from backend. On the development
+    /// machine this is 1.4.357 while one of the two devices is 1.3.275, which is why the two
+    /// numbers are kept apart: it is the device's that decides what may be called on it.
     [[nodiscard]] ApiVersion InstanceApiVersion() const;
 
     /// Whether `VK_LAYER_KHRONOS_validation` was actually enabled on the instance.
@@ -146,12 +151,6 @@ public:
     [[nodiscard]] Status EnumerateAdapters(Array<AdapterInfo>& out);
 
 private:
-    /// Shuts down and then destroys and deallocates the state. What the destructor and the
-    /// move-assignment operator share, and the only private member of this class that names
-    /// no Vulkan type -- everything else lives on State, whose definition is in
-    /// Private/VulkanBackend.cpp because it names plenty of them.
-    void Release();
-
     /// Everything this class owns lives behind one pointer, allocated from the caller's
     /// allocator, because the state names Vulkan types and a public header may not
     /// (Docs/Rendering/RHI.md, and ADR-0014's rule 1). The alternative -- opaque fixed-size
@@ -159,9 +158,19 @@ private:
     /// entry-point tables and a `Platform::Library`: the size would be a number in this
     /// header that a static_assert in the .cpp polices, and every table added later would
     /// change it.
-    ///
-    /// Null only if the constructor's allocation failed.
     struct State;
+
+    /// Adopts a state `Create` has already brought up. Private, so the only way to come by a
+    /// backend is a `Create` that succeeded.
+    explicit VulkanBackend(State* state) noexcept;
+
+    /// Shuts down and then destroys and deallocates the state. What the destructor and the
+    /// move-assignment operator share, and the only private member function of this class
+    /// that names no Vulkan type -- everything else lives on State, whose definition is in
+    /// Private/VulkanBackend.cpp because it names plenty of them.
+    void Release();
+
+    /// Null only on a backend that has been moved from.
     State* m_state = nullptr;
 };
 

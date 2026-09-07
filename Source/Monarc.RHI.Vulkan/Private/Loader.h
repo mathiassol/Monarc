@@ -8,7 +8,6 @@
 #include <VulkanPlatform.h>
 #include <vulkan/vulkan.h>
 
-#include <format>
 #include <string_view>
 #include <utility>
 
@@ -89,20 +88,11 @@ struct DebugUtilsFunctions {
 /// player and unrecoverable by us. Opening it ourselves makes the same situation an ordinary
 /// `Result` with a message.
 ///
-/// Two-phase: default-construct, then `Open`. That is not the house factory shape
-/// (`Platform::Library::Open` returns a `Result<Library>`) and the reason is `Error::message`,
-/// which is a non-owning view over storage that must outlive the error. A message naming the
-/// library that could not be opened has to live *somewhere*, and the only somewhere that is
-/// neither a hidden global nor a caller-supplied buffer is this object -- which means the
-/// object must exist before the call that fails. A returned `Result<Loader>` would carry a
-/// message pointing into a Loader that was never returned.
-///
-/// **A failure message viewing this object stays valid only as long as the object does**, and
-/// only until the next failed call on it. That is exactly as long as a caller inspecting the
-/// `Status` it just received needs it, and it is why `Open` is called on a Loader the caller
-/// already holds.
-///
-/// Move-only, non-copyable: it owns an OS resource that must be released exactly once.
+/// Default-constructible and closed, with a static `Open` returning a `Result<Loader>`, a
+/// `Close` safe to call unconditionally, and an `IsOpen` query: the shape
+/// `Platform::Library` uses, one rung up, and for the same reason -- it owns an OS resource
+/// that must be released exactly once. Move-only, non-copyable. A moved-from Loader is a
+/// closed one: `IsOpen()` is false, every table is null, and `Close` on it does nothing.
 class Loader {
 public:
     Loader()  = default;
@@ -112,34 +102,37 @@ public:
     Loader& operator=(const Loader&) = delete;
 
     // Defaulted rather than written out: Platform::Library's own move transfers the module
-    // handle and nulls the source, the three tables are trivially copyable, and the message
-    // buffer is a plain array. There is nothing a hand-written move would do differently.
-    // Note the consequence for the paragraph above -- a message obtained from a Loader that
-    // has since been moved from views the *source's* buffer, not the destination's, so it
-    // stays valid while the source lives and no longer.
+    // handle and nulls the source, and the three tables are trivially copyable. There is
+    // nothing a hand-written move would do differently.
     Loader(Loader&&)            = default;
     Loader& operator=(Loader&&) = default;
 
-    /// Opens `libraryName` and resolves every global entry point from it. Fails with the code
-    /// `Platform::Library::Open` reported -- `ErrorCode::NotFound` for a name that does not
-    /// resolve -- and a message naming the library, or with `ErrorCode::NotFound` and a
-    /// message naming the first entry point that was missing.
+    /// Opens `libraryName` and resolves every global entry point from it, returning a Loader
+    /// only if both succeeded. Fails with the code `Platform::Library::Open` reported --
+    /// `ErrorCode::NotFound` for a name that does not resolve -- or with `ErrorCode::NotFound`
+    /// and a message naming the entry point that was missing.
+    ///
+    /// Every message is a string literal, which is what `Error::message` -- a non-owning view
+    /// -- requires of a factory that returns no object on failure. The library name is not in
+    /// any of them: it is caller-supplied, so the caller already has it, and
+    /// `Platform::Library::Open` takes the same position with its own bare
+    /// `"could not load library"`. What names the library is the log line at the failure site.
     ///
     /// The name is a parameter, defaulted to the platform's own, for one reason: it is how
     /// Tests/TestVulkanLoader.cpp exercises the not-found path, by passing a name that cannot
     /// exist. No environment variable and no build-time switch is involved, and shipped code
     /// behaves identically whether or not the test exists.
     ///
-    /// A StringView and not a `const char*`, even though the default is one: neither thing
-    /// done with the name needs a terminator -- `Platform::Library::Open` takes a StringView
-    /// of its own, and the failure message formats one -- and requiring a terminator would
-    /// force every caller holding a view to either copy it or assume `data()` happens to be
-    /// null-terminated. `Platform::Library::SystemLibraryName()` returns exactly such a view,
-    /// and it is what the second loader test passes.
-    [[nodiscard]] Status Open(StringView libraryName = VulkanLibraryName());
+    /// A StringView and not a `const char*`, even though the default is one: nothing done with
+    /// the name needs a terminator -- `Platform::Library::Open` takes a StringView of its own
+    /// -- and requiring one would force every caller holding a view to either copy it or
+    /// assume `data()` happens to be null-terminated.
+    /// `Platform::Library::SystemLibraryName()` returns exactly such a view, and it is what
+    /// the second loader test passes.
+    [[nodiscard]] static Result<Loader> Open(StringView libraryName = VulkanLibraryName());
 
-    /// True once `Open` has succeeded. False after `Close`, and false if `Open` failed --
-    /// a failed `Open` leaves nothing open.
+    /// True while a library is open. False on a default-constructed Loader, false after
+    /// `Close`, and false on one that has been moved from.
     [[nodiscard]] bool IsOpen() const { return m_library.IsOpen(); }
 
     /// Resolves the instance-level entry points against `instance`. When `debugUtilsEnabled`,
@@ -168,30 +161,11 @@ public:
     void Close();
 
 private:
-    /// Longest failure message this class formats. A stack-sized fixed buffer, so no error
-    /// path here allocates -- the same rule Log.h's kMaxLogMessageLength follows, and for the
-    /// same reason.
-    static constexpr usize kMaxMessageLength = 256;
-
-    /// Formats into `m_message` and returns a failure viewing it. Only for messages that must
-    /// name something not known until run time; anything the X-macro can stringise gets a
-    /// string literal instead and never comes through here.
-    template <typename... Args>
-    [[nodiscard]] std::unexpected<Error> Fail(ErrorCode code, std::format_string<Args...> fmt,
-                                              Args&&... args) {
-        const auto  result  = std::format_to_n(m_message, kMaxMessageLength - 1, fmt,
-                                               std::forward<Args>(args)...);
-        const usize written = static_cast<usize>(result.out - m_message);
-        m_message[written]  = '\0';
-        return Err(code, std::string_view(m_message, written));
-    }
-
     Platform::Library         m_library;
     PFN_vkGetInstanceProcAddr m_getInstanceProcAddr = nullptr;
     GlobalFunctions           m_global;
     InstanceFunctions         m_instance;
     DebugUtilsFunctions       m_debugUtils;
-    char                      m_message[kMaxMessageLength] = {};
 };
 
 }  // namespace Monarc::RHI::Detail

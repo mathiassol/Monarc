@@ -90,22 +90,27 @@ void PrintAdapter(const char* label, Monarc::usize index,
 /// the file comment: this is a report, not an assertion.
 int ReportAdapters() {
     Monarc::SystemAllocator            allocator;
-    Monarc::RHI::VulkanBackend         backend(allocator);
     Monarc::RHI::VulkanBackend::Config config{};
     config.applicationName = "Monarc.FirstLight";
 
     MONARC_LOG(FirstLight, Info, "probe: validation requested {}", config.validation);
 
-    if (const Monarc::Status initialized = backend.Initialize(config); !initialized) {
+    Monarc::Result<Monarc::RHI::VulkanBackend> created =
+        Monarc::RHI::VulkanBackend::Create(allocator, config);
+    if (!created) {
         // Error level, because a human running --adapters on their own machine wants this to
         // stand out, even though the exit code stays zero. The two are separate signals on
         // purpose: the log says what is wrong, the exit code says "this was a report".
-        Report("probe: the Vulkan backend did not come up", initialized.error());
+        //
+        // The message is a string literal; the backend's own log lines above this one carry
+        // which library, which VkResult and which version it actually saw.
+        Report("probe: the Vulkan backend did not come up", created.error());
         MONARC_LOG(FirstLight, Info,
                    "probe: no adapters can be listed on this machine. Exiting zero anyway -- "
                    "this mode reports, and Monarc.RHI.Vulkan.DeviceTests is the gate.");
         return 0;
     }
+    Monarc::RHI::VulkanBackend& backend = *created;
 
     const Monarc::RHI::ApiVersion instance = backend.InstanceApiVersion();
     MONARC_LOG(FirstLight, Info,
@@ -170,20 +175,21 @@ int main(int argc, char** argv) {
     Monarc::SystemAllocator allocator;
 
     ++steps;
-    Monarc::RHI::VulkanBackend               backend(allocator);
     const Monarc::RHI::VulkanBackend::Config backendConfig{
         .applicationName = "Monarc.FirstLight"};
-    if (const Monarc::Status brought = backend.Initialize(backendConfig); !brought) {
-        Report("Vulkan backend", brought.error());
+    if (const Monarc::Result<Monarc::RHI::VulkanBackend> backend =
+            Monarc::RHI::VulkanBackend::Create(allocator, backendConfig);
+        !backend) {
+        Report("Vulkan backend", backend.error());
         ++unimplemented;
     } else {
-        const Monarc::RHI::ApiVersion instance = backend.InstanceApiVersion();
+        const Monarc::RHI::ApiVersion instance = backend->InstanceApiVersion();
         MONARC_LOG(FirstLight, Info,
                    "Vulkan backend up | instance {}.{}.{} | validation layer {} | debug "
                    "messenger {} | run with --adapters to list what it sees",
                    instance.major, instance.minor, instance.patch,
-                   backend.ValidationLayerEnabled() ? "enabled" : "not enabled",
-                   backend.DebugMessengerInstalled() ? "installed" : "absent");
+                   backend->ValidationLayerEnabled() ? "enabled" : "not enabled",
+                   backend->DebugMessengerInstalled() ? "installed" : "absent");
     }
 
     ++steps;

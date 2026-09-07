@@ -17,9 +17,9 @@ constexpr const char* kNoSuchLibrary = "monarc_no_such_vulkan_runtime.dll";
 /// True when every entry point in every table is null.
 ///
 /// Written out rather than trusting Loader::IsOpen, because "not open" and "holding stale
-/// pointers into an unmapped module" are exactly the two states a failed Open or a Close has
-/// to keep apart -- and a table that kept its pointers would turn the next call into a jump
-/// into freed address space rather than a null dereference.
+/// pointers into an unmapped module" are exactly the two states a Close has to keep apart --
+/// and a table that kept its pointers would turn the next call into a jump into freed address
+/// space rather than a null dereference.
 [[nodiscard]] bool AllTablesEmpty(const Loader& loader) {
     bool empty = true;
 #define MONARC_VK_CHECK_NULL(name) empty = empty && loader.Global().name == nullptr;
@@ -36,18 +36,26 @@ constexpr const char* kNoSuchLibrary = "monarc_no_such_vulkan_runtime.dll";
 
 }  // namespace
 
-TEST_CASE("opening a library that does not exist reports NotFound and names it") {
+TEST_CASE("opening a library that does not exist reports NotFound, and the message outlives it") {
     // The same shape as Platform::Library's own first test, one rung up: Library answers with
-    // the code, and the loader is what turns it into a sentence a player could quote.
-    Loader loader;
+    // the code, and the loader is the rung that says which of its own steps failed.
+    Monarc::Error error{};
+    {
+        const Monarc::Result<Loader> opened = Loader::Open(kNoSuchLibrary);
+        REQUIRE_FALSE(opened.has_value());
+        error = opened.error();
+    }
 
-    const Monarc::Status opened = loader.Open(kNoSuchLibrary);
-
-    REQUIRE_FALSE(opened.has_value());
-    CHECK(opened.error().code == Monarc::ErrorCode::NotFound);
-    CHECK(opened.error().message.find(kNoSuchLibrary) != std::string_view::npos);
-    CHECK_FALSE(loader.IsOpen());
-    CHECK(AllTablesEmpty(loader));
+    // Read after the Result -- and any Loader that might have carried a message buffer -- is
+    // gone. Error::message is a non-owning view, so a factory that returns no object on
+    // failure can only report a string literal.
+    //
+    // The exact text rather than a substring search, and TestVulkanBackend.cpp's equivalent
+    // case records why: a message re-pointed at storage inside the object was read after that
+    // storage was freed and clang-asan reported nothing at all. The text comparison is the
+    // only thing standing there.
+    CHECK(error.code == Monarc::ErrorCode::NotFound);
+    CHECK(error.message == "could not open the Vulkan runtime library");
 }
 
 TEST_CASE("a real library that is not the Vulkan loader reports the missing entry point") {
@@ -56,21 +64,24 @@ TEST_CASE("a real library that is not the Vulkan loader reports the missing entr
     // platform rather than hardcoded, exactly as Platform::Library's own tests do, so it
     // survives macOS -- and it is a library that exists on every machine this can run on,
     // which is the point.
-    Loader loader;
-
-    const Monarc::Status opened = loader.Open(Monarc::Platform::Library::SystemLibraryName());
+    const Monarc::Result<Loader> opened =
+        Loader::Open(Monarc::Platform::Library::SystemLibraryName());
 
     REQUIRE_FALSE(opened.has_value());
     CHECK(opened.error().code == Monarc::ErrorCode::NotFound);
+
+    // Which entry point was missing *is* in the message, because the name is a literal --
+    // it comes from the X-macro's `#name`, or from this one written out. The library's name
+    // is not, and cannot be: it is caller-supplied, so it would have to be formatted
+    // somewhere. Loader.cpp logs it instead.
     CHECK(opened.error().message.find("vkGetInstanceProcAddr") != std::string_view::npos);
-    CHECK(opened.error().message.find(Monarc::Platform::Library::SystemLibraryName()) !=
+    CHECK(opened.error().message.find(Monarc::Platform::Library::SystemLibraryName()) ==
           std::string_view::npos);
 
-    // Nothing is left mapped. A loader that had kept the library open would be holding a
-    // reference to a DLL it has no use for, and IsOpen would be answering a different
-    // question from "can I call through this".
-    CHECK_FALSE(loader.IsOpen());
-    CHECK(AllTablesEmpty(loader));
+    // Nothing is left mapped, and nothing needs checking for it: a failed Open returns no
+    // Loader, so there is no half-open one in existence to hold a library it has no use for.
+    // That is the difference the factory makes, and it is why the two "a failed Open leaves
+    // nothing behind" cases this file used to carry are gone rather than rewritten.
 }
 
 TEST_CASE("a default-constructed loader is closed, empty, and safe to query") {
@@ -99,20 +110,6 @@ TEST_CASE("resolving instance functions on a closed loader is rejected, not atte
     CHECK(loaded.error().code == Monarc::ErrorCode::InvalidArgument);
     CHECK_FALSE(loaded.error().message.empty());
     CHECK(AllTablesEmpty(loader));
-}
-
-TEST_CASE("reopening after a failure does not leave the previous attempt behind") {
-    Loader loader;
-    REQUIRE_FALSE(loader.Open(Monarc::Platform::Library::SystemLibraryName()).has_value());
-
-    const Monarc::Status second = loader.Open(kNoSuchLibrary);
-    REQUIRE_FALSE(second.has_value());
-
-    // The second failure's message names the second library, not the first. A message buffer
-    // that was written once and never again would still be describing kernel32 here, which is
-    // the failure mode of every "last error" mechanism that forgets to overwrite.
-    CHECK(second.error().message.find(kNoSuchLibrary) != std::string_view::npos);
-    CHECK(second.error().message.find("vkGetInstanceProcAddr") == std::string_view::npos);
 }
 
 // Two things this file deliberately does not test, because it cannot without a Vulkan

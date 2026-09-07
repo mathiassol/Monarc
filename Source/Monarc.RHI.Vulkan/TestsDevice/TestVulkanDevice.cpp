@@ -12,6 +12,13 @@
 // cannot resolve and the loader fails exactly as it would on a machine with no Vulkan, so the
 // skip can be provoked on a machine that has one. It is the same defaulted parameter shipped
 // code uses, exposed on a command line; no environment variable is involved.
+//
+// **VulkanBackend's move semantics and allocator accounting live here rather than in Tests/,
+// and that is a consequence of the factory shape.** A backend exists only if it came up, so
+// holding one to move from, move-assign over, or shut down requires a real Vulkan
+// implementation. The device-free suite keeps the failure path, where the allocator can still
+// be measured; the four cases below are what the two-phase constructor used to make reachable
+// with no Vulkan at all, at the price of a backend that could exist without a state.
 
 #define DOCTEST_CONFIG_IMPLEMENT
 #include <doctest/doctest.h>
@@ -165,43 +172,118 @@ TEST_CASE("a messenger is only ever installed when the validation layer actually
                Backend().DebugMessengerInstalled() ? "installed" : "absent");
 }
 
-TEST_CASE("a backend can be shut down and brought back up") {
+TEST_CASE("a backend can be shut down, twice, and another brought up in its place") {
     // Shutdown destroys the messenger, the instance and the loader in that order, and getting
     // that order wrong is a validation error rather than a crash -- which, with the messenger
     // installed, stops the process. So this case both exercises the cycle and is the thing
     // that would catch the ordering being wrong.
-    Monarc::SystemAllocator          allocator;
-    Monarc::RHI::VulkanBackend       backend(allocator);
-    Monarc::RHI::VulkanBackend::Config config{};
+    Monarc::SystemAllocator                  allocator;
+    const Monarc::RHI::VulkanBackend::Config config{};
 
-    REQUIRE(backend.Initialize(config).has_value());
-    const Monarc::RHI::ApiVersion first = backend.InstanceApiVersion();
+    Monarc::Result<Monarc::RHI::VulkanBackend> backend =
+        Monarc::RHI::VulkanBackend::Create(allocator, config);
+    REQUIRE(backend.has_value());
+    const Monarc::RHI::ApiVersion first = backend->InstanceApiVersion();
 
-    backend.Shutdown();
-    CHECK_FALSE(backend.IsInitialized());
-    CHECK(backend.InstanceApiVersion() == Monarc::RHI::ApiVersion{0, 0, 0});
+    backend->Shutdown();
+    backend->Shutdown();
+    CHECK_FALSE(backend->IsInitialized());
+    CHECK(backend->InstanceApiVersion() == Monarc::RHI::ApiVersion{0, 0, 0});
 
-    REQUIRE(backend.Initialize(config).has_value());
-    CHECK(backend.IsInitialized());
-    CHECK(backend.InstanceApiVersion() == first);
+    // Bringing one back up is a second Create rather than a second Initialize, which is what
+    // the factory shape costs and what `Platform::Library` already asks of its callers.
+    const Monarc::Result<Monarc::RHI::VulkanBackend> again =
+        Monarc::RHI::VulkanBackend::Create(allocator, config);
+    REQUIRE(again.has_value());
+    CHECK(again->IsInitialized());
+    CHECK(again->InstanceApiVersion() == first);
+}
+
+TEST_CASE("a moved-from backend is unusable and says so rather than crashing") {
+    Monarc::SystemAllocator allocator;
+
+    Monarc::Result<Monarc::RHI::VulkanBackend> source =
+        Monarc::RHI::VulkanBackend::Create(allocator,
+                                           Monarc::RHI::VulkanBackend::Config{});
+    REQUIRE(source.has_value());
+
+    const Monarc::RHI::VulkanBackend destination(std::move(*source));
+    CHECK(destination.IsInitialized());
+
+    // The moved-from object has no state at all, so every query has to answer without
+    // dereferencing it. This is the case that would be a null dereference if any accessor
+    // forgot its null check -- and it is reachable in ordinary code, because a backend handed
+    // to something else by value leaves one of these behind.
+    CHECK_FALSE(source->IsInitialized());
+    CHECK(source->InstanceApiVersion() == Monarc::RHI::ApiVersion{0, 0, 0});
+    CHECK_FALSE(source->ValidationLayerEnabled());
+    CHECK_FALSE(source->DebugMessengerInstalled());
+    source->Shutdown();
+
+    // InvalidArgument rather than an empty list: "there are no adapters" and "this backend is
+    // not up" are different answers, and a caller told the first would go looking for a driver
+    // problem.
+    Monarc::Array<Monarc::RHI::AdapterInfo> adapters(allocator);
+    const Monarc::Status                    raw = source->EnumerateAdaptersRaw(adapters);
+    REQUIRE_FALSE(raw.has_value());
+    CHECK(raw.error().code == Monarc::ErrorCode::InvalidArgument);
+    CHECK(adapters.IsEmpty());
+}
+
+TEST_CASE("move assignment releases what the destination held") {
+    Monarc::SystemAllocator                  allocator;
+    const Monarc::RHI::VulkanBackend::Config config{};
+
+    Monarc::Result<Monarc::RHI::VulkanBackend> first =
+        Monarc::RHI::VulkanBackend::Create(allocator, config);
+    Monarc::Result<Monarc::RHI::VulkanBackend> second =
+        Monarc::RHI::VulkanBackend::Create(allocator, config);
+    REQUIRE(first.has_value());
+    REQUIRE(second.has_value());
+
+    const Monarc::usize beforeMove = allocator.BytesAllocated();
+    REQUIRE(beforeMove > 0);
+
+    *first = std::move(*second);
+
+    // One state's worth of memory has gone: the destination's own, released before it adopted
+    // the source's. A defaulted move-assignment would have leaked it, and nothing about the
+    // object's observable behaviour would have changed -- which is why this measures the
+    // allocator rather than asking the backend a question.
+    CHECK(allocator.BytesAllocated() < beforeMove);
+    CHECK(first->IsInitialized());
+    CHECK_FALSE(second->IsInitialized());
+}
+
+TEST_CASE("a backend releases everything it allocated") {
+    Monarc::SystemAllocator allocator;
+    REQUIRE(allocator.BytesAllocated() == 0);
+    {
+        const Monarc::Result<Monarc::RHI::VulkanBackend> backend =
+            Monarc::RHI::VulkanBackend::Create(allocator,
+                                               Monarc::RHI::VulkanBackend::Config{});
+        REQUIRE(backend.has_value());
+        CHECK(allocator.BytesAllocated() > 0);
+    }
+    CHECK(allocator.BytesAllocated() == 0);
 }
 
 TEST_CASE("a loader that is open transfers on move and leaves the source closed") {
     // The case TestVulkanLoader.cpp cannot write: with nothing open, a correct move and a
     // memcpy are indistinguishable, so the only place this can be told apart is a machine with
     // a real Vulkan runtime to hold a handle to.
-    Monarc::RHI::Detail::Loader source;
-    REQUIRE(source.Open().has_value());
-    REQUIRE(source.IsOpen());
-    REQUIRE(source.Global().vkCreateInstance != nullptr);
+    Monarc::Result<Monarc::RHI::Detail::Loader> source = Monarc::RHI::Detail::Loader::Open();
+    REQUIRE(source.has_value());
+    REQUIRE(source->IsOpen());
+    REQUIRE(source->Global().vkCreateInstance != nullptr);
 
-    Monarc::RHI::Detail::Loader destination(std::move(source));
+    const Monarc::RHI::Detail::Loader destination(std::move(*source));
     CHECK(destination.IsOpen());
     CHECK(destination.Global().vkCreateInstance != nullptr);
 
     // The source must not still hold the module. If it did, both would call FreeLibrary on it
     // and the second call would be releasing a reference nobody owns.
-    CHECK_FALSE(source.IsOpen());
+    CHECK_FALSE(source->IsOpen());
 }
 
 TEST_CASE("opening a library that is not the Vulkan loader still fails on a machine that has one") {
@@ -210,9 +292,8 @@ TEST_CASE("opening a library that is not the Vulkan loader still fails on a mach
     // somewhere, and a loader that had fallen back to a process-wide symbol lookup rather than
     // asking the library it opened would pass in CI and fail here. Nothing does that today;
     // this is the case that would notice if it started.
-    Monarc::RHI::Detail::Loader loader;
-    const Monarc::Status        opened =
-        loader.Open(Monarc::Platform::Library::SystemLibraryName());
+    const Monarc::Result<Monarc::RHI::Detail::Loader> opened =
+        Monarc::RHI::Detail::Loader::Open(Monarc::Platform::Library::SystemLibraryName());
     REQUIRE_FALSE(opened.has_value());
     CHECK(opened.error().code == Monarc::ErrorCode::NotFound);
     CHECK(opened.error().message.find("vkGetInstanceProcAddr") != std::string_view::npos);
@@ -237,21 +318,25 @@ int main(int argc, char** argv) {
         forwarded.Push(argv[i]);
     }
 
-    Monarc::RHI::VulkanBackend         backend(allocator);
     Monarc::RHI::VulkanBackend::Config config{};
     config.libraryName = libraryName;
 
-    if (const Monarc::Status initialized = backend.Initialize(config); !initialized) {
+    Monarc::Result<Monarc::RHI::VulkanBackend> created =
+        Monarc::RHI::VulkanBackend::Create(allocator, config);
+    if (!created) {
         // Info, not Error: on a machine with no Vulkan this is the expected outcome and not a
-        // fault, and CTest is about to print it as Skipped. The message still names exactly
-        // what was missing, which is the whole point of the probe entry that runs beside this.
+        // fault, and CTest is about to print it as Skipped. The message is a string literal
+        // saying which step failed; the backend's own Warning lines above this one name the
+        // library, the VkResult or the version it actually saw, which is the whole point of
+        // the probe entry that runs beside this.
         MONARC_LOG(VulkanDeviceTest, Info,
                    "skipping the device tests: {} -- {} (returning {} so CTest reports Skipped "
                    "rather than Passed)",
-                   Monarc::ToString(initialized.error().code), initialized.error().message,
+                   Monarc::ToString(created.error().code), created.error().message,
                    kSkipReturnCode);
         return kSkipReturnCode;
     }
+    Monarc::RHI::VulkanBackend& backend = *created;
 
     Monarc::Array<Monarc::RHI::AdapterInfo> rawAdapters(allocator);
     if (const Monarc::Status enumerated = backend.EnumerateAdaptersRaw(rawAdapters);

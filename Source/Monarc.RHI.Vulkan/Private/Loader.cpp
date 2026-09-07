@@ -1,10 +1,25 @@
 #include <Loader.h>
 
+#include <Monarc/Core/Log.h>
+
 #include <utility>
 
 namespace Monarc::RHI::Detail {
 
 namespace {
+
+/// The loader's own reporting -- not the validation layer's, which has its own category in
+/// Private/VulkanBackend.cpp.
+///
+/// This is where the detail a failure message no longer carries lives. `Open` returns string
+/// literals, because a factory that hands back no object on failure can only return a message
+/// with static storage; the library name and the code behind it go here instead.
+///
+/// Warning and not Error, deliberately. A missing Vulkan runtime is the expected outcome on a
+/// machine without one -- `FirstLight --adapters` treats it as a finding and prints it, and the
+/// device tests treat it as a skip -- so this file is not the place that decides it is a fault.
+/// The caller does that.
+MONARC_LOG_CATEGORY(VulkanLoader, Info);
 
 /// Casts a library symbol address to a typed function pointer.
 ///
@@ -23,41 +38,46 @@ template <typename Function>
 
 }  // namespace
 
-Status Loader::Open(StringView libraryName) {
-    // Reopening a Loader is not an error, but leaving the previous library's entry points in
-    // the tables while the new library failed to open would be: everything is cleared before
-    // anything is attempted.
-    Close();
-
+Result<Loader> Loader::Open(StringView libraryName) {
     Result<Platform::Library> library = Platform::Library::Open(libraryName);
     if (!library) {
+        MONARC_LOG(VulkanLoader, Warning,
+                   "could not open the Vulkan runtime library \"{}\": {}", libraryName,
+                   ToString(library.error().code));
         // The code from Platform::Library is propagated rather than flattened to NotFound.
         // "the file is not there" and "the file is there and would not load" lead to
         // different advice, and only the first is what a machine without Vulkan looks like.
-        return Fail(library.error().code,
-                    "could not open the Vulkan runtime library \"{}\" ({})", libraryName,
-                    ToString(library.error().code));
+        return Err(library.error().code, "could not open the Vulkan runtime library");
     }
-    m_library = std::move(*library);
 
-    m_getInstanceProcAddr =
-        CastSymbol<PFN_vkGetInstanceProcAddr>(m_library.Symbol("vkGetInstanceProcAddr"));
-    if (m_getInstanceProcAddr == nullptr) {
-        Close();
-        return Fail(ErrorCode::NotFound,
-                    "\"{}\" opened but does not export vkGetInstanceProcAddr, so it is not a "
-                    "Vulkan runtime library",
-                    libraryName);
+    // Built here and returned only once everything below it succeeded. Nothing partially
+    // resolved leaves this function, so there is no half-open Loader for a caller to hold and
+    // no state for a test to have to check for.
+    Loader loader;
+    loader.m_library = std::move(*library);
+
+    loader.m_getInstanceProcAddr = CastSymbol<PFN_vkGetInstanceProcAddr>(
+        loader.m_library.Symbol("vkGetInstanceProcAddr"));
+    if (loader.m_getInstanceProcAddr == nullptr) {
+        MONARC_LOG(VulkanLoader, Warning,
+                   "\"{}\" opened but does not export vkGetInstanceProcAddr, so it is not a "
+                   "Vulkan runtime library",
+                   libraryName);
+        return Err(ErrorCode::NotFound,
+                   "the library opened but does not export vkGetInstanceProcAddr, so it is "
+                   "not a Vulkan runtime library");
     }
 
     // Every global entry point is required, and there is no partial success: a table with a
     // null left in it turns a missing function into a crash at the first call site, which is
     // strictly worse than a Result naming it here.
 #define MONARC_VK_RESOLVE_GLOBAL(name)                                                      \
-    m_global.name = reinterpret_cast<PFN_##name>(                                           \
-        m_getInstanceProcAddr(VK_NULL_HANDLE, #name));                                      \
-    if (m_global.name == nullptr) {                                                         \
-        Close();                                                                            \
+    loader.m_global.name = reinterpret_cast<PFN_##name>(                                    \
+        loader.m_getInstanceProcAddr(VK_NULL_HANDLE, #name));                               \
+    if (loader.m_global.name == nullptr) {                                                   \
+        MONARC_LOG(VulkanLoader, Warning,                                                   \
+                   "\"{}\" opened but vkGetInstanceProcAddr returned null for " #name,      \
+                   libraryName);                                                            \
         return Err(ErrorCode::NotFound,                                                     \
                    "vkGetInstanceProcAddr returned null for " #name                         \
                    ": this Vulkan loader does not provide an entry point Monarc requires");  \
@@ -66,7 +86,7 @@ Status Loader::Open(StringView libraryName) {
     MONARC_VK_GLOBAL_FUNCTIONS(MONARC_VK_RESOLVE_GLOBAL)
 #undef MONARC_VK_RESOLVE_GLOBAL
 
-    return {};
+    return loader;
 }
 
 Status Loader::LoadInstanceFunctions(VkInstance instance, bool debugUtilsEnabled) {
@@ -82,6 +102,9 @@ Status Loader::LoadInstanceFunctions(VkInstance instance, bool debugUtilsEnabled
 #define MONARC_VK_RESOLVE_INSTANCE(name)                                                    \
     m_instance.name = reinterpret_cast<PFN_##name>(m_getInstanceProcAddr(instance, #name)); \
     if (m_instance.name == nullptr) {                                                       \
+        MONARC_LOG(VulkanLoader, Warning,                                                   \
+                   "vkGetInstanceProcAddr returned null for " #name " on a created "        \
+                   "instance");                                                             \
         return Err(ErrorCode::NotFound,                                                     \
                    "vkGetInstanceProcAddr returned null for " #name                         \
                    " on a created instance: this Vulkan implementation does not provide an " \

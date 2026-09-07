@@ -43,7 +43,6 @@
 
 #include <cstdlib>
 #include <cstring>
-#include <format>
 #include <new>
 #include <span>
 #include <string_view>
@@ -257,32 +256,21 @@ struct VulkanBackend::State {
     ApiVersion               instanceApiVersion     = {};
     bool                     validationLayerEnabled = false;
 
-    /// Storage for a failure message that must name something not known at compile time.
-    /// Fixed size and never allocated, exactly as Log.h's kMaxLogMessageLength buffer is; see
-    /// VulkanBackend's class comment for the lifetime this buys and its limit.
-    static constexpr usize kMaxMessageLength = 256;
-
-    char message[kMaxMessageLength] = {};
-
-    template <typename... Args>
-    [[nodiscard]] std::unexpected<Error> Fail(ErrorCode code, std::format_string<Args...> fmt,
-                                              Args&&... args) {
-        const auto  result  = std::format_to_n(message, kMaxMessageLength - 1, fmt,
-                                               std::forward<Args>(args)...);
-        const usize written = static_cast<usize>(result.out - message);
-        message[written]    = '\0';
-        return Err(code, std::string_view(message, written));
-    }
-
     /// A Vulkan call that returned something other than VK_SUCCESS.
     ///
-    /// The result's numeric value goes into the message alongside its spelling, which is what
-    /// keeps an unrecognised result actionable: Detail::ToString covers the results Monarc's
-    /// own calls can return and says plainly when it does not recognise one, and the integer
-    /// is then the only thing left to go on.
+    /// The message is Detail::ToString(result) -- a pointer to a string literal, so it stays
+    /// valid after this State has been destroyed, which is what lets VulkanBackend::Create be
+    /// a factory. The composition -- which call, and the result's numeric value -- goes to
+    /// the log line beside it. Keeping the integer is what keeps an unrecognised result
+    /// actionable: ToString covers the results Monarc's own calls can return and says plainly
+    /// when it does not recognise one, and the integer is then the only thing left to go on.
+    ///
+    /// Not a member of this struct out of necessity any more -- it needs nothing from it --
+    /// but left here so every failure the bring-up produces is spelled in one place.
     [[nodiscard]] std::unexpected<Error> FailVk(const char* operation, VkResult result) {
-        return Fail(ErrorCode::BackendFailure, "{} failed: {} ({})", operation,
-                    Detail::ToString(result), static_cast<i32>(result));
+        MONARC_LOG(Vulkan, Warning, "{} failed: {} ({})", operation, Detail::ToString(result),
+                   static_cast<i32>(result));
+        return Err(ErrorCode::BackendFailure, Detail::ToString(result));
     }
 
     [[nodiscard]] Status BringUp(const Config& config);
@@ -299,12 +287,14 @@ struct VulkanBackend::State {
 Status VulkanBackend::State::BringUp(const Config& config) {
     const char* libraryName =
         config.libraryName != nullptr ? config.libraryName : Detail::VulkanLibraryName();
-    if (Status opened = loader.Open(libraryName); !opened) {
-        // Forwarded unchanged: the loader's message already names the library or the missing
-        // entry point, and it views storage inside this same object, so it outlives the
-        // return.
-        return opened;
+    Result<Detail::Loader> opened = Detail::Loader::Open(libraryName);
+    if (!opened) {
+        // Forwarded unchanged. Every message Loader::Open returns is a string literal, and
+        // Loader.cpp's own log line has already named the library that would not open or the
+        // entry point that was missing.
+        return std::unexpected(opened.error());
     }
+    loader = std::move(*opened);
 
     u32 packedInstanceVersion = 0;
     if (const VkResult result =
@@ -316,11 +306,17 @@ Status VulkanBackend::State::BringUp(const Config& config) {
 
     const ApiVersion required = Detail::ToApiVersion(kRequiredApiVersion);
     if (instanceApiVersion < required) {
-        return Fail(ErrorCode::Unsupported,
-                    "the Vulkan loader reports instance version {}.{}.{}; Monarc requires at "
-                    "least {}.{}.{}",
-                    instanceApiVersion.major, instanceApiVersion.minor, instanceApiVersion.patch,
-                    required.major, required.minor, required.patch);
+        MONARC_LOG(Vulkan, Warning,
+                   "the Vulkan loader reports instance version {}.{}.{}; Monarc requires at "
+                   "least {}.{}.{}",
+                   instanceApiVersion.major, instanceApiVersion.minor, instanceApiVersion.patch,
+                   required.major, required.minor, required.patch);
+        // Both versions are in the log line above and neither is in the message, which names
+        // no number on purpose: kRequiredApiVersion is the single source of truth for the
+        // floor, and a literal spelling "1.3" would go stale the day it moves.
+        return Err(ErrorCode::Unsupported,
+                   "the Vulkan loader reports an instance version below the one Monarc "
+                   "requires");
     }
 
     Array<VkExtensionProperties> availableExtensions(allocator);
@@ -339,10 +335,18 @@ Status VulkanBackend::State::BringUp(const Config& config) {
                                               Detail::PlatformSurfaceExtensionName()};
     for (const char* name : requiredExtensions) {
         if (!ContainsExtension(availableExtensions, name)) {
-            return Fail(ErrorCode::Unsupported,
-                        "this Vulkan implementation does not offer the required instance "
-                        "extension {}",
-                        name);
+            MONARC_LOG(Vulkan, Warning,
+                       "this Vulkan implementation does not offer the required instance "
+                       "extension {}",
+                       name);
+            // The message *is* the extension's name, and it can be, because both entries of
+            // requiredExtensions are string literals with static storage:
+            // VK_KHR_SURFACE_EXTENSION_NAME comes from the Vulkan headers, and
+            // Detail::PlatformSurfaceExtensionName() returns
+            // VK_KHR_WIN32_SURFACE_EXTENSION_NAME. So this view outlives the State it was
+            // produced in, and the sentence around it -- which adds nothing a caller holding
+            // ErrorCode::Unsupported does not already know -- stays in the log.
+            return Err(ErrorCode::Unsupported, name);
         }
         enabledExtensions[enabledExtensionCount++] = name;
     }
@@ -471,8 +475,6 @@ void VulkanBackend::State::Shutdown() {
     }
     loader.Close();
 
-    // Not `message`: a Status returned from a failed Initialize views it, and Initialize calls
-    // this on the way out of the failure it is about to report.
     instanceApiVersion     = ApiVersion{};
     validationLayerEnabled = false;
 }
@@ -720,16 +722,35 @@ Status VulkanBackend::State::DescribeAdapter(VkPhysicalDevice device, AdapterInf
     return {};
 }
 
-VulkanBackend::VulkanBackend(IAllocator& allocator) {
+Result<VulkanBackend> VulkanBackend::Create(IAllocator& allocator, const Config& config) {
+    // The allocation happens here, before anything is constructed, so a backend with no state
+    // is never handed to a caller. Not fatal, unlike Array<T>'s allocation failure: this is a
+    // fallible entry point already, so reporting costs nothing over aborting.
     void* storage = allocator.Allocate(sizeof(State), alignof(State));
     if (storage == nullptr) {
-        // Not fatal, unlike Array<T>'s allocation failure. There is a fallible entry point
-        // right there -- Initialize -- so reporting is strictly better than aborting, and it
-        // costs one null check.
-        return;
+        MONARC_LOG(Vulkan, Warning,
+                   "the allocator returned nothing for {} bytes of Vulkan backend state",
+                   sizeof(State));
+        return Err(ErrorCode::OutOfMemory,
+                   "the allocator returned nothing for the Vulkan backend's state");
     }
-    m_state = ::new (storage) State(allocator);
+    State* state = ::new (storage) State(allocator);
+
+    if (Status brought = state->BringUp(config); !brought) {
+        // Nothing half-built survives a failed Create. Copying the Error out before the State
+        // is destroyed is the reason every message BringUp returns is a string literal: the
+        // view has to still point at something once this storage is gone.
+        const Error error = brought.error();
+        state->Shutdown();
+        state->~State();
+        allocator.Deallocate(storage, sizeof(State), alignof(State));
+        return std::unexpected(error);
+    }
+
+    return VulkanBackend(state);
 }
+
+VulkanBackend::VulkanBackend(State* state) noexcept : m_state(state) {}
 
 VulkanBackend::~VulkanBackend() { Release(); }
 
@@ -755,23 +776,6 @@ void VulkanBackend::Release() {
     m_state->~State();
     allocator.Deallocate(m_state, sizeof(State), alignof(State));
     m_state = nullptr;
-}
-
-Status VulkanBackend::Initialize(const Config& config) {
-    if (m_state == nullptr) {
-        return Err(ErrorCode::OutOfMemory,
-                   "VulkanBackend has no state: the allocator handed back nothing when the "
-                   "backend was constructed");
-    }
-
-    m_state->Shutdown();
-    Status result = m_state->BringUp(config);
-    if (!result) {
-        // Nothing half-built survives a failed Initialize. Shutdown does not touch the message
-        // buffer, so the failure being returned still names what went wrong.
-        m_state->Shutdown();
-    }
-    return result;
 }
 
 void VulkanBackend::Shutdown() {
@@ -800,7 +804,8 @@ Status VulkanBackend::EnumerateAdaptersRaw(Array<AdapterInfo>& out) {
     out.Clear();
     if (!IsInitialized()) {
         return Err(ErrorCode::InvalidArgument,
-                   "VulkanBackend::EnumerateAdaptersRaw called before a successful Initialize");
+                   "VulkanBackend::EnumerateAdaptersRaw called on a backend that has been "
+                   "shut down or moved from");
     }
     Status enumerated = m_state->EnumerateRaw(out);
     if (!enumerated) {

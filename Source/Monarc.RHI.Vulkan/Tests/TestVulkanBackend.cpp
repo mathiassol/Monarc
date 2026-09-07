@@ -7,8 +7,17 @@
 // TestsDevice/, which is a separate binary registered with SKIP_RETURN_CODE 77.
 //
 // The one thing that makes this possible for the backend itself is Config::libraryName: a name
-// that cannot exist drives the whole failure path -- Platform::Library, the loader, Initialize,
-// and the state a failed Initialize leaves behind -- without any Vulkan runtime being involved.
+// that cannot exist drives the whole failure path -- Platform::Library, the loader and
+// VulkanBackend::Create -- without any Vulkan runtime being involved.
+//
+// **What that leaves out, since VulkanBackend became a factory.** A backend now exists only if
+// it came up, so there is no way to hold one on a machine with no Vulkan. The move
+// constructor, move assignment, Shutdown and the accessors' behaviour on a moved-from backend
+// therefore cannot be reached from here at all, and they moved to TestsDevice/ rather than
+// being rewritten into cases that would pass by never running. What replaces them here is
+// stronger about the path this suite *can* reach: a failed Create must leave the allocator
+// exactly as it found it, which is the one thing the old two-phase constructor could not be
+// asked, because it allocated whether or not the bring-up would work.
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -20,11 +29,8 @@
 #include <Monarc/RHI/Vulkan/VulkanBackend.h>
 
 #include <string_view>
-#include <utility>
 
 using Monarc::SystemAllocator;
-using Monarc::RHI::AdapterInfo;
-using Monarc::RHI::ApiVersion;
 using Monarc::RHI::VulkanBackend;
 
 namespace {
@@ -78,114 +84,44 @@ TEST_CASE("validation is on by default in Debug and off otherwise") {
 #endif
 }
 
-TEST_CASE("a backend that has not been initialised reports nothing and enumerates nothing") {
+TEST_CASE("creating against a library that cannot exist reports NotFound, and the message "
+          "outlives the call") {
     SystemAllocator allocator;
-    VulkanBackend   backend(allocator);
 
-    CHECK_FALSE(backend.IsInitialized());
-    CHECK(backend.InstanceApiVersion() == ApiVersion{0, 0, 0});
-    CHECK_FALSE(backend.ValidationLayerEnabled());
-    CHECK_FALSE(backend.DebugMessengerInstalled());
+    Monarc::Error error{};
+    {
+        const Monarc::Result<VulkanBackend> created =
+            VulkanBackend::Create(allocator, ConfigFor(kNoSuchLibrary));
+        REQUIRE_FALSE(created.has_value());
+        error = created.error();
+    }
 
-    // InvalidArgument rather than an empty list: "there are no adapters" and "you have not
-    // brought the backend up" are different answers, and a caller told the first would go
-    // looking for a driver problem.
-    Monarc::Array<AdapterInfo> adapters(allocator);
-    const Monarc::Status       raw = backend.EnumerateAdaptersRaw(adapters);
-    REQUIRE_FALSE(raw.has_value());
-    CHECK(raw.error().code == Monarc::ErrorCode::InvalidArgument);
-    CHECK(adapters.IsEmpty());
+    // Read after the Result is gone, and after the State the failure was produced in has been
+    // destroyed and deallocated inside Create. Error::message is a non-owning view, so this
+    // only works because the message is a string literal -- the property the whole factory
+    // shape rests on. The library name is deliberately not in it; Loader.cpp's log line has
+    // it.
+    //
+    // **The exact text is the assertion, and it has to be.** Re-pointing this message at a
+    // buffer inside the State -- what the two-phase shape did -- and rebuilding under
+    // clang-asan produced *no* sanitizer report: the freed storage still held its bytes and
+    // the read went unnoticed. What failed was this comparison. So a `find()` for a substring,
+    // or a check that the message is merely non-empty, would let the dangling case through on
+    // every one of the six presets.
+    CHECK(error.code == Monarc::ErrorCode::NotFound);
+    CHECK(error.message == "could not open the Vulkan runtime library");
 }
 
-TEST_CASE("initialising against a library that cannot exist reports NotFound and names it") {
-    SystemAllocator allocator;
-    VulkanBackend   backend(allocator);
-
-    const Monarc::Status initialized = backend.Initialize(ConfigFor(kNoSuchLibrary));
-
-    REQUIRE_FALSE(initialized.has_value());
-    CHECK(initialized.error().code == Monarc::ErrorCode::NotFound);
-
-    // The message has to name the library, or a player's report of it says only that
-    // something was not found. This is the same shape as Platform::Library's own tests, one
-    // rung up: Library reports the code, and the loader is what turns it into a sentence.
-    CHECK(initialized.error().message.find(kNoSuchLibrary) != std::string_view::npos);
-}
-
-TEST_CASE("a failed initialise leaves nothing half-built") {
-    SystemAllocator allocator;
-    VulkanBackend   backend(allocator);
-
-    REQUIRE_FALSE(backend.Initialize(ConfigFor(kNoSuchLibrary)).has_value());
-
-    CHECK_FALSE(backend.IsInitialized());
-    CHECK(backend.InstanceApiVersion() == ApiVersion{0, 0, 0});
-    CHECK_FALSE(backend.DebugMessengerInstalled());
-
-    // Retrying is safe, and fails the same way: a backend that had kept a half-open loader
-    // from the first attempt would report something different the second time.
-    const Monarc::Status second = backend.Initialize(ConfigFor(kNoSuchLibrary));
-    REQUIRE_FALSE(second.has_value());
-    CHECK(second.error().code == Monarc::ErrorCode::NotFound);
-}
-
-TEST_CASE("shutting down a backend that was never up is safe, and repeatable") {
-    SystemAllocator allocator;
-    VulkanBackend   backend(allocator);
-    backend.Shutdown();
-    backend.Shutdown();
-    CHECK_FALSE(backend.IsInitialized());
-}
-
-TEST_CASE("a moved-from backend is unusable and says so rather than crashing") {
-    SystemAllocator allocator;
-    VulkanBackend   source(allocator);
-    VulkanBackend   destination(std::move(source));
-
-    CHECK_FALSE(destination.IsInitialized());
-
-    // The moved-from object has no state at all, so every query has to answer without
-    // dereferencing it. This is the case that would be a null dereference if any accessor
-    // forgot its null check -- and it is reachable in ordinary code, because a backend handed
-    // to something else by value leaves one of these behind.
-    CHECK_FALSE(source.IsInitialized());
-    CHECK(source.InstanceApiVersion() == ApiVersion{0, 0, 0});
-    CHECK_FALSE(source.ValidationLayerEnabled());
-    CHECK_FALSE(source.DebugMessengerInstalled());
-    source.Shutdown();
-
-    const Monarc::Status initialized = source.Initialize(ConfigFor(kNoSuchLibrary));
-    REQUIRE_FALSE(initialized.has_value());
-    CHECK(initialized.error().code == Monarc::ErrorCode::OutOfMemory);
-    CHECK_FALSE(initialized.error().message.empty());
-}
-
-TEST_CASE("move assignment releases what the destination held") {
-    SystemAllocator allocator;
-    VulkanBackend   first(allocator);
-    VulkanBackend   second(allocator);
-
-    const Monarc::usize beforeMove = allocator.BytesAllocated();
-    REQUIRE(beforeMove > 0);
-
-    first = std::move(second);
-
-    // One state's worth of memory has gone: the destination's own, released before it adopted
-    // the source's. A defaulted move-assignment would have leaked it, and nothing about the
-    // object's observable behaviour would have changed -- which is why this measures the
-    // allocator rather than asking the backend a question.
-    CHECK(allocator.BytesAllocated() < beforeMove);
-    CHECK_FALSE(first.IsInitialized());
-    CHECK_FALSE(second.IsInitialized());
-}
-
-TEST_CASE("a backend releases everything it allocated") {
+TEST_CASE("a failed create leaves the allocator exactly as it found it") {
     SystemAllocator allocator;
     REQUIRE(allocator.BytesAllocated() == 0);
-    {
-        VulkanBackend backend(allocator);
-        CHECK(allocator.BytesAllocated() > 0);
-        REQUIRE_FALSE(backend.Initialize(ConfigFor(kNoSuchLibrary)).has_value());
-    }
+
+    REQUIRE_FALSE(
+        VulkanBackend::Create(allocator, ConfigFor(kNoSuchLibrary)).has_value());
+
+    // Create allocates the state before it tries anything, so this is a real question and not
+    // a tautology: the failure path has to destroy and deallocate it before returning, and a
+    // Create that simply returned the error would leak one State per attempt with nothing to
+    // free it -- there is no object left holding the pointer.
     CHECK(allocator.BytesAllocated() == 0);
 }
