@@ -220,6 +220,31 @@ public:
     /// `TextureBarrier` with equal layouts are values a caller can mean -- see Barrier.h --
     /// and a command list that quietly skipped them would be deciding on the caller's behalf
     /// with less information than the caller had.
+    ///
+    /// **A stale or unknown handle here is reported through the assertion handler and the
+    /// barrier is not recorded, where `BeginRendering` and `CopyTextureToBuffer` return
+    /// `ErrorCode::InvalidArgument` for the same condition. That asymmetry follows from the
+    /// void return and from nothing else** -- not from a judgement that a bad handle matters
+    /// more in a barrier than in a copy. These three return void because Vulkan's and D3D12's
+    /// barrier commands do, which is the shape a render graph batching hundreds of them per
+    /// frame needs; a `Status` nobody could act on per barrier would be checked once and then
+    /// ignored. With no return value to carry a report, the remaining options are to record a
+    /// barrier naming a resource that does not exist -- undefined behaviour, and a validation
+    /// error on the backend that has one -- or to refuse and say so out of band. It refuses.
+    ///
+    /// Under the default assertion handler that ends the process, and it was measured rather
+    /// than assumed: a stale `TextureBarrier` prints `[assert] ... names a texture this device
+    /// does not have, or one whose handle is stale` and never returns to the caller, because
+    /// the handler asks for a debug break and an unhandled break is fatal. It is the *handler*
+    /// that decides, though, not this interface -- `MONARC_CHECK` alters no control flow of
+    /// its own, so a process that installed a handler returning false gets the report and a
+    /// barrier that was skipped. Assert.h makes the handler replaceable on purpose; what this
+    /// interface promises is the refusal, not the death.
+    ///
+    /// What is *not* asymmetric is the part ADR-0002 requires: all three paths **detect** the
+    /// stale handle rather than dereferencing it. The difference is only in what they can say
+    /// afterwards. If a batching overload arrives with a `Status`, it reports like the other
+    /// two and this note goes with it.
     virtual void Barrier(const GlobalBarrier& barrier) = 0;
     virtual void Barrier(const BufferBarrier& barrier) = 0;
     virtual void Barrier(const TextureBarrier& barrier) = 0;
@@ -242,7 +267,9 @@ public:
     /// begun inside another, for more than `kMaxColorAttachments` attachments, for an empty
     /// extent, for an attachment without `TextureUsage::ColorAttachment`, or for an attachment
     /// naming a texture this device does not have -- including a handle whose generation is
-    /// stale, which is the whole point of ADR-0002's generation counter.
+    /// stale, which is the whole point of ADR-0002's generation counter. That last one is
+    /// *reported* here and asserted in `Barrier`; see `Barrier` for why the return type and
+    /// not the severity is what decides which.
     [[nodiscard]] virtual Status BeginRendering(const RenderingDescription& description) = 0;
 
     /// Ends the rendering pass `BeginRendering` began.
@@ -261,7 +288,8 @@ public:
     ///
     /// Fails with `ErrorCode::InvalidArgument` for a list that is not recording, inside a
     /// rendering pass, for either handle being unknown or stale, or for a destination too
-    /// small to hold the texture.
+    /// small to hold the texture. `BeginRendering`'s note on the stale-handle case applies
+    /// here unchanged.
     [[nodiscard]] virtual Status CopyTextureToBuffer(TextureHandle source,
                                                      BufferHandle  destination) = 0;
 
@@ -315,13 +343,27 @@ public:
     /// The timeline starts at zero and no submission signals it, so zero unambiguously means
     /// "nothing submitted".
     ///
-    /// **These two have no caller in shipped code yet, and the exception is stated rather than
-    /// left.** Their caller today is the device test, and that is what they buy: `Wait` alone
-    /// cannot tell "the GPU reached this value" from "the wait returned early", and nothing
-    /// else can assert that a fresh device's timeline is at zero or that a submission's value
-    /// is one greater than the last. A frame loop that wants to know whether frame N-2 has
-    /// finished *without* blocking -- which is what frame pacing needs, and
-    /// Docs/Rendering/RHI.md defers -- asks `CompletedValue`.
+    /// **These two have no caller in shipped code yet.** Their only caller today is the device
+    /// test, which is an exception to "a member arrives with its first user" and is stated
+    /// rather than left to be noticed. What they buy is two questions nothing else here can
+    /// ask:
+    ///
+    /// - **What value has the timeline actually reached, without blocking to find out.**
+    ///   `Wait` answers "did it reach *this* value", and answers it definitively -- a timeout
+    ///   is `ErrorCode::BackendFailure` and never success -- but it answers by blocking and it
+    ///   never reports the current value. So `Wait` cannot say that a fresh device's timeline
+    ///   is at zero: waiting for zero succeeds at once whatever the timeline holds. Only
+    ///   `CompletedValue` can. A frame loop asking whether frame N-2 has finished without
+    ///   stalling -- frame pacing, which Docs/Rendering/RHI.md defers -- asks the same
+    ///   question.
+    /// - **Whether the queue itself remembers what it handed out.** `Submit` returns the value,
+    ///   so monotonicity across submissions is assertable without either of these; what is not
+    ///   is that the queue's own record agrees with the value it returned, or that it reads
+    ///   zero before anything is submitted -- which is the fact `BeginFrame`'s "zero means
+    ///   never submitted" wait depends on.
+    ///
+    /// Both also answer on a shut-down or moved-from device rather than dereferencing:
+    /// `LastSubmittedValue` reads zero, `CompletedValue` reports `ErrorCode::InvalidArgument`.
     [[nodiscard]] virtual u64 LastSubmittedValue() const = 0;
 
 protected:

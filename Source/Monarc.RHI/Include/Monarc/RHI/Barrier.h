@@ -136,19 +136,32 @@ enum class TextureLayout : u32 {
 
 /// The enumerator's own spelling, for logs and test failures. Never nullptr.
 ///
+/// **The shipped caller of all three is a backend's barrier refusal.** When
+/// `ICommandList::Barrier` is handed a resource handle it cannot resolve it has no return
+/// value to report through, so the `MONARC_LOG` beside its `MONARC_CHECK` is where the
+/// barrier gets identified -- and identifying a barrier means naming its layout pair and its
+/// two synchronisation scopes. Monarc.RHI.Vulkan/Private/VulkanDevice.cpp's two
+/// handle-resolving `Barrier` overloads are that caller; a `MONARC_CHECK` message is a string
+/// literal by house rule, so the composed half has to live in a log line, and this is what
+/// composes it.
+///
 /// **A mask of several stages is not an enumerator and does not have a spelling here.**
 /// `ToString(Copy | Blit)` reports the not-a-stage name, exactly as a value no enumerator
-/// names does, because that is what it is. Nothing formats a whole mask today; the caller
-/// that needs one can walk the bits.
+/// names does, because that is what it is. That is why the log lines print each mask's hex
+/// beside its name: the fallback name is honest but not decodable on its own. A mask-walking
+/// formatter is what would replace them, and it arrives with a caller that needs one.
 [[nodiscard]] const char* ToString(PipelineStage stage);
 
-/// The enumerator's own spelling. `ToString(PipelineStage)`'s rule about masks applies here
-/// too.
+/// The enumerator's own spelling. `ToString(PipelineStage)`'s rule about masks, and its note
+/// on the shipped caller, apply here too.
 [[nodiscard]] const char* ToString(Access access);
 
 /// The enumerator's own spelling. Never nullptr; a value outside the enumerator set gets a
 /// name of its own rather than "Undefined" -- see `ToString(Format)` in Types.h for why
 /// conflating a named state with an invalid one misdirects whoever reads the log.
+///
+/// This one is never a mask -- a texture is in exactly one layout -- so in the barrier log
+/// line above it is the pair that always reads as two real spellings.
 [[nodiscard]] const char* ToString(TextureLayout layout);
 
 namespace Detail {

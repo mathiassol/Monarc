@@ -600,6 +600,25 @@ void VulkanCommandList::Barrier(const BufferBarrier& barrier) {
     }
     const BufferSlot* slot = m_state->Resolve(barrier.buffer);
     if (slot == nullptr) {
+        // **The composed detail beside the literal message, and this is the call in the module
+        // that needs it most.** `Barrier` returns void -- see `ICommandList::Barrier` for why
+        // -- so a `MONARC_CHECK` message is the only channel this refusal has, and the house
+        // rule keeps that message a literal. Which barrier the caller got wrong therefore has
+        // to come from here. The scopes are what identify it: a frame records several buffer
+        // barriers and "a buffer handle was stale" does not say which.
+        //
+        // A `syncBefore` of several stages is a mask and not an enumerator, so `ToString`
+        // reports its not-a-single-value name for one -- Barrier.h says why. The hex beside
+        // each name is what keeps the line decodable when that happens.
+        MONARC_LOG(LogCategories::VulkanDevice, Error,
+                   "the buffer in this barrier is not one this device has, or its handle is "
+                   "stale (slot {}, generation {}): sync {} (0x{:x}) -> {} (0x{:x}), access {} "
+                   "(0x{:x}) -> {} (0x{:x})",
+                   barrier.buffer.index, barrier.buffer.generation,
+                   ToString(barrier.syncBefore), static_cast<u32>(barrier.syncBefore),
+                   ToString(barrier.syncAfter), static_cast<u32>(barrier.syncAfter),
+                   ToString(barrier.accessBefore), static_cast<u32>(barrier.accessBefore),
+                   ToString(barrier.accessAfter), static_cast<u32>(barrier.accessAfter));
         MONARC_CHECK(false,
                      "ICommandList::Barrier(BufferBarrier) names a buffer this device does "
                      "not have, or one whose handle is stale");
@@ -621,6 +640,20 @@ void VulkanCommandList::Barrier(const TextureBarrier& barrier) {
     }
     const TextureSlot* slot = m_state->Resolve(barrier.Texture());
     if (slot == nullptr) {
+        // `Barrier(BufferBarrier)`'s reasoning, with the layout pair in front. That pair is
+        // the half that identifies the barrier exactly: a layout is one value and never a
+        // mask, so these two names are always real spellings, and "Undefined -> ColorAttachment
+        // on a stale texture" names the transition the caller meant unambiguously.
+        MONARC_LOG(LogCategories::VulkanDevice, Error,
+                   "the texture in this barrier is not one this device has, or its handle is "
+                   "stale (slot {}, generation {}): layout {} -> {}, sync {} (0x{:x}) -> {} "
+                   "(0x{:x}), access {} (0x{:x}) -> {} (0x{:x})",
+                   barrier.Texture().index, barrier.Texture().generation,
+                   ToString(barrier.LayoutBefore()), ToString(barrier.LayoutAfter()),
+                   ToString(barrier.SyncBefore()), static_cast<u32>(barrier.SyncBefore()),
+                   ToString(barrier.SyncAfter()), static_cast<u32>(barrier.SyncAfter()),
+                   ToString(barrier.AccessBefore()), static_cast<u32>(barrier.AccessBefore()),
+                   ToString(barrier.AccessAfter()), static_cast<u32>(barrier.AccessAfter()));
         MONARC_CHECK(false,
                      "ICommandList::Barrier(TextureBarrier) names a texture this device does "
                      "not have, or one whose handle is stale");
