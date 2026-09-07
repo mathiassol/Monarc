@@ -13,14 +13,18 @@ diagnostics, container, math and platform foundations under test on two compiler
 sanitizers, and `Monarc.Jobs` — the first module beyond `Monarc.Core` — adds a thread
 pool, dependency graph, priorities and instrumentation on top of it.
 
-**A3 is under way: Tasks 1 and 2 are complete.** The module graph has six modules,
+**A3 is under way: Tasks 1, 2 and 3 are complete.** The module graph has six modules,
 `Monarc.RHI.Vulkan` opens `vulkan-1.dll` itself and brings up a real Vulkan 1.3 instance with a
-fatal validation messenger, and adapter enumeration reports the two GPUs on this machine where
-raw enumeration reports five. Tasks 3 (device, command lists, colour readback) and 4 (window,
-surface, swapchain) are next. See [M0 — First Light](Milestones/M0-First-Light.md) for how the
-phases fit together.
+fatal validation messenger, adapter enumeration reports the two GPUs on this machine where raw
+enumeration reports five, and **there is now a logical device on each of them that clears a
+texture and reads the pixels back as exactly the bytes asked for**. Task 4 (window, surface,
+swapchain) is next. See [M0 — First Light](Milestones/M0-First-Light.md) for how the phases fit
+together.
 
-Nothing renders yet — there is no device and no window. That is Tasks 3 and 4.
+**Something renders, and it is proved rather than looked at.** There is no window yet — that is
+Task 4 — but a `R8G8B8A8_UNORM` texture cleared through dynamic rendering reads back as
+`(64, 128, 192, 255)` on both the RTX 3070 Ti and the Intel UHD 730, with no tolerance
+anywhere. See [A3 Task 3 delivered](#a3-task-3-delivered).
 
 ## Verified environment
 
@@ -652,6 +656,240 @@ assertion of the `>=`-not-`>` fact from the monotonicity case; measuring the `>`
 it already turns three assertions red in other cases, so a fourth copy was the redundancy the
 rest of the pass was removing. The case that carries it now says so, to keep it from reading
 like a restatement of the line above it.
+
+### A3 Task 3 delivered
+
+The logical device, its queue and timeline, its resource pools, command recording, the barrier
+model, and a colour that is proved rather than looked at. No window, no surface, no swapchain,
+no present, no binary semaphores: those are Task 4's.
+
+- **`IDevice`, `IQueue` and `ICommandList`** in `Monarc.RHI/Include/Monarc/RHI/Device.h` —
+  abstract interfaces, and the ones `Monarc.Render` consumes in Phase B rather than a step
+  towards them. `VulkanDevice` implements all three (the queue and the command lists are
+  device-owned objects behind `IQueue&` and `ICommandList*`)
+- **No `IBackend`, deliberately, and Task 2's own comment predicting one was wrong.**
+  `VulkanBackend::CreateDevice` returns a concrete `Result<VulkanDevice>`: polymorphic *use*
+  without polymorphic *ownership*. An `IBackend`'s only reason to be virtual is runtime backend
+  selection and there is one backend; and `Monarc.Core` still has no owning-pointer type, which
+  is its own design — `IAllocator::Deallocate` needs the size and alignment of what it frees,
+  and for a polymorphic type those are the derived class's, so the deleter has to carry values
+  captured where the object was made. Both arrive with the second backend
+  ([ADR-0012](Architecture/Decisions/ADR-0012-backend-rollout.md) schedules D3D12 immediately
+  after M0), and the three interfaces do not change when they do
+- **`Barrier.h`: the whole of [ADR-0005](Architecture/Decisions/ADR-0005-rhi-sync-model.md)'s
+  model** — `syncBefore`/`syncAfter`, `accessBefore`/`accessAfter`, `layoutBefore`/`layoutAfter`,
+  with global, buffer and texture variants as three distinct types. Fifteen pipeline stages,
+  eighteen accesses and eight layouts, every one of them translated and tested, though A3
+  records three barriers. The membership rule is stated in the header and is not "what A3 uses":
+  Vulkan 1.3 *core* only, and only stages Monarc has a plan for — which is why
+  `VK_IMAGE_LAYOUT_PRESENT_SRC_KHR` arrives with the swapchain in Task 4 and the ray-tracing
+  and mesh-shading stages arrive with a phase that schedules them
+- **A texture barrier without its layout pair is a compile error**, which the plan asked for at
+  the type level. It has to be: `TextureLayout::Undefined` is a legitimate before-layout, so a
+  defaulted pair is byte-for-byte identical to one someone meant. All four ways of omitting it
+  were tried on both compilers — see below
+- **Vulkan 1.3 dynamic rendering, and `grep -rni "renderpass\|framebuffer\|render pass"
+  Source/` matches four lines, all of them comments and none of them code.** `BeginRendering`
+  names image views at record time; nothing is created ahead of a frame and there is nothing to
+  invalidate when a texture is recreated. `VK_NO_PROTOTYPES` is the other half: a call could
+  only reach `vkCreateRenderPass` through `Private/Loader.h`'s tables, which name it nowhere
+- **Resources are handles from device-owned, generation-checked, fixed-capacity pools** —
+  `JobSystem`'s discipline, sized from a `DeviceConfig` at device creation and never grown, so
+  no creation call can reallocate a pool and move a slot. A full pool reports
+  `ErrorCode::OutOfMemory`. A stale handle resolves to a failure and not to the slot's new
+  occupant ([ADR-0002](Architecture/Decisions/ADR-0002-handles-not-pointers.md))
+- **One `VkDeviceMemory` per resource, and it is a stated placeholder.** Honest for a task that
+  creates one texture and one buffer, and it will not survive the first scene with real assets:
+  drivers cap `maxMemoryAllocationCount` (4096 on much hardware), each allocation has real cost,
+  and nothing sub-allocates or pools. What makes it safe to ship is the *interface* rather than
+  the strategy — `CreateTexture` takes a `TextureDescription` and returns a handle, so a
+  sub-allocating allocator replaces one function body without touching a call site.
+  [ADR-0014](Architecture/Decisions/ADR-0014-dependency-policy.md)'s table has no VMA row and
+  adding one was not this task's call
+- **A timeline semaphore and no binary semaphores.** `IQueue::Submit` returns the value the
+  submission will signal; `IDevice::BeginFrame` waits on the value its frame slot's previous
+  submission signalled before resetting that slot's command pool, which is what makes the reset
+  legal. Two frames in flight, two command pools. Binary semaphores arrive in Task 4, because
+  `vkQueuePresentKHR` accepts only those
+- **The device entry-point table is the loader's fourth, and it is not a member of `Loader`.**
+  Task 2's comment anticipated one that was, and that part of it was wrong: a device-dispatched
+  function pointer is valid only for the device it was resolved against, and this machine has
+  two devices at once. So each `VulkanDevice` owns its own `DeviceFunctions` and
+  `Loader::LoadDeviceFunctions` fills one the caller supplies. Thirty-two entries, every one of
+  them Vulkan 1.3 core, so **Monarc enables no device extension at all**
+
+**The headline measurement, verbatim, on both adapters.** `Monarc.RHI.Vulkan.DeviceTests`,
+`msvc-debug`, as the program printed it:
+
+```
+[Info   ] VulkanDeviceTest: readback on "NVIDIA GeForce RTX 3070 Ti": first pixel = (64, 128, 192, 255), expected (64, 128, 192, 255)
+[Info   ] VulkanDeviceTest: readback on "NVIDIA GeForce RTX 3070 Ti": 16 of 16 pixel(s) exact
+[Info   ] VulkanDeviceTest: readback on "Intel(R) UHD Graphics 730": first pixel = (64, 128, 192, 255), expected (64, 128, 192, 255)
+[Info   ] VulkanDeviceTest: readback on "Intel(R) UHD Graphics 730": 16 of 16 pixel(s) exact
+```
+
+**The two vendors agree exactly, which was the finding this test was written to be able to
+contradict.** Sixteen pixels of a 4×4 texture, each asserted individually — one pixel would
+pass with a wrong row pitch — and no tolerance anywhere, because a tolerance is precisely what
+would hide the two bugs the test exists to catch: 64 and 192 are far apart, so a red/blue swap
+is visible, and an sRGB encode of 0.251 lands near 137 rather than 64. The values are
+representable without rounding in both directions, which is why exactness is available at all.
+The same four bytes come back on `clang-release` (no validation layer, no messenger) and under
+`clang-asan`.
+
+**The clear goes through `BeginRendering` with a `LoadOp::Clear` and not through
+`vkCmdClearColorImage`,** and that is the point of the case rather than a detail of it. Task 4's
+swapchain clear and A4's render graph both clear through a dynamic-rendering load-op, so a
+readback that proved a clear-image path would be coverage for a code path nothing in the engine
+uses — which reads as coverage while the shipped path stays unexercised.
+
+**Three barriers, not the two the plan listed, and the third is a correctness fix rather than a
+flourish.** The plan's flow is: barrier undefined → colour attachment, begin rendering with a
+clear, end, barrier colour attachment → transfer source, copy. Waiting on the timeline after
+that makes the copy's writes *available*; it does not make them visible to the host. So there is
+a third barrier, a `BufferBarrier` from `Copy`/`TransferWrite` to `Host`/`HostRead`, before the
+buffer is mapped. Without it a mapped read is reading memory whose visibility nothing
+established — a bug that surfaces as intermittently stale bytes on some driver rather than as a
+failure here. It also gives `BufferBarrier` a caller in shipped code instead of only in a
+pure-function test.
+
+**Two real defects, both found by the fatal validation messenger during this task.**
+
+- **A texture created without `TextureUsage::ColorAttachment` cannot have an image view, and
+  `CreateTexture` was making one unconditionally.** Dynamic rendering names a view rather than
+  an image, so an attachment needs one — but `vkCreateImageView` requires the image to carry at
+  least one view-compatible usage bit, and a transfer-only texture carries none. The first test
+  to create a `TransferSource`-only texture stopped the process at
+  `VUID-VkImageViewCreateInfo-image-04441`: "was created with
+  `VK_IMAGE_USAGE_2_TRANSFER_SRC_BIT_KHR` but requires … `COLOR_ATTACHMENT` …". A texture with
+  no view is now a legitimate texture, and `BeginRendering` refuses an attachment without one
+  by name. This is a fair test of the messenger's premise: the mistake was mine, it was in a
+  path the readback itself never took, and it was caught the first time anything walked it.
+- **A destroyed-but-not-yet-reclaimed handle was caught only by accident.** `Resolve` checks
+  both the slot's `live` flag and its generation, and the generation is bumped on *claim* — so
+  immediately after a destroy the old handle's generation still matches and only the `live`
+  flag refuses it. Every stale-handle assertion in the suite happened to create a replacement
+  first, which bumps the generation; dropping the `live` check therefore passed all of them.
+  Found by mutation, and the suite now destroys a texture and a buffer and uses both handles
+  with no intervening creation.
+
+**The compile error for a missing layout pair, on both compilers.** Four ways to omit it, all
+tried:
+
+| Attempt | MSVC 19.51 | clang-cl 22.1.8 |
+|---|---|---|
+| Five parenthesised arguments | `error C2440: '<function-style-cast>': cannot convert from 'initializer list' to 'Monarc::RHI::TextureBarrier'` + `note: … function does not take 5 arguments` | `error: no matching constructor for initialization of 'TextureBarrier'` + `note: candidate constructor not viable: requires 7 arguments, but 5 were provided` |
+| Five *braced* arguments | the same pair | the same pair |
+| `TextureBarrier barrier;` | `error C2512: 'Monarc::RHI::TextureBarrier': no appropriate default constructor available` | `error: no matching constructor …` + `requires 7 arguments, but 0 were provided` |
+| Seven arguments, stages shifted into the layouts' places | `note: … cannot convert argument 2 from 'Monarc::RHI::PipelineStage' to 'Monarc::RHI::TextureLayout'` | `note: … no known conversion from 'Monarc::RHI::PipelineStage' to 'TextureLayout' for 2nd argument` |
+
+The fourth is the one a count-based check would miss, and distinct `enum class` types with no
+implicit conversion between them are what buys it. `Tests/TestBarrier.cpp` pins all four as
+`static_assert`s over `std::is_default_constructible_v`, `std::is_aggregate_v` and
+`std::is_constructible_v`, plus the positive form so the negatives cannot be satisfied by a
+type nobody can build.
+
+**Thirty-two behavioural mutations, thirty-one caught and one that would not compile. No
+survivors.** Twenty-three were caught as red assertions and eight by the fatal messenger
+stopping the process at a named VUID, which is a different and stronger signal — the code was
+wrong in a way Vulkan itself objects to:
+
+| Mutation | How it was caught |
+|---|---|
+| `PipelineStage::Copy` given `VK_PIPELINE_STAGE_2_BLIT_BIT` | 12 assertions red |
+| A row dropped from `FromVulkanStages` / `FromVulkanAccess` | 4 red each |
+| `operator|=` replaces instead of accumulating | 2 red |
+| An unnamed stage bit translating to `NONE` rather than `ALL_COMMANDS` | 2 red |
+| An unnamed layout translating to `UNDEFINED` rather than `MAX_ENUM` | 1 red |
+| `VkMemoryBarrier2::sType` never set | 2 red |
+| `VkImageMemoryBarrier2::image` never assigned | 1 red |
+| A barrier's `src`/`dst` stage masks swapped | 3 red |
+| `TextureBarrier` storing `layoutBefore` into both layouts | 1 red |
+| `FindMemoryType` ignoring `memoryTypeBits`, or requiring exact property equality | 3 red / 1 red |
+| `ResizeTo` appending; `ShrinkTo` popping once | 3 red / 1 red |
+| `LoadOp::Clear` translating to `LOAD` | 1 red |
+| Host-visible memory no longer asking for `HOST_COHERENT` | 1 red |
+| **The clear's red and blue channels swapped** | 6 red |
+| A pool slot's generation never bumped | 3 red |
+| `Resolve` ignoring the generation | 1 red |
+| `Resolve` ignoring the `live` flag | `vkCmdCopyImageToBuffer2` VUID → process stopped |
+| The queue reusing its last timeline value | `vkQueueSubmit2(): pSubmits[0].pSignalSemaphoreInfos` VUID → stopped |
+| Any command list treated as this device's own | `vkQueueSubmit2(): pSubmits[0].pCommandBufferInfos` VUID → stopped |
+| `BeginFrame` never waiting; `Submit` never stamping the frame slot | `vkResetCommandPool(): (VkCommandBuffer …)` VUID → stopped |
+| A full pool wrapping to slot 0 | 1 red |
+| The copy's destination-size check removed | `vkCmdCopyImageToBuffer2` VUID → stopped |
+| A mapped span reporting the allocation's size | 1 red |
+| A device-local buffer mapped; an already-mapped buffer mapped again | `vkMapMemory` VUID → stopped |
+| An attachment with no image view rendered into | 1 red |
+| `CreateDevice` accepting a UUID nothing reports | 3 red |
+| `vkQueueSubmit2` removed from the device table | `error C2039: 'vkQueueSubmit2': is not a member of 'Monarc::RHI::Detail::DeviceFunctions'` |
+
+That last one is the entry-point table's whole purpose as a compile-time property: the X-macro
+list and the call sites cannot drift apart. Three further mutations were tried and turned out
+not to be *expressible* at `/W4 /WX` — dropping `out.image = image` is
+`warning C4100: 'image': unreferenced parameter`, duplicating `layoutBefore` is the same for
+`layoutAfter`, and making `FindOwnList` match unconditionally is `warning C4702: unreachable
+code`. Each was re-run in a form that sidesteps the warning, and the numbers above are those
+runs.
+
+**One process note, because it invalidated a first set of results.** The mutation harness
+restored each file with `shutil.copy2`, which preserves the original mtime — so the clean source
+was *older* than the object file built from the mutated one, ninja saw no work to do, and the
+next mutation's binary still contained the previous one. Two "caught" results were being
+credited to the wrong mutation, and a stale binary made the unmutated suite look red. The
+harness now stamps the restored file with the current time, and the numbers above come from a
+run that starts from a scratch `Build/msvc-debug`.
+
+**A mapped span's length is asserted against a 250-byte buffer and not a 256-byte one**, because
+Vulkan rounds an allocation up to the memory type's alignment: at 256 the buffer's size and the
+allocation's size are the same number and the assertion could not tell them apart.
+
+**The gpu suite requires a Vulkan SDK in Debug, deliberately.** Task 3's plan asks to "assert
+the messenger was installed, so a build that quietly failed to load the layer cannot pass as
+clean" — so `ValidationDefault()` being true is asserted to imply both
+`ValidationLayerEnabled()` and `DebugMessengerInstalled()`, with no "if the layer happens to be
+present" escape. Weakening it to that would make the assertion unable to fail at all, which is
+the whole category this phase's review pass has been deleting. The Release legs assert the
+converse — no layer, no messenger.
+
+**The skip machinery still reports Skipped and not Passed.** Demonstrated again by pointing the
+registered `gpu` command at a library that cannot exist:
+
+```
+7/9 Test #7: Monarc.RHI.Vulkan.DeviceTests ....***Skipped   0.03 sec
+...
+The following tests did not run:
+	  7 - Monarc.RHI.Vulkan.DeviceTests (Skipped)
+```
+
+- Green on all six presets, zero warnings, 9 CTest entries each
+- **1059 device-free assertions across 104 cases** — `Monarc.RHI.Tests` 47 cases / 453
+  assertions and `Monarc.RHI.Vulkan.Tests` 57 / 606 — plus **31 device-required cases and 290
+  assertions**, that last number scaling with how many adapters a machine has. Task 2 left 67
+  device-free cases and 247 assertions, so Task 3 adds 37 cases and 812 assertions device-free
+- **What only runs with a device, and is therefore invisible in CI**: everything through
+  `VulkanBackend::CreateDevice` — device creation on each adapter, the readback itself, the
+  frame/pool/timeline cycle, every resource-pool and stale-handle assertion, the cross-device
+  submission refusal, and the mapping rules. That is 31 cases. What CI *does* cover of Task 3 is
+  the whole barrier model's translation in both directions, the resource-description and
+  rendering enums, `FindMemoryType` against memory layouts this machine does not have, the
+  `Array` operations the device's pools are built on, and every type-level property of
+  `TextureBarrier`
+- Two functions became testable rather than staying unreachable: `ResizeTo` and `ShrinkTo` moved
+  out of `VulkanBackend.cpp`'s anonymous namespace into `Private/ArrayOps.h`, which is where the
+  second caller (the device's pools) made them worth sharing. Task 2's review found mutations
+  surviving in exactly that category
+- The resolve macro is now one body with four call sites, which Task 2's review said a third
+  copy would justify — and **optionality is per entry rather than per table**. That is the shape
+  that survives what comes next: mesh-shader, ray-tracing and swapchain entry points vary
+  *per adapter*, so on this machine the same `DeviceFunctions` table would be fully populated
+  for the RTX 3070 Ti and partly populated for the Intel UHD 730, and a table whose identity is
+  "everything in me was found" cannot describe that. Task 3's device table is entirely
+  `Required` and the only `Optional` entries are the two debug-utils ones that already were, so
+  no machinery was added for extensions that do not exist yet
+- The messenger block came out of `BringUp` as `State::InstallMessenger`, as Task 2's review
+  asked. What stayed is everything whose storage `vkCreateInstance` reads —`messengerInfo`,
+  `enabledExtensions` and `applicationInfo` all have to outlive that call
 
 ## Verification gates
 

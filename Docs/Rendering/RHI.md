@@ -34,6 +34,36 @@ have converged. A barrier carries:
 
 with buffer, texture, and global variants, and support for split barriers.
 
+**Implemented whole in Phase A3 Task 3** (`Monarc.RHI/Include/Monarc/RHI/Barrier.h`): fifteen
+pipeline stages, eighteen accesses and eight texture layouts, every one translated in both
+directions and tested with no device present, though A3 records three barriers. The membership
+rule for those lists is *not* "what A3 uses" — it is Vulkan 1.3 **core** only, and only stages
+Monarc has a plan for. So `VK_IMAGE_LAYOUT_PRESENT_SRC_KHR` arrives with the swapchain rather
+than here, and the ray-tracing and mesh-shading stages arrive with a phase that schedules them.
+This is the opposite of the rule `Format` in `Types.h` states for itself, and deliberately: a
+format costs a size claim nothing verifies, where a stage costs one row in one switch.
+
+**A texture barrier without its layout pair does not compile.** `GlobalBarrier` and
+`BufferBarrier` are aggregates whose fields all default to `None` — so `GlobalBarrier{}` is the
+barrier that changes nothing, which a render graph will produce for a pass with no state to
+change, and which the backend records rather than dropping. `TextureBarrier` is not an
+aggregate and has no default constructor: its constructor takes all seven fields with no
+defaults.
+
+That asymmetry is forced rather than chosen. `TextureLayout::Undefined` is a *legitimate*
+before-layout — it is what a freshly created texture is in — so a barrier whose layouts had
+been left to a zero-initialised default is byte-for-byte identical to one whose author meant
+`Undefined`, and there is nothing left for a run-time check to look at. Distinct `enum class`
+types with no implicit conversion between them are the other half: seven arguments with the
+stages shifted up into the layouts' places is also a compile error, which is the omission a
+count-based check would miss. All four ways of omitting the pair were tried on both compilers;
+the diagnostics are in [Status.md](../Status.md#a3-task-3-delivered).
+
+Split barriers are the one part of the model not yet expressed. Both APIs write one as a pair
+of halves sharing an identity, and nothing in Monarc issues the first half yet: A3 records
+commands directly, and A4's render graph is what will have a reason to overlap a transition with
+unrelated work.
+
 Backend mapping:
 
 | Backend | How barriers are expressed |
@@ -99,6 +129,68 @@ buffer inside the backend's state and read after that state was freed — produc
 `clang-asan` report at all when it was tried: the freed bytes were still there and the read
 went unnoticed. The tests therefore compare the whole message text rather than searching it,
 because that comparison is the only thing that catches it.
+
+## The device, its queue, and its command lists
+
+`IDevice`, `IQueue` and `ICommandList` (`Monarc.RHI/Include/Monarc/RHI/Device.h`, Phase A3
+Task 3) are abstract interfaces, and they are the ones [`Monarc.Render`](Render-Graph.md)
+consumes in Phase B rather than a step towards them: a call site holding an `IDevice&` should
+not have to change.
+
+**There is no `IBackend` yet, and no owning handle for an `IDevice`.**
+`VulkanBackend::CreateDevice` returns a concrete `Result<VulkanDevice>` — polymorphic *use*
+without polymorphic *ownership*. Two reasons, and the first is the load-bearing one: an
+`IBackend`'s only justification for being virtual is runtime backend selection, and there is
+one backend. The second is that `Monarc.Core` has no owning-pointer type and designing one
+properly is its own piece of work — `IAllocator::Deallocate` needs the size and alignment of
+what it frees, and for a polymorphic type those are the derived class's rather than
+`sizeof(Base)`, so the deleter has to carry values captured where the object was made.
+
+Both arrive with the second backend, which
+[ADR-0012](../Architecture/Decisions/ADR-0012-backend-rollout.md) schedules immediately after
+M0. **The three interfaces do not change when they do**; what changes is the backend's own
+factory shape. That is a stated seam rather than an unstated one, and the headers say so.
+
+**Rendering is Vulkan 1.3 dynamic rendering, and there is no `VkRenderPass` or `VkFramebuffer`
+anywhere in the backend.** `ICommandList::BeginRendering` names attachments at record time, so
+nothing is created ahead of a frame, nothing has to be invalidated when a texture is recreated,
+and there are no pipeline/pass compatibility rules to encode. D3D12 and Metal already work this
+way, so this is the model all three share rather than Vulkan's older shape emulated on the
+other two. `grep -rni "renderpass\|framebuffer\|render pass" Source/` matches four lines, all
+comments.
+
+**There is no clear command.** A clear is a `LoadOp::Clear` on an attachment, because that is
+the path the swapchain clear and the render graph both take — a separate clear entry point
+would be a second code path with no shipped caller, and a test of it would read as coverage
+while the real path stayed unexercised.
+
+**Frame completion is a timeline semaphore, and there are no binary semaphores.**
+`IQueue::Submit` returns the value its submission will signal; `IDevice::BeginFrame` waits on
+the value its frame slot's previous submission signalled before resetting that slot's command
+pool, which is what makes the reset legal — resetting a pool whose buffers are still executing
+is undefined behaviour. Two frames in flight, one command pool each. Binary semaphores arrive
+with presentation, because `vkQueuePresentKHR` accepts only those.
+
+**Resources are handles from device-owned, generation-checked, fixed-capacity pools.** Capacity
+comes from a `DeviceConfig` at device creation and is never grown, which is
+[`JobSystem`](../Runtime/Threading.md)'s discipline and is here for the same reason: a pool that
+reallocated would move a slot out from under every handle naming it. A full pool reports
+`ErrorCode::OutOfMemory`; a stale handle resolves to a failure and never to the slot's new
+occupant ([ADR-0002](../Architecture/Decisions/ADR-0002-handles-not-pointers.md)).
+
+### GPU memory is one allocation per resource, and that is a placeholder
+
+A3 allocates a `VkDeviceMemory` per texture and per buffer. It is honest for a phase that
+creates one of each, and it will not survive the first scene with real assets: drivers cap
+`maxMemoryAllocationCount` (4096 on much hardware), each allocation has real cost, and nothing
+sub-allocates or pools.
+
+What makes it safe to ship is the shape of the interface rather than the strategy behind it.
+`CreateTexture` takes a `TextureDescription` and returns a handle, so a sub-allocating allocator
+replaces one function's body without touching a call site. What would have been wrong is an
+interface that never took a description.
+[ADR-0014](../Architecture/Decisions/ADR-0014-dependency-policy.md)'s dependency table has no
+VMA row, and adding one is a decision for whoever needs the second allocation strategy.
 
 ## Adapter identity is the device UUID, and only that
 
