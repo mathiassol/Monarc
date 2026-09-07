@@ -384,6 +384,23 @@ That capture is the proof that the pixels came from where we think they did.
       table-clearing on partial failure observable. Task 2 proved that path by mutation
       instead, which is not the same as covering it.
 
+### A note carried over from Task 3
+
+- [ ] **Add a death-test harness, and cover the fatal guards with it.** Monarc now has four
+      guards that deliberately end the process, and **not one of them has a case in any
+      suite**: `Array<T>::OnAllocationFailed`, `JobSystem::Wait`'s worker guard,
+      `JobSystem::PopQueueLocked`, and `ICommandList::Barrier`'s stale-handle refusal. Each
+      was verified once, by hand, with a scratch program that was then deleted — so nothing
+      stops a later edit from turning any of them back into a silent `return`, which is
+      exactly the regression three separate reviews on this branch have already caught in
+      other forms.
+
+      The shape is a registered CTest entry that runs a child process and asserts a non-zero
+      exit with an expected message. It covers all four at once, and **three of the four need
+      no GPU**, so most of it runs in CI. Worth its own pass rather than a comment in four
+      files saying "not testable" — the guards are testable, just not in-process, and the
+      difference is a harness nobody has written yet.
+
 ---
 
 ## Definition of done
