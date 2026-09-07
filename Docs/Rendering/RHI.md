@@ -147,9 +147,10 @@ changed the shape:
   device sits on predicts nothing about the tiers Monarc defines. It stays a fact on
   `AdapterInfo` rather than a requirement.
 - **`Advanced` exists because of that same measurement.** Descriptor indexing does not separate
-  the two local devices; mesh shading and ray tracing do. Without a third rung the tier query
-  could not tell an Ampere card from an integrated Xe-LP part, which would have made the whole
-  mechanism decorative on the one machine that can exercise it.
+  the two local devices; mesh shading and ray tracing do. Stopping the table at `Bindless` —
+  which is where it would have ended without this measurement — would have left the tier query
+  unable to tell an Ampere card from an integrated Xe-LP part, making the whole mechanism
+  decorative on the one machine that can exercise it.
 
 A tier above `Advanced` arrives with the first feature that needs one. A feature that requires
 a tier the device lacks must degrade or refuse explicitly; silently producing different results

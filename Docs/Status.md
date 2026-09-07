@@ -397,24 +397,52 @@ Tasks 3 and 4.
   checkbox also asks for "the same shape as `Platform::Library`'s own tests", and
   `Platform::Library::Open` returns the bare literal `"could not load library"`; the two halves
   of that requirement pull in opposite directions, and this is the half that was kept
-- **`AdapterInfo`, `DeduplicateAdapters` and a three-rung capability tier** in `Monarc.RHI`, all
-  pure and all tested with no device — which is what makes CI cover them
+- **`AdapterInfo`, `DeduplicateAdapters` and a four-value `CapabilityTier`** in `Monarc.RHI` —
+  `Unsupported`, `Baseline`, `Bindless`, `Advanced`: three attainable rungs above an
+  unsupported floor every device meets. All pure and all tested with no device, which is what
+  makes CI cover them
 - **`Monarc.FirstLight --adapters`**, which is also the `Monarc.RHI.Vulkan.Probe` CTest entry
 
-**The headline measurement.** `--adapters` on this machine:
+**The headline measurement.** `Monarc.FirstLight --adapters` on this machine, `msvc-debug`,
+as the program actually printed it — five lines per adapter, log prefixes and the implicit
+layers' own warnings included. Two elisions are marked inline and nothing else is altered:
+the three raw Intel blocks that repeat `raw [1]` verbatim, and the two absolute paths inside
+the Medal duplicate warning. An earlier revision of this section carried the same numbers as
+one line per adapter — a summary in the shape of a capture, which is the one thing a file
+whose whole job is being the honest account cannot be.
 
 ```
-probe: loader open | instance Vulkan 1.4.357 | validation layer enabled | debug messenger installed
-probe: raw enumeration -- 5 physical device(s)
-  raw [0] NVIDIA GeForce RTX 3070 Ti   759c8156-7b91-7099-6511-5bd91de66f76  DiscreteGpu    1.4.351  Advanced
-  raw [1] Intel(R) UHD Graphics 730    86808b4c-0400-0000-0002-000000000000  IntegratedGpu  1.3.275  Bindless
-  raw [2] Intel(R) UHD Graphics 730    86808b4c-0400-0000-0002-000000000000  IntegratedGpu  1.3.275  Bindless
-  raw [3] Intel(R) UHD Graphics 730    86808b4c-0400-0000-0002-000000000000  IntegratedGpu  1.3.275  Bindless
-  raw [4] Intel(R) UHD Graphics 730    86808b4c-0400-0000-0002-000000000000  IntegratedGpu  1.3.275  Bindless
-probe: after deduplication on deviceUUID -- 2 adapter(s)
-  adapter [0] NVIDIA GeForce RTX 3070 Ti   759c8156-7b91-7099-6511-5bd91de66f76  DiscreteGpu    1.4.351  Advanced
-  adapter [1] Intel(R) UHD Graphics 730    86808b4c-0400-0000-0002-000000000000  IntegratedGpu  1.3.275  Bindless
-probe: 5 raw entries collapsed to 2
+[Info   ] FirstLight: probe: validation requested true
+[Warning] VulkanValidation: Loader Message | Removing layer VK_LAYER_MEDAL_HOOK ([... path elided ...]\medal-vulkan32.json) because it is a duplicate of VK_LAYER_MEDAL_HOOK ([... path elided ...]\medal-vulkan64.json)
+[Warning] VulkanValidation: Loader Message | Layer VK_LAYER_OW_OVERLAY uses API version 1.2 which is older than the application specified API version of 1.3. May cause issues.
+[Warning] VulkanValidation: Loader Message | Layer VK_LAYER_OW_OBS_HOOK uses API version 1.2 which is older than the application specified API version of 1.3. May cause issues.
+[Warning] VulkanValidation: Loader Message | Layer VK_LAYER_MEDAL_HOOK uses API version 1.2 which is older than the application specified API version of 1.3. May cause issues.
+[Info   ] Vulkan: Vulkan instance created | loader 1.4.357 | requested 1.3.0 | validation on | messenger installed
+[Info   ] FirstLight: probe: loader open | instance Vulkan 1.4.357 | validation layer enabled | debug messenger installed
+[Info   ] FirstLight: probe: raw enumeration -- 5 physical device(s)
+[Info   ] FirstLight:   raw [0] NVIDIA GeForce RTX 3070 Ti
+[Info   ] FirstLight:         uuid 759c8156-7b91-7099-6511-5bd91de66f76 | DiscreteGpu | vendor 0x10de device 0x2482
+[Info   ] FirstLight:         Vulkan 1.4.351 | tier Advanced | queue families 6 (1 graphics)
+[Info   ] FirstLight:         timeline true | dynamic rendering true | sync2 true | bindless images 1048576
+[Info   ] FirstLight:         non-uniform indexing true | runtime array true | partially bound true | mesh true | ray tracing true
+[Info   ] FirstLight:   raw [1] Intel(R) UHD Graphics 730
+[Info   ] FirstLight:         uuid 86808b4c-0400-0000-0002-000000000000 | IntegratedGpu | vendor 0x8086 device 0x4c8b
+[Info   ] FirstLight:         Vulkan 1.3.275 | tier Bindless | queue families 2 (1 graphics)
+[Info   ] FirstLight:         timeline true | dynamic rendering true | sync2 true | bindless images 1048576
+[Info   ] FirstLight:         non-uniform indexing true | runtime array true | partially bound true | mesh false | ray tracing false
+[... elided: raw [2], raw [3] and raw [4] -- three more five-line blocks, each identical to raw [1] above ...]
+[Info   ] FirstLight: probe: after deduplication on deviceUUID -- 2 adapter(s)
+[Info   ] FirstLight:   adapter [0] NVIDIA GeForce RTX 3070 Ti
+[Info   ] FirstLight:         uuid 759c8156-7b91-7099-6511-5bd91de66f76 | DiscreteGpu | vendor 0x10de device 0x2482
+[Info   ] FirstLight:         Vulkan 1.4.351 | tier Advanced | queue families 6 (1 graphics)
+[Info   ] FirstLight:         timeline true | dynamic rendering true | sync2 true | bindless images 1048576
+[Info   ] FirstLight:         non-uniform indexing true | runtime array true | partially bound true | mesh true | ray tracing true
+[Info   ] FirstLight:   adapter [1] Intel(R) UHD Graphics 730
+[Info   ] FirstLight:         uuid 86808b4c-0400-0000-0002-000000000000 | IntegratedGpu | vendor 0x8086 device 0x4c8b
+[Info   ] FirstLight:         Vulkan 1.3.275 | tier Bindless | queue families 2 (1 graphics)
+[Info   ] FirstLight:         timeline true | dynamic rendering true | sync2 true | bindless images 1048576
+[Info   ] FirstLight:         non-uniform indexing true | runtime array true | partially bound true | mesh false | ray tracing false
+[Info   ] FirstLight: probe: 5 raw entries collapsed to 2
 ```
 
 **Three test outcomes, because a suite that silently runs nothing while showing green is the
