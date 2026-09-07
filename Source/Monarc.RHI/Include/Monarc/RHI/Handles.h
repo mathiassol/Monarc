@@ -51,14 +51,20 @@ private:
     static constexpr u32 kInvalidIndex = static_cast<u32>(-1);
 };
 
-// Free function templates in Handle's own namespace, not friends. JobHandle.h explains the
-// reasoning in full; the short of it is that ADL looks at the operands' namespace rather
-// than at whichever class declared a friend, and that MSVC accepts [[nodiscard]] on a friend
-// declaration where clang-cl correctly rejects it.
+// Free function templates in Handle's own namespace rather than hidden friends. That part is
+// the house form and not a technical requirement -- Monarc/Jobs/JobHandle.h records why the
+// two reasons formerly cited here, an ADL blind spot around friends and a [[nodiscard]]
+// portability trap, are not reasons. A hidden friend would forbid the mixed comparison below
+// just as this does; the choice between the shapes is not what buys anything.
 //
-// Note what the single Tag parameter buys: deduction fails outright for a comparison between
-// two different handle types, so `texture == buffer` does not compile. That is the type
-// safety the tag exists for, and Tests/TestHandles.cpp asserts it.
+// The single Tag parameter is what buys something, and it is orthogonal to that choice.
+// Deducing Tag from both operands of a mixed comparison yields conflicting types, so the
+// only candidate is discarded and `texture == buffer` does not compile -- clang says
+// "candidate template ignored: deduced conflicting types for parameter 'Tag'". Written over
+// two independent tag parameters it would compile instead, which is the difference between
+// the tag being a type-safety mechanism and it being decoration. Tests/TestHandles.cpp pins
+// the result with `!kEqualityComparable<TextureHandle, BufferHandle>`, an assertion the
+// two-parameter form was confirmed to break.
 template <typename Tag>
 [[nodiscard]] constexpr bool operator==(const Handle<Tag>& a, const Handle<Tag>& b) {
     return a.index == b.index && a.generation == b.generation;
@@ -79,8 +85,11 @@ using TextureHandle = Handle<Detail::TextureTag>;
 // to bind them to. Adding them now would be declaring an interface for resources nothing
 // creates, which is the kind of guess a later phase then has to undo.
 //
-// There is deliberately no Hasher<Handle<Tag>> either. JobHandle has one because
-// HashMap<JobHandle, V> is a real user of it; nothing keys a map by a resource handle, and a
-// resource pool indexes by handle.index directly. It arrives with its first caller.
+// There is deliberately no Hasher<Handle<Tag>> either. The reason is the second one only:
+// nothing keys a map by a resource handle, and a resource pool indexes by handle.index
+// directly, so a hasher here would have no caller. JobHandle's own Hasher is not the
+// counter-example it looks like -- the sole HashMap<JobHandle, V> in the tree is
+// Monarc.Jobs/Tests/TestJobHandle.cpp:30, a test written to exercise that hasher rather
+// than a use the engine has. This arrives with its first real caller.
 
 }  // namespace Monarc::RHI

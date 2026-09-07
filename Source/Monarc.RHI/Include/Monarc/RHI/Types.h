@@ -55,10 +55,11 @@ struct Extent2D {
     [[nodiscard]] constexpr bool IsEmpty() const { return width == 0 || height == 0; }
 };
 
-// Free functions in Extent2D's own namespace rather than friends, for the two reasons
-// Monarc/Jobs/JobHandle.h gives at length: argument-dependent lookup looks at the operands'
-// namespace rather than at whichever class declared a friend, and MSVC accepts
-// [[nodiscard]] on a friend declaration where clang-cl correctly rejects it.
+// Free functions in Extent2D's own namespace rather than hidden friends. For a plain
+// non-template type either shape works and neither is better, so this is the house form and
+// nothing more. Monarc/Jobs/JobHandle.h records why the two reasons this comment used to
+// cite -- an ADL blind spot around friends, and a [[nodiscard]] portability trap -- do not
+// apply to a hidden friend definition and are not reasons for anything.
 [[nodiscard]] constexpr bool operator==(const Extent2D& a, const Extent2D& b) {
     return a.width == b.width && a.height == b.height;
 }
