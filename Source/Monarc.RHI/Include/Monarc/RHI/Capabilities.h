@@ -84,10 +84,16 @@ struct Capabilities {
     bool partiallyBoundDescriptors = false;
     u32  maxBindlessSampledImages  = 0;
 
-    /// Total queue families the device exposes, and how many of them can do graphics. A3
-    /// needs one graphics family; the total is here because "how many families are there"
-    /// is the question a later phase's async-compute or transfer queue asks first.
-    u32 queueFamilyCount         = 0;
+    /// How many of the device's queue families can do graphics. A3 needs one, and the
+    /// Baseline requirement reads it: a device that reports Vulkan 1.3 with nothing to submit
+    /// to is not one Monarc can render on.
+    ///
+    /// The *total* family count is not here. It is a fact about the device that no
+    /// requirement reads, so by the rule at the top of this struct it belongs on
+    /// `AdapterInfo` -- which is where it now is, beside `DeviceType`, for the reason
+    /// Adapter.h gives about that field. The split between the two is informative rather
+    /// than awkward: "how many families are there" is a description, and "is there one I can
+    /// draw with" is a requirement.
     u32 graphicsQueueFamilyCount = 0;
 
     // Mesh shading and ray tracing, as extension presence on the physical device. These are

@@ -89,14 +89,22 @@ function(monarc_device_test_module module)
         SKIP_RETURN_CODE 77)
 endfunction()
 
-# Registers an always-passing CTest entry whose job is to print, not to assert.
+# Registers a CTest entry whose job is to print, not to assert.
 #
 # The third of Phase A3's three test outcomes. A probe runs on every machine, reports what it
 # found -- loader present or not, instance version, the raw and deduplicated adapter lists --
-# and exits zero regardless. Its value is that it puts the truth about each machine into the CI
-# log, so "CI has no Vulkan" becomes an observed fact in the record rather than an assumption
-# in a plan. A non-zero exit would make it a gate, and it is deliberately not one: the device
-# tests above are the gate.
+# and exits zero regardless of what it finds. Its value is that it puts the truth about each
+# machine into the CI log, so "CI has no Vulkan" becomes an observed fact in the record rather
+# than an assumption in a plan. It is deliberately not the gate for its own findings: the
+# device tests above are that.
+#
+# **"Always passes" needs one caveat, and it is not a small one.** A probe exits zero on any
+# *finding*, including no Vulkan at all -- but the program still runs Monarc's own code, and in
+# Debug it runs it with validation on and the fatal messenger installed. A VALIDATION-type
+# error from the layer therefore stops the process at 0x80000003 and CTest reports the entry
+# **Failed**. That is right, and it is worth stating rather than leaving as a surprise: what
+# the probe declines to gate on is what it observed about the machine, not whether Monarc used
+# Vulkan correctly while observing it.
 #
 # Label `probe`, so it is neither `unit` nor `gpu` and neither `ctest -L unit` nor
 # `ctest -LE gpu` misfiles it.

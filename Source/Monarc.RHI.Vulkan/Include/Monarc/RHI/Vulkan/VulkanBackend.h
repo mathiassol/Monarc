@@ -54,13 +54,24 @@ namespace Monarc::RHI {
 /// at the failure site instead. Nothing branches on message text: the `ErrorCode` carries what
 /// is branchable and the log carries what a human reads.
 ///
-/// Move-only and non-copyable: it owns resources that must be released exactly once. There is
-/// no default constructor -- unlike `Platform::Library`, whose storage is one inline handle, a
-/// backend owns a heap allocation, so a default-constructed one would be a permanently dead
-/// object rather than a cheap closed handle. `VulkanBackend backend;` is
+/// Move-only and non-copyable: it owns resources that must be released exactly once.
+///
+/// **There is no default constructor, because there would be no way to bring one up.** Unlike
+/// `Platform::Library`, whose `Open` is a member and whose closed state is a handle waiting to
+/// be filled, this class's only entry point is a static `Create` that allocates the state
+/// itself -- so `VulkanBackend backend;` would produce an object whose only legal next move is
+/// to be assigned over. `VulkanBackend backend;` is
 /// `error C2512: 'Monarc::RHI::VulkanBackend': no appropriate default constructor available`,
-/// verified by writing one. A backend that has been moved from *is* that dead object, and
-/// every query below answers on one rather than dereferencing.
+/// verified by writing one.
+///
+/// Two states below `Create` nevertheless exist and are legal, and `IsInitialized()` is what
+/// tells them from a live backend. A **moved-from** backend holds no state at all; every query
+/// answers on one rather than dereferencing, and `TestsDevice/` has the case that would
+/// segfault if an accessor forgot. A **shut-down** backend still owns its `State` allocation
+/// and answers `false`, `{0,0,0}` and `InvalidArgument` -- and that is `Shutdown`'s purpose
+/// rather than an oversight: it releases the messenger, the instance and `vulkan-1.dll` at a
+/// point the caller chooses, while the object's storage stays where the caller put it.
+/// Bringing one back up is a second `Create`, which is what the factory shape costs.
 class VulkanBackend {
 public:
     struct Config {
@@ -120,10 +131,17 @@ public:
     /// Destroys the messenger, the instance and the loader, in that order. Safe to call
     /// unconditionally, safe to call more than once, and safe on a backend that has been
     /// moved from. Bringing one back up means calling `Create` again.
+    ///
+    /// **What this buys over letting the destructor do it** is a deterministic point: the
+    /// instance is destroyed and `vulkan-1.dll` unloaded here, while this object's storage
+    /// stays wherever the caller put it. A caller holding a backend inside a longer-lived
+    /// structure -- or one that wants the module gone before doing something else with the
+    /// GPU -- cannot get that from scope exit.
     void Shutdown();
 
     /// True while the `VkInstance` is alive: true on a backend `Create` returned, false after
-    /// `Shutdown`, and false on one that has been moved from.
+    /// `Shutdown`, and false on one that has been moved from. The one query that separates
+    /// the three states this object can be in.
     [[nodiscard]] bool IsInitialized() const;
 
     /// The version the *loader* reports, from `vkEnumerateInstanceVersion` -- not any

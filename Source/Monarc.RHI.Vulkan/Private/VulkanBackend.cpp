@@ -107,7 +107,18 @@ VKAPI_ATTR VkBool32 VKAPI_CALL DebugMessengerCallback(
     // filtered out. The level therefore cannot be passed as a value, and one call per level is
     // the price. The switch is `default`-less so a level added to LogLevel is a compile error
     // here rather than a message that silently stops being logged.
+    //
+    // **Every level gets its own case, including the two SeverityToLogLevel cannot return.**
+    // `Debug` and `Fatal` need a case for the `default`-less switch to compile, and folding
+    // them in with `Trace` -- which is what this used to do -- left the one hole the switch's
+    // guard does not cover: a change that made SeverityToLogLevel return `Fatal` would log
+    // the loudest level at the quietest, with no compile error, because the case was already
+    // there. Written out, that change logs at Fatal. Tests/TestVulkanTranslate.cpp pins that
+    // neither is reachable today, which is what makes these two cases dead rather than wrong.
     switch (Detail::SeverityToLogLevel(severity)) {
+        case LogLevel::Fatal:
+            MONARC_LOG(VulkanValidation, Fatal, "{} | {}", messageIdName, message);
+            break;
         case LogLevel::Error:
             MONARC_LOG(VulkanValidation, Error, "{} | {}", messageIdName, message);
             break;
@@ -117,9 +128,10 @@ VKAPI_ATTR VkBool32 VKAPI_CALL DebugMessengerCallback(
         case LogLevel::Info:
             MONARC_LOG(VulkanValidation, Info, "{} | {}", messageIdName, message);
             break;
-        case LogLevel::Trace:
         case LogLevel::Debug:
-        case LogLevel::Fatal:
+            MONARC_LOG(VulkanValidation, Debug, "{} | {}", messageIdName, message);
+            break;
+        case LogLevel::Trace:
             MONARC_LOG(VulkanValidation, Trace, "{} | {}", messageIdName, message);
             break;
     }
@@ -697,7 +709,7 @@ Status VulkanBackend::State::DescribeAdapter(VkPhysicalDevice device, AdapterInf
         fns.vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount,
                                                      queueFamilies.Data());
     }
-    out.capabilities.queueFamilyCount = queueFamilyCount;
+    out.queueFamilyCount = queueFamilyCount;
     for (u32 i = 0; i < queueFamilyCount; ++i) {
         if ((queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0) {
             ++out.capabilities.graphicsQueueFamilyCount;

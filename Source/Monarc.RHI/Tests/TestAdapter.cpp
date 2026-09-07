@@ -134,26 +134,34 @@ TEST_CASE("a duplicate ahead of a distinct entry does not displace it") {
     CHECK(adapters[1].uuid == kNvidiaUuid);
 }
 
-TEST_CASE("two UUIDs differing by a single byte are two adapters, at every byte position") {
-    // Every position, not just the first and last: the loop in operator== is the thing under
-    // test, and a comparison written with the wrong bound or a `<=`/`<` slip would pass at
-    // some positions and fail at others.
-    for (Monarc::usize position = 0; position < AdapterUuid::kSize; ++position) {
-        AdapterUuid altered = kIntelUuid;
-        altered.bytes[position] ^= 0x01;
-        REQUIRE(altered != kIntelUuid);
+TEST_CASE("two UUIDs differing only in a trailing zero byte are two adapters") {
+    // **This used to run over all sixteen positions, and it does not need to.** That loop
+    // existed to police a hand-written `operator==`: "a comparison written with the wrong
+    // bound or a `<=`/`<` slip would pass at some positions and fail at others" is a risk of
+    // a loop, and AdapterUuid's `==` is now defaulted, which compares all sixteen elements by
+    // construction. Forty-eight assertions of a language guarantee.
+    //
+    // One position is kept, and it is chosen rather than arbitrary: byte 15 of the real Intel
+    // UUID is zero, and the whole tail from byte 10 on is zeros. The observed defect this
+    // file is a regression test for was a comparison that stopped at the first zero byte, and
+    // that is a mistake `DeduplicateAdapters` -- Monarc's own code, not the language's --
+    // could still make by comparing something other than the UUID. A prettier UUID would not
+    // catch it.
+    AdapterUuid altered = kIntelUuid;
+    REQUIRE(altered.bytes[AdapterUuid::kSize - 1] == 0x00);
+    altered.bytes[AdapterUuid::kSize - 1] = 0x01;
+    REQUIRE(altered != kIntelUuid);
 
-        AdapterInfo adapters[] = {
-            Adapter("original", kIntelUuid),
-            Adapter("altered", altered),
-        };
+    AdapterInfo adapters[] = {
+        Adapter("original", kIntelUuid),
+        Adapter("altered", altered),
+    };
 
-        const Monarc::usize kept = DeduplicateAdapters(std::span<AdapterInfo>(adapters));
+    const Monarc::usize kept = DeduplicateAdapters(std::span<AdapterInfo>(adapters));
 
-        CHECK(kept == 2);
-        CHECK(NameOf(adapters[0]) == "original");
-        CHECK(NameOf(adapters[1]) == "altered");
-    }
+    CHECK(kept == 2);
+    CHECK(NameOf(adapters[0]) == "original");
+    CHECK(NameOf(adapters[1]) == "altered");
 }
 
 TEST_CASE("an empty list deduplicates to nothing without touching anything") {

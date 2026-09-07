@@ -20,8 +20,13 @@ monarc_app(
 # one rather than reimplemented as one -- a second copy of "print the adapter lists" would be
 # a second thing to keep true, and the probe's whole value is that its output is trustworthy.
 #
-# Always runs, always passes, and its findings are read rather than asserted on. The gate for
-# adapter enumeration is Monarc.RHI.Vulkan.DeviceTests, which reports Skipped when there is no
-# device; this entry is what makes "the runner has no Vulkan" an observed fact in the CI log
-# instead of an assumption in a plan.
+# Always runs, and its findings are read rather than asserted on. The gate for adapter
+# enumeration is Monarc.RHI.Vulkan.DeviceTests, which reports Skipped when there is no device;
+# this entry is what makes "the runner has no Vulkan" an observed fact in the CI log instead of
+# an assumption in a plan.
+#
+# It passes on any *finding*, including no Vulkan at all -- but not unconditionally. In Debug
+# it runs with validation on and the fatal messenger installed, so a VALIDATION-type error
+# stops it at 0x80000003 and CTest reports this entry Failed. See monarc_probe_test() in
+# CMake/MonarcTest.cmake.
 monarc_probe_test(Monarc.RHI.Vulkan.Probe $<TARGET_FILE:Monarc.FirstLight> --adapters)

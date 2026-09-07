@@ -11,6 +11,12 @@
 // with no Vulkan at all is a finding, and a finding is something a probe reports. The gate is
 // Monarc.RHI.Vulkan.DeviceTests, which reports Skipped in exactly that case.
 //
+// "Regardless of what it found" is exact, and narrower than "always exits zero". This mode
+// runs Monarc's own code, and in Debug it runs it with validation on and the fatal messenger
+// installed -- so a VALIDATION-type error stops the process at 0x80000003 and the CTest entry
+// reports Failed. What the probe declines to gate on is the machine, not Monarc's use of
+// Vulkan while looking at it.
+//
 // With no arguments, this asks for a backend and a window, reports what each said, and exits
 // non-zero while any of it is unimplemented. Phase A3 Task 2 has the backend; the window is
 // Task 4's, so this still exits 1 -- deliberately. An app printing "ok" here would be claiming
@@ -73,7 +79,7 @@ void PrintAdapter(const char* label, Monarc::usize index,
                "        Vulkan {}.{}.{} | tier {} | queue families {} ({} graphics)",
                capabilities.apiVersion.major, capabilities.apiVersion.minor,
                capabilities.apiVersion.patch, Monarc::RHI::ToString(info.tier),
-               capabilities.queueFamilyCount, capabilities.graphicsQueueFamilyCount);
+               info.queueFamilyCount, capabilities.graphicsQueueFamilyCount);
     MONARC_LOG(FirstLight, Info,
                "        timeline {} | dynamic rendering {} | sync2 {} | bindless images {}",
                capabilities.timelineSemaphores, capabilities.dynamicRendering,
@@ -86,8 +92,10 @@ void PrintAdapter(const char* label, Monarc::usize index,
                capabilities.rayTracing);
 }
 
-/// Prints the loader's status, the instance, and both adapter lists. Always returns 0 -- see
-/// the file comment: this is a report, not an assertion.
+/// Prints the loader's status, the instance, and both adapter lists. Returns 0 on every
+/// finding, including "there is no Vulkan here" -- see the file comment: this is a report, not
+/// an assertion. It can still be stopped by the fatal validation messenger, which is a
+/// statement about Monarc rather than about the machine.
 int ReportAdapters() {
     Monarc::SystemAllocator            allocator;
     Monarc::RHI::VulkanBackend::Config config{};

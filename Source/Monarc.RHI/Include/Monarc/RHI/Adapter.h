@@ -21,25 +21,21 @@ struct AdapterUuid {
     static constexpr usize kSize = 16;
 
     u8 bytes[kSize] = {};
+
+    /// **Defaulted, and that is the point.** A defaulted `operator==` on a class with an
+    /// array member compares the elements, all sixteen of them, by construction -- so the two
+    /// bugs this used to be hand-written to guard against, a comparison that stops early and
+    /// one that compares the array's address rather than its contents, are not expressible.
+    /// The hand-written loop was the only thing that could have had them, and the sixteen-
+    /// position case in Tests/TestAdapter.cpp existed to police it.
+    ///
+    /// Defaulted rather than the free-function pair Types.h's `Extent2D` carries: that
+    /// comment says plainly that either shape works for a plain type and neither is better,
+    /// so it is not a reason to keep a loop. `ApiVersion` in Capabilities.h is the closer
+    /// precedent -- a small value type whose comparison is defaulted for exactly this reason.
+    /// Declaring `==` gives `!=` by rewriting, and it is implicitly constexpr.
+    constexpr bool operator==(const AdapterUuid&) const = default;
 };
-
-// Free functions in AdapterUuid's own namespace, the house form Types.h's Extent2D uses.
-// Written out rather than defaulted because an explicit loop is what makes it obvious that
-// all sixteen bytes participate -- the single-byte-difference case in
-// Tests/TestAdapter.cpp exists because a comparison that stopped early, or compared the
-// address of the array rather than its contents, would collapse two real devices into one.
-[[nodiscard]] constexpr bool operator==(const AdapterUuid& a, const AdapterUuid& b) {
-    for (usize i = 0; i < AdapterUuid::kSize; ++i) {
-        if (a.bytes[i] != b.bytes[i]) {
-            return false;
-        }
-    }
-    return true;
-}
-
-[[nodiscard]] constexpr bool operator!=(const AdapterUuid& a, const AdapterUuid& b) {
-    return !(a == b);
-}
 
 /// Chars ToString(const AdapterUuid&) writes, including the terminator: 32 hex digits, four
 /// dashes, and a NUL.
@@ -99,6 +95,16 @@ struct AdapterInfo {
     /// in a log, and the thing a vendor-specific workaround will key off later.
     u32 vendorId = 0;
     u32 deviceId = 0;
+
+    /// Total queue families the device exposes. Six on the RTX 3070 Ti and two on the Intel
+    /// UHD 730.
+    ///
+    /// Here rather than in `capabilities`, for the reason `DeviceType` above is: no tier
+    /// requirement reads it, and Capabilities' own rule is that every field in it is an input
+    /// to the ladder. It is a description a log line wants and a later phase's async-compute
+    /// or transfer queue asks first. How many of these families can *draw* is a requirement,
+    /// and that number stays in `capabilities`.
+    u32 queueFamilyCount = 0;
 
     /// The device's own API version lives in `capabilities.apiVersion`, and is not repeated
     /// here: two copies of one number is one more than can be kept in step.
