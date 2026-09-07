@@ -3,6 +3,7 @@
 #include <Monarc/RHI/Barrier.h>
 #include <Monarc/RHI/Handles.h>
 
+#include <format>
 #include <iterator>
 #include <string_view>
 #include <type_traits>
@@ -105,6 +106,66 @@ constexpr bool kOrable = requires(E a, E b) { a | b; };
 template <typename B>
 constexpr bool kHasLayoutBefore = requires(B barrier) { barrier.LayoutBefore(); };
 
+/// What a `CollisionReport` reads when no two members of a set collide.
+constexpr std::string_view kNoCollision = "no two collide";
+
+/// The first colliding pair in a set, by name -- or `kNoCollision`.
+///
+/// **One assertion per property rather than one per pair, and the collapse cost nothing that
+/// was measured to matter.** Written as `n * (n - 1) / 2` separate `CHECK`s, the three
+/// distinctness loops below reported 286 assertions between them; this file's total went from
+/// 453 to 169 when they became three. A duplicated `ToString` case collides exactly one pair,
+/// so it turned exactly one of the 286 red -- and it turns this one red, with the pair named.
+///
+/// **This property does have to be here, and that is worth separating from the count.** A
+/// duplicated `ToString` case is invisible to everything else in either suite: the mutation
+/// above left `Monarc.RHI.Vulkan.Tests` fully green at 324 of 324, because a name is not
+/// something translation round-trips. The injectivity properties in
+/// Monarc.RHI.Vulkan/Tests/TestVulkanBarrierTranslate.cpp are *not* in that position -- the
+/// round trip detects a duplicated Vulkan bit independently -- and that file says so where it
+/// keeps them. The comparison is still every pair, because that is the property; what is gone
+/// is 283 identical greens in a total, and a count nobody can interpret is a number that gets
+/// quoted as coverage.
+///
+/// A named pair and not a bool, because that is the whole difference between a failure that
+/// is actionable and one that is not: with eighteen enumerators, "a duplicate exists" leaves
+/// the reader to find it. The shape is `AdapterUuidString`'s -- a fixed buffer returned by
+/// value, so nothing allocates -- and the buffer's initialiser is the passing text, so a
+/// green assertion reads as the property it is asserting.
+///
+/// **Each half carries its numeric value as well as its spelling**, and that is not
+/// decoration: when the thing being compared *is* the spelling, a collision means both halves
+/// print the same word. Measured -- a duplicated `ToString` case reported `HostRead and
+/// HostRead collide`, which names the symptom and not the two rows. With the values it reads
+/// `HostRead[8192] and HostRead[16384]`, and 1 << 13 against 1 << 14 says which two.
+struct CollisionReport {
+    char text[160] = "no two collide";
+
+    [[nodiscard]] std::string_view View() const { return std::string_view(text); }
+};
+
+/// `key` projects an enumerator onto whatever must be distinct: its `ToString` spelling here,
+/// a Vulkan bit or layout in Monarc.RHI.Vulkan's copy of this helper.
+template <typename Enum, Monarc::usize N, typename Key>
+[[nodiscard]] CollisionReport FirstCollision(const Enum (&values)[N], Key key) {
+    for (Monarc::usize i = 0; i < N; ++i) {
+        for (Monarc::usize j = i + 1; j < N; ++j) {
+            if (key(values[i]) == key(values[j])) {
+                CollisionReport report;
+                // format_to_n and not format: ADR-0003's subset allows this one entry point
+                // into <format>, and JobSystem.cpp's worker naming is the precedent.
+                const auto written = std::format_to_n(
+                    report.text, sizeof(report.text) - 1, "{}[{}] and {}[{}] collide",
+                    ToString(values[i]), static_cast<Monarc::u32>(values[i]),
+                    ToString(values[j]), static_cast<Monarc::u32>(values[j]));
+                *written.out = '\0';
+                return report;
+            }
+        }
+    }
+    return CollisionReport{};
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------------------
@@ -145,22 +206,12 @@ TEST_CASE("each enumerator's name is its own spelling, and no two share one") {
     CHECK(Name(TextureLayout::TransferSource) == "TransferSource");
 
     // Distinctness across the whole of each set, because two rows returning one name is what a
-    // copy-pasted case label produces and what a spot check would miss.
-    for (Monarc::usize i = 0; i < std::size(kAllStages); ++i) {
-        for (Monarc::usize j = i + 1; j < std::size(kAllStages); ++j) {
-            CHECK(Name(kAllStages[i]) != Name(kAllStages[j]));
-        }
-    }
-    for (Monarc::usize i = 0; i < std::size(kAllAccesses); ++i) {
-        for (Monarc::usize j = i + 1; j < std::size(kAllAccesses); ++j) {
-            CHECK(Name(kAllAccesses[i]) != Name(kAllAccesses[j]));
-        }
-    }
-    for (Monarc::usize i = 0; i < std::size(kAllLayouts); ++i) {
-        for (Monarc::usize j = i + 1; j < std::size(kAllLayouts); ++j) {
-            CHECK(Name(kAllLayouts[i]) != Name(kAllLayouts[j]));
-        }
-    }
+    // copy-pasted case label produces and what a spot check would miss. One assertion per set
+    // and the colliding pair named in it -- see `FirstCollision` for why, and for what the
+    // 286-assertion version of these three loops was measured to buy.
+    CHECK(FirstCollision(kAllStages, Name<PipelineStage>).View() == kNoCollision);
+    CHECK(FirstCollision(kAllAccesses, Name<Access>).View() == kNoCollision);
+    CHECK(FirstCollision(kAllLayouts, Name<TextureLayout>).View() == kNoCollision);
 }
 
 TEST_CASE("a mask of several stages has no enumerator name, and says so") {
@@ -224,9 +275,13 @@ TEST_CASE("a global barrier with no state change is representable and default-co
     CHECK(none.accessBefore == Access::None);
     CHECK(none.accessAfter == Access::None);
 
-    // Equal to itself and distinguishable from a barrier that does something, so the no-change
-    // value is not a sentinel that compares equal to everything.
-    CHECK(none == GlobalBarrier{});
+    // Distinguishable from a barrier that does something, so the no-change value is not a
+    // sentinel that compares equal to everything.
+    //
+    // The companion `none == GlobalBarrier{}` was deleted: `operator==` is `= default`, so a
+    // member-wise comparison of two identically default-initialised objects is true at compile
+    // time whatever the members hold, and no defaulted implementation could make it false.
+    // This line is the one with a mutation that turns it red.
     CHECK(none != GlobalBarrier{PipelineStage::None, PipelineStage::AllCommands, Access::None,
                                 Access::MemoryRead});
 }

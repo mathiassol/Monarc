@@ -19,8 +19,10 @@
 
 #include <Translate.h>
 
+#include <format>
 #include <initializer_list>
 #include <iterator>
+#include <string_view>
 
 using Monarc::RHI::Access;
 using Monarc::RHI::BufferBarrier;
@@ -142,6 +144,38 @@ static_assert(sizeof(VkImage) == sizeof(Monarc::uptr),
     return reinterpret_cast<VkBuffer>(static_cast<Monarc::uptr>(0x5678));
 }
 
+/// What a `CollisionReport` reads when no two members of a set translate alike.
+constexpr std::string_view kNoCollision = "no two collide";
+
+/// Monarc.RHI/Tests/TestBarrier.cpp's `CollisionReport` and `FirstCollision`, duplicated for
+/// the reason the enumerator lists above are: sharing them would mean a header in
+/// `Monarc.RHI/Tests/` included across a module boundary. That file carries the argument for
+/// the shape -- one assertion per property, the colliding pair named in it, and the
+/// measurements that decided against one assertion per pair.
+struct CollisionReport {
+    char text[160] = "no two collide";
+
+    [[nodiscard]] std::string_view View() const { return std::string_view(text); }
+};
+
+template <typename Enum, Monarc::usize N, typename Key>
+[[nodiscard]] CollisionReport FirstCollision(const Enum (&values)[N], Key key) {
+    for (Monarc::usize i = 0; i < N; ++i) {
+        for (Monarc::usize j = i + 1; j < N; ++j) {
+            if (key(values[i]) == key(values[j])) {
+                CollisionReport report;
+                const auto written = std::format_to_n(
+                    report.text, sizeof(report.text) - 1, "{}[{}] and {}[{}] collide",
+                    ToString(values[i]), static_cast<Monarc::u32>(values[i]),
+                    ToString(values[j]), static_cast<Monarc::u32>(values[j]));
+                *written.out = '\0';
+                return report;
+            }
+        }
+    }
+    return CollisionReport{};
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------------------
@@ -167,30 +201,44 @@ TEST_CASE("each pipeline stage maps to the Vulkan bit that means the same thing"
 }
 
 TEST_CASE("no two pipeline stages map to one Vulkan bit, and only None maps to zero") {
-    for (Monarc::usize i = 0; i < std::size(kAllStages); ++i) {
-        const VkPipelineStageFlags2 translated = ToVulkanBit(kAllStages[i]);
+    // Injectivity, which a duplicated case label breaks: two stages sharing a bit make
+    // `FromVulkanStages` unable to tell them apart.
+    //
+    // **This line is the diagnosis and not the detector, and the distinction is worth stating
+    // because the 105-comparison loop it replaces was justified as the detector.** The
+    // round-trip case below already fails on any duplicate -- if two stages map to one bit,
+    // the reverse translator can only return one of them, so the other's round trip is red --
+    // and it does so independently of this. What it cannot do is say which two: it compares
+    // two enumerator values and prints two integers. Measured, by giving `EarlyFragmentTests`
+    // the vertex-shader bit -- a pair neither spot check above pins: the round trip reported
+    // `CHECK( 2 == 8 )`, the whole-mask round trip `CHECK( 16375 == 16383 )`, and this line
+    // `VertexShader[2] and EarlyFragmentTests[8] collide`. Three reds, and the 105-assertion
+    // version scored the same three, since a single duplicate collides exactly one pair. One
+    // assertion for the name is worth keeping; a hundred and five for a property two other
+    // cases already detect is not.
+    CHECK(FirstCollision(kAllStages, [](PipelineStage stage) {
+              return ToVulkanBit(stage);
+          }).View() == kNoCollision);
 
-        // Zero is a legal stage mask meaning "no synchronisation", so a row accidentally left
-        // at zero is not something Vulkan would reject -- it is a synchronisation hole. This
-        // is the assertion that catches it.
-        CHECK((translated == 0) == (kAllStages[i] == PipelineStage::None));
-
-        for (Monarc::usize j = i + 1; j < std::size(kAllStages); ++j) {
-            // Injectivity is what the round-trip below depends on: two stages sharing a bit
-            // would make `FromVulkanStages` unable to tell them apart, and it is exactly what a
-            // duplicated case label produces.
-            CHECK(translated != ToVulkanBit(kAllStages[j]));
-        }
+    // Zero is a legal stage mask meaning "no synchronisation", so a row accidentally left at
+    // zero is not something Vulkan would reject -- it is a synchronisation hole. Kept as one
+    // assertion per enumerator, and that is not an inconsistency with the line above: these
+    // are fifteen independent facts, one per row, where the pairs were one property asserted
+    // 105 times.
+    for (const PipelineStage stage : kAllStages) {
+        CHECK((ToVulkanBit(stage) == 0) == (stage == PipelineStage::None));
     }
 }
 
 TEST_CASE("no two accesses map to one Vulkan bit, and only None maps to zero") {
-    for (Monarc::usize i = 0; i < std::size(kAllAccesses); ++i) {
-        const VkAccessFlags2 translated = ToVulkanBit(kAllAccesses[i]);
-        CHECK((translated == 0) == (kAllAccesses[i] == Access::None));
-        for (Monarc::usize j = i + 1; j < std::size(kAllAccesses); ++j) {
-            CHECK(translated != ToVulkanBit(kAllAccesses[j]));
-        }
+    // The stage case's note applies unchanged: the round trip detects a duplicate, this names
+    // the pair, and nine of the eighteen rows are unpinned by the spot checks above.
+    CHECK(FirstCollision(kAllAccesses, [](Access access) {
+              return ToVulkanBit(access);
+          }).View() == kNoCollision);
+
+    for (const Access access : kAllAccesses) {
+        CHECK((ToVulkanBit(access) == 0) == (access == Access::None));
     }
 }
 
@@ -223,11 +271,14 @@ TEST_CASE("each texture layout maps to the Vulkan layout that means the same thi
     CHECK(ToVulkan(TextureLayout::TransferDestination) ==
           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
-    for (Monarc::usize i = 0; i < std::size(kAllLayouts); ++i) {
-        for (Monarc::usize j = i + 1; j < std::size(kAllLayouts); ++j) {
-            CHECK(ToVulkan(kAllLayouts[i]) != ToVulkan(kAllLayouts[j]));
-        }
-    }
+    // **No distinctness assertion here, and its 28-comparison loop was deleted rather than
+    // collapsed.** The eight `CHECK`s above are exhaustive over `kAllLayouts` and pin each
+    // row to a distinct Vulkan layout, so two rows sharing one is already a named failure on
+    // whichever row was changed -- and the round-trip case below catches it a second time.
+    // A third statement of the same fact could not fail without one of those failing first,
+    // which is the category this phase's review pass has been deleting. The two flag sets
+    // keep theirs because their spot checks are not exhaustive; see them for what that line
+    // is for.
 }
 
 TEST_CASE("every stage, access and layout survives a round trip through Vulkan") {
