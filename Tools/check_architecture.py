@@ -17,8 +17,20 @@ SOURCE_SUFFIXES = {".h", ".hpp", ".inl", ".cpp"}
 
 # Rule 4 of Module-Graph.md, generalised: for each tier, the tiers it may NOT
 # reference at source level. Tier 2 is the renderer package boundary (ADR-0007).
+#
+# Keyed by the tier of the module doing the including; the values are *include-path
+# prefixes*, not module names, so a new Tier 1 or Tier 3 module is only policed here once
+# its header prefix is added. Which is why Monarc/Host/ appears below: Monarc.Host.Windowed
+# is Tier 3, and without its prefix this gate would have had nothing that actually exists
+# to forbid -- every other entry names a module Monarc has not written yet.
 FORBIDDEN_INCLUDES = {
-    2: ["Monarc/Reflect/", "Monarc/Serialize/", "Monarc/Assets/", "Monarc/World/"],
+    2: [
+        "Monarc/Reflect/",
+        "Monarc/Serialize/",
+        "Monarc/Assets/",
+        "Monarc/World/",
+        "Monarc/Host/",
+    ],
 }
 
 # Rule 7: platform-conditional compilation is confined to Core/Platform.
@@ -132,6 +144,26 @@ def gate_acyclic(modules: dict) -> Gate:
     return gate
 
 
+def gate_app_leaves(modules: dict) -> Gate:
+    """Rule 8 of Module-Graph.md: nothing may depend on an app.
+
+    monarc_validate_modules() already refuses this at configure time, which is where a
+    developer wants to hear about it. This checks the same rule against the emitted
+    module-graph.json, which is a different thing worth checking: that file is the product
+    `monarc explain` reads, so a stale, hand-edited or otherwise unvalidated graph would
+    otherwise answer "why is this in the export" from a shape CMake never approved.
+    """
+    gate = Gate(12, "apps are graph leaves (nothing depends on an app)")
+    for name, mod in modules.items():
+        for dep in mod["publicDeps"] + mod["privateDeps"]:
+            target = modules.get(dep)
+            # An edge pointing outside the graph is CMake's to reject, not this gate's --
+            # the same division of labour gate 2 uses.
+            if target is not None and target.get("app", False):
+                gate.fail(f"{name} depends on {dep}, which is an app")
+    return gate
+
+
 def gate_package_boundary(modules: dict, root: pathlib.Path) -> Gate:
     gate = Gate(3, "renderer package boundary (tier 2 sees no tier 1 or 3)")
     for name, mod in modules.items():
@@ -165,10 +197,23 @@ def gate_platform_containment(modules: dict, root: pathlib.Path) -> Gate:
 
 
 def gate_layout(modules: dict, root: pathlib.Path) -> Gate:
-    gate = Gate(7, "every module follows the Include/Private layout")
+    gate = Gate(7, "every module has Private/; libraries have Include/ and apps do not")
     for name, mod in modules.items():
         base = root / mod["directory"]
-        if not (base / "Include").is_dir():
+        # An app is a link target, not an interface: nothing may depend on it, so it has no
+        # public headers. Note the direction -- an app is not merely excused from having
+        # Include/, it is forbidden one. An exemption alone would leave a trap: monarc_app()
+        # does not glob an app's Include/, so a header put there would never be compiled,
+        # while these gates would still scan it and police it. A rule that says which of the
+        # two is right has no such gap, and it costs nothing to state.
+        #
+        # `.get` rather than `[...]`: a module-graph.json written before the key existed
+        # still loads, and so do the hand-built graphs in test_check_architecture.py.
+        has_include = (base / "Include").is_dir()
+        if mod.get("app", False):
+            if has_include:
+                gate.fail(f"{name} is an app and must not have {mod['directory']}/Include")
+        elif not has_include:
             gate.fail(f"{name}: missing {mod['directory']}/Include")
         if not (base / "Private").is_dir():
             gate.fail(f"{name}: missing {mod['directory']}/Private")
@@ -186,11 +231,14 @@ def main() -> int:
 
     print(f"Monarc architecture gates | {len(modules)} module(s) | engine {graph['engineVersion']}")
 
+    # Reported in gate-number order, so the output reads as a checklist rather than as
+    # whatever order the functions happen to be defined in.
     gates = [
         gate_acyclic(modules),
         gate_package_boundary(modules, root),
         gate_layout(modules, root),
         gate_platform_containment(modules, root),
+        gate_app_leaves(modules),
     ]
 
     results = [g.report() for g in gates]

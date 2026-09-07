@@ -27,8 +27,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import check_architecture as ca  # noqa: E402
 
 
-def module(name, tier=0, kind="Runtime", directory="M", public=None, private=None):
-    return {
+def module(name, tier=0, kind="Runtime", directory="M", public=None, private=None, app=None):
+    entry = {
         "name": name,
         "kind": kind,
         "tier": tier,
@@ -36,6 +36,12 @@ def module(name, tier=0, kind="Runtime", directory="M", public=None, private=Non
         "publicDeps": public or [],
         "privateDeps": private or [],
     }
+    # Omitted rather than defaulted to False, deliberately: most fixtures then have the
+    # shape of a module-graph.json written before "app" existed, so every gate that reads
+    # the key is exercised against a graph that does not carry it.
+    if app is not None:
+        entry["app"] = app
+    return entry
 
 
 def graph(*modules):
@@ -123,6 +129,52 @@ class TestAcyclic(FixtureTest):
         self.assertGatePasses(ca.gate_acyclic(graph(module("X", public=["Nonexistent"]))))
 
 
+class TestAppLeaves(FixtureTest):
+    def test_a_graph_with_no_apps_passes(self):
+        self.assertGatePasses(ca.gate_app_leaves(graph(module("A", public=["B"]), module("B"))))
+
+    def test_an_app_depending_on_modules_is_accepted(self):
+        # An app is a leaf, not an island: linking the graph together is its entire job,
+        # and Monarc.FirstLight exists precisely to depend on four modules at once.
+        g = graph(
+            module("Monarc.FirstLight", tier=3, directory="F", app=True,
+                   public=["Monarc.RHI", "Monarc.Host.Windowed"]),
+            module("Monarc.RHI", tier=2, directory="R"),
+            module("Monarc.Host.Windowed", tier=3, directory="H"),
+        )
+        self.assertGatePasses(ca.gate_app_leaves(g))
+
+    def test_a_module_publicly_depending_on_an_app_is_rejected(self):
+        g = graph(
+            module("Monarc.RHI", tier=2, directory="R", public=["Monarc.FirstLight"]),
+            module("Monarc.FirstLight", tier=3, directory="F", app=True),
+        )
+        self.assertGateFails(ca.gate_app_leaves(g), "Monarc.FirstLight")
+
+    def test_a_module_privately_depending_on_an_app_is_rejected(self):
+        # Both dependency kinds are edges. Checking only publicDeps would miss this.
+        g = graph(
+            module("Monarc.RHI", tier=2, directory="R", private=["Monarc.FirstLight"]),
+            module("Monarc.FirstLight", tier=3, directory="F", app=True),
+        )
+        self.assertGateFails(ca.gate_app_leaves(g), "Monarc.FirstLight")
+
+    def test_one_app_depending_on_another_app_is_rejected(self):
+        # Being an app is not a licence to link one: it is still a second main().
+        g = graph(module("A", app=True, public=["B"]), module("B", app=True))
+        self.assertGateFails(ca.gate_app_leaves(g), "B")
+
+    def test_a_dependency_on_an_undeclared_module_is_ignored_here(self):
+        # CMake rejects unknown dependencies at configure time; this gate must not crash
+        # on an edge pointing outside the graph. Same division of labour as gate 2.
+        self.assertGatePasses(ca.gate_app_leaves(graph(module("X", public=["Absent"]))))
+
+    def test_a_graph_written_before_the_app_key_existed_passes(self):
+        g = graph(module("A", public=["B"]), module("B"))
+        self.assertNotIn("app", g["B"])
+        self.assertGatePasses(ca.gate_app_leaves(g))
+
+
 class TestPackageBoundary(FixtureTest):
     def _tier2_with_include(self, include_line):
         self.tree.mkdir("R/Include")
@@ -146,8 +198,21 @@ class TestPackageBoundary(FixtureTest):
             self._tier2_with_include('#include <Monarc/Reflect/Type.h>'), "Monarc/Reflect/"
         )
 
+    def test_tier2_including_a_tier3_host_header_fails(self):
+        # The first entry in the forbidden list naming a module that exists. Monarc.RHI
+        # and Monarc.RHI.Vulkan are Tier 2 and Monarc.Host.Windowed is Tier 3, so this is
+        # the direction gate 3 can finally be made to fail in on purpose.
+        self.assertGateFails(
+            self._tier2_with_include('#include <Monarc/Host/Window.h>'), "Monarc/Host/"
+        )
+
     def test_tier2_including_core_passes(self):
         self.assertGatePasses(self._tier2_with_include('#include <Monarc/Core/Types.h>'))
+
+    def test_tier2_including_another_tier2_header_passes(self):
+        # Monarc.RHI.Vulkan includes Monarc/RHI/ headers by design: ADR-0007 puts Tier 2
+        # modules inside one package, and it is Tier 1 and Tier 3 that are out of bounds.
+        self.assertGatePasses(self._tier2_with_include('#include <Monarc/RHI/Types.h>'))
 
     def test_a_forbidden_name_in_a_comment_is_not_an_include(self):
         # Only #include lines count. A mention in prose must not fail the gate.
@@ -176,9 +241,46 @@ class TestLayout(FixtureTest):
         self.assertGatePasses(ca.gate_layout(graph(module("M", directory="M")), self.tree.root))
 
     def test_missing_include_fails(self):
+        # The fixture carries no "app" key at all, so this also covers the absent-key path
+        # through the exemption below.
         self.tree.mkdir("M/Private")
         self.assertGateFails(
             ca.gate_layout(graph(module("M", directory="M")), self.tree.root), "Include"
+        )
+
+    def test_a_module_explicitly_marked_not_an_app_still_needs_include(self):
+        self.tree.mkdir("M/Private")
+        self.assertGateFails(
+            ca.gate_layout(graph(module("M", directory="M", app=False)), self.tree.root),
+            "Include",
+        )
+
+    def test_an_app_needs_no_include_directory(self):
+        # Nothing may depend on an app, so it has no public interface to expose. Requiring
+        # Include/ of it would mean an empty directory existing purely to satisfy a gate.
+        self.tree.mkdir("A/Private")
+        self.assertGatePasses(
+            ca.gate_layout(graph(module("A", directory="A", app=True)), self.tree.root)
+        )
+
+    def test_an_app_without_private_still_fails(self):
+        # Include/ is the only relaxation. An app with no Private/ has no source at all,
+        # which is a broken module however few consumers it has.
+        self.tree.mkdir("A")
+        self.assertGateFails(
+            ca.gate_layout(graph(module("A", directory="A", app=True)), self.tree.root),
+            "Private",
+        )
+
+    def test_an_app_that_has_an_include_directory_fails(self):
+        # Not just unnecessary -- wrong, and quietly so. monarc_app() does not glob an app's
+        # Include/, so a header left there is never compiled while gates 3 and 10 still read
+        # it. Saying an app must not have one closes that gap; merely excusing it does not.
+        self.tree.mkdir("A/Include")
+        self.tree.mkdir("A/Private")
+        self.assertGateFails(
+            ca.gate_layout(graph(module("A", directory="A", app=True)), self.tree.root),
+            "must not have",
         )
 
     def test_missing_private_fails(self):
