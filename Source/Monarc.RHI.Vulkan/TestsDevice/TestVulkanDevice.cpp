@@ -991,7 +991,7 @@ TEST_CASE("a copy is refused unless both resources carry the transfer usage") {
     // `CopyTextureToBuffer` documented the destination's `BufferUsage::TransferDestination` and
     // did not check it, and never mentioned the source's `TextureUsage::TransferSource` at all.
     // Both are `VkImageUsageFlags`/`VkBufferUsageFlags` bits the copy requires --
-    // `VUID-VkCopyImageToBufferInfo2-srcImage-00186` and `VUID-…-dstBuffer-00191` -- and both
+    // `VUID-VkCopyImageToBufferInfo2-srcImage-00186` and `VUID-...-dstBuffer-00191` -- and both
     // stopped the process at exit 3221226505 before the checks went in. Same class of caller
     // mistake as an attachment created without `TextureUsage::ColorAttachment`, which was
     // already a returned Status with a case of its own.
