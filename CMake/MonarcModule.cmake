@@ -26,7 +26,9 @@ endfunction()
 #   * It emits add_executable(), and is marked "app": true in module-graph.json.
 #   * Nothing may depend on it (enforced in monarc_validate_modules). An app is a link
 #     target, not an interface: it has no consumers, so it has no Include/ directory
-#     either, and gate 7 in Tools/check_architecture.py exempts it from having one.
+#     either -- and gate 13 in Tools/check_architecture.py forbids it one rather than
+#     merely excusing its absence, because a header under an app's Include/ is never
+#     globbed here and so would be governed by the other gates while never compiling.
 #
 # Apps stay console-subsystem for now: A3's diagnostics are worth more than a hidden
 # console window.

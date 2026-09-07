@@ -79,6 +79,7 @@ failure, not a judgement.
 | 10 | Platform-conditional compilation appears only in `Monarc.Core/Platform` | [ADR-0012](../Architecture/Decisions/ADR-0012-backend-rollout.md), macOS viability |
 | 11 | A serialized schema migration round-trips older data forward | [Serialization](../Content/Serialization.md) |
 | 12 | Nothing depends on an app: apps are graph leaves | [Module-Graph](../Architecture/Module-Graph.md) rule 8 |
+| 13 | Every module has `Private/`; a library has `Include/` and an app does not | [Module-Graph](../Architecture/Module-Graph.md) rule 9 |
 
 Gates 1, 3, 9, and 10 are the ones that would decay silently. They should be red-green from the
 first week they can be, rather than added once they would already fail.

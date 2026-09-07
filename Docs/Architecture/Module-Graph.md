@@ -106,9 +106,12 @@ enforced:
 - **Nothing may depend on an app** — rule 8 below. An app is where a dependency chain ends,
   not something a chain passes through, and depending on one would mean linking a second
   `main()`.
-- **An app has no `Include/` directory.** It exports nothing, so there is no public header
-  for anyone to include, and the layout gate exempts it from having one rather than
-  accepting an empty directory that exists only to satisfy a gate.
+- **An app has no `Include/` directory** — rule 9 below, and the layout gate *forbids* one
+  rather than merely excusing its absence. An app exports nothing, so there is no public
+  header for anyone to include. Merely exempting it would leave a trap: `monarc_app()` does
+  not glob an app's `Include/`, so a header placed there would never be compiled while the
+  package-boundary and platform-containment gates went on policing it — a file that is
+  simultaneously governed and dead.
 
 | App | Kind | Tier | Depends on | Responsibility |
 |---|---|---|---|---|
@@ -155,21 +158,24 @@ These are build failures or test failures, not conventions:
 1. **Acyclic.** The module graph has no cycles.
 2. **Downward only.** A module may not depend on a higher tier.
 3. **Kind containment.** A `Runtime` module may not depend on a `Tool` or `Editor` module.
-4. **Renderer package boundary.** No Tier 2 translation unit may include a header from
-   `Monarc.World` or `Monarc.Assets`.
+4. **Renderer package boundary.** No Tier 2 translation unit may include a header from a
+   Tier 1 or Tier 3 module — today `Monarc.World`, `Monarc.Assets` and
+   `Monarc.Host.Windowed`.
 5. **Headless purity.** The headless host binary contains no RHI or graphics-API symbols.
 6. **Export purity.** A shipped game binary contains no `Monarc::Editor` or `Monarc::Cook`
    symbols.
 7. **Platform containment.** Platform-conditional compilation appears only in
    `Monarc.Core/Platform`.
 8. **Apps are leaves.** No module may list an app in `PUBLIC_DEPS` or `PRIVATE_DEPS`.
+9. **Layout.** Every module has a `Private/` directory; a library has an `Include/`
+   directory and an app does not.
 
 Rules 4, 5, 6, and 7 are the ones that would decay silently without automation, so they are
 gates in [M0](../Milestones/M0-First-Light.md#verification-gates) rather than later additions.
 
 The two mechanisms divide the rules as follows. `monarc_validate_modules()` refuses rules 2,
 3 and 8 at configure time, which is where a developer wants to hear about them.
-`Tools/check_architecture.py` checks rules 1, 4, 7 and 8 against the emitted
+`Tools/check_architecture.py` checks rules 1, 4, 7, 8 and 9 against the emitted
 `module-graph.json` and the source tree, and runs under `ctest`.
 
 **Rule 8 is the one checked in both places, deliberately.** `module-graph.json` is the

@@ -197,7 +197,13 @@ def gate_platform_containment(modules: dict, root: pathlib.Path) -> Gate:
 
 
 def gate_layout(modules: dict, root: pathlib.Path) -> Gate:
-    gate = Gate(7, "every module has Private/; libraries have Include/ and apps do not")
+    # 13, not 7. This gate was numbered 7 from A1 until A3, which collided with M0's own
+    # gate 7 (world kinds) -- so ctest printed "Gate 7: ... layout" while the milestone's
+    # gate 7 was about something else entirely, and anyone cross-referencing the two got
+    # the wrong rule. M0's verification-gates table is the authority for these numbers;
+    # the layout rule was simply missing from it. Corrected in A3 Task 1, which rewrote
+    # this gate's semantics anyway.
+    gate = Gate(13, "every module has Private/; libraries have Include/ and apps do not")
     for name, mod in modules.items():
         base = root / mod["directory"]
         # An app is a link target, not an interface: nothing may depend on it, so it has no
