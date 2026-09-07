@@ -15,6 +15,15 @@
 // Those are logged at Error and stop nothing. A validation finding is a bug in Monarc's own
 // use of Vulkan, every time.
 //
+// **The narrowing is accepted rather than free, and it has one way to bite.** A finding the
+// layer chose to type GENERAL rather than VALIDATION would be logged at Error and would not
+// stop the process -- the same outcome as the overlay-layer diagnostics, and indistinguishable
+// from them here. Khronos types its findings VALIDATION, so this is a small risk against a
+// certain cost: keying on severity alone would abort on every one of the several GENERAL
+// errors this machine emits per process start, which is a fatal messenger that cannot be run
+// at all. Recorded so the trade is stated rather than assumed; nothing here tests it, because
+// producing a GENERAL-typed validation finding is the layer's choice and not ours to provoke.
+//
 // Release builds create no messenger and load no layers.
 //
 // Almost everything here is a member of VulkanBackend::State rather than of VulkanBackend

@@ -53,6 +53,15 @@ TEST_CASE("a config defaults to the platform's own library and the build's own v
     // asked for a specific library should not be able to read one out of the config either.
     CHECK(config.libraryName == nullptr);
     CHECK(std::string_view(config.applicationName) == "Monarc");
+
+    // Falsifiable only outside Debug, and worth saying so rather than leaving the impression
+    // that this line stands on its own: the member initialiser *is* ValidationDefault(), so in
+    // a Debug build both sides read true whatever the initialiser says. Measured by hardcoding
+    // `bool validation = true;` and running the whole matrix -- msvc-debug and clang-debug
+    // stayed green, and msvc-release, clang-release, clang-asan and clang-ubsan all failed on
+    // this line. So the four non-Debug legs are the mechanism, and no rewriting of the
+    // assertion changes that: in Debug the correct answer and the hardcoded one are the same
+    // answer.
     CHECK(config.validation == Monarc::RHI::ValidationDefault());
 }
 

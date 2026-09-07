@@ -21,13 +21,19 @@ namespace Monarc::RHI::Detail {
 // at run time: `"... for " #name` is a string literal, which is precisely what Error::message
 // (a non-owning view) needs.
 //
-// **There is no device-level list here, and its absence is deliberate rather than an
-// oversight.** Device entry points must be resolved with vkGetDeviceProcAddr against a
-// VkDevice, and Task 2 creates none: the logical device, its queues and command buffers are
-// Task 3's. A third table declared now would be an empty struct nothing populates and nothing
-// reads. Task 3 adds MONARC_VK_DEVICE_FUNCTIONS, a DeviceFunctions table, and
-// vkGetDeviceProcAddr / vkCreateDevice / vkDestroyDevice to the instance list below, which is
-// where they belong -- they are instance-dispatched functions with no caller yet.
+// **Three tables, and no device-level list among them.** Global and instance are split by how
+// they are resolved -- with a null instance before one exists, and against a created
+// VkInstance afterwards. Debug-utils is split off from instance for a different reason: those
+// two are the only entry points in the module whose absence is not an error, so keeping them
+// apart is what lets "everything in this table was found" stay true of the other two.
+//
+// A device table would be the fourth, and its absence is deliberate rather than an oversight.
+// Device entry points must be resolved with vkGetDeviceProcAddr against a VkDevice, and Task 2
+// creates none: the logical device, its queues and command buffers are Task 3's. A fourth
+// table declared now would be an empty struct nothing populates and nothing reads. Task 3 adds
+// MONARC_VK_DEVICE_FUNCTIONS, a DeviceFunctions table, and vkGetDeviceProcAddr /
+// vkCreateDevice / vkDestroyDevice to the instance list below, which is where those three
+// belong -- they are instance-dispatched functions with no caller yet.
 
 /// Resolved through vkGetInstanceProcAddr with a null instance, before any instance exists.
 #define MONARC_VK_GLOBAL_FUNCTIONS(X)                                                      \
