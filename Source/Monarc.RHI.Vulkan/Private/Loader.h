@@ -15,6 +15,24 @@
 
 namespace Monarc::RHI::Detail {
 
+/// Whether a null from a proc-address lookup is a failure.
+///
+/// **Per entry, not per table, and Task 3 is where that stopped being a distinction without a
+/// difference.** Until now "optional" meant "its own table": `VK_EXT_debug_utils` had one, and
+/// with a single optional extension that worked. It does not survive what comes next. Mesh
+/// shading, ray tracing and the swapchain all bring device entry points whose availability
+/// varies *per adapter* -- so on a machine like this one, the same `DeviceFunctions` table is
+/// fully populated for the RTX 3070 Ti and partly populated for the Intel UHD 730, and a table
+/// whose whole identity was "everything in me was found" cannot describe that. Optionality
+/// belongs to the entry point.
+///
+/// So it is declared beside the name, in the lists below, and the resolver reads it. Task 3's
+/// device table is entirely Required and the only Optional entries are the two debug-utils
+/// ones that were already optional -- no machinery is added for extensions that do not exist
+/// yet. What is added is the *shape* that will hold when they do: a new Optional entry is one
+/// word in one list.
+enum class Requirement : u8 { Required, Optional };
+
 // The entry-point lists, as X-macros. Each list is expanded twice -- once to declare a table
 // member and once to resolve it -- so a function appears in exactly one place and the
 // declaration and the lookup cannot drift apart. Stringising the name in the same expansion
@@ -22,47 +40,86 @@ namespace Monarc::RHI::Detail {
 // at run time: `"... for " #name` is a string literal, which is precisely what Error::message
 // (a non-owning view) needs.
 //
-// **Three tables, and no device-level list among them.** Global and instance are split by how
-// they are resolved -- with a null instance before one exists, and against a created
-// VkInstance afterwards. Debug-utils is split off from instance for a different reason: those
-// two are the only entry points in the module whose absence is not an error, so keeping them
-// apart is what lets "everything in this table was found" stay true of the other two.
+// Each entry is `X(name, requirement)`, with `requirement` naming a `Requirement` enumerator
+// above.
 //
-// A device table would be the fourth, and its absence is deliberate rather than an oversight.
-// Device entry points must be resolved with vkGetDeviceProcAddr against a VkDevice, and Task 2
-// creates none: the logical device, its queues and command buffers are Task 3's. A fourth
-// table declared now would be an empty struct nothing populates and nothing reads. Task 3 adds
-// MONARC_VK_DEVICE_FUNCTIONS, a DeviceFunctions table, and vkGetDeviceProcAddr /
-// vkCreateDevice / vkDestroyDevice to the instance list below, which is where those three
-// belong -- they are instance-dispatched functions with no caller yet.
+// **Four tables, split by how and when they are resolved -- no longer by whether a null is
+// fatal.** Global is resolved with a null instance before one exists; instance against a
+// created VkInstance; debug-utils only when the extension was actually enabled; and device
+// against a VkDevice through vkGetDeviceProcAddr, which returns the driver's own function
+// rather than the loader's dispatch trampoline. Those are four genuinely different moments,
+// and that is now the entire reason there are four lists.
+//
+// vkGetDeviceProcAddr and vkCreateDevice are in the *instance* list, because that is what they
+// are: instance-dispatched commands taking a VkPhysicalDevice. vkDestroyDevice is in the
+// device list, though it can be resolved either way -- resolving it against the device it
+// destroys is what keeps every call on a live VkDevice off the trampoline.
 
 /// Resolved through vkGetInstanceProcAddr with a null instance, before any instance exists.
 #define MONARC_VK_GLOBAL_FUNCTIONS(X)                                                      \
-    X(vkEnumerateInstanceVersion)                                                          \
-    X(vkEnumerateInstanceLayerProperties)                                                  \
-    X(vkEnumerateInstanceExtensionProperties)                                              \
-    X(vkCreateInstance)
+    X(vkEnumerateInstanceVersion, Required)                                                \
+    X(vkEnumerateInstanceLayerProperties, Required)                                        \
+    X(vkEnumerateInstanceExtensionProperties, Required)                                    \
+    X(vkCreateInstance, Required)
 
-/// Resolved against a created VkInstance. Every one of these has a caller in Task 2; a
-/// function with no caller does not belong in a table whose only guarantee is that everything
-/// in it was found.
+/// Resolved against a created VkInstance. Every one of these has a caller; a function with no
+/// caller does not belong in a table at all.
 #define MONARC_VK_INSTANCE_FUNCTIONS(X)                                                    \
-    X(vkDestroyInstance)                                                                   \
-    X(vkEnumeratePhysicalDevices)                                                          \
-    X(vkGetPhysicalDeviceProperties2)                                                      \
-    X(vkGetPhysicalDeviceFeatures2)                                                        \
-    X(vkGetPhysicalDeviceQueueFamilyProperties)                                            \
-    X(vkEnumerateDeviceExtensionProperties)
+    X(vkDestroyInstance, Required)                                                         \
+    X(vkEnumeratePhysicalDevices, Required)                                                \
+    X(vkGetPhysicalDeviceProperties2, Required)                                            \
+    X(vkGetPhysicalDeviceFeatures2, Required)                                              \
+    X(vkGetPhysicalDeviceQueueFamilyProperties, Required)                                  \
+    X(vkGetPhysicalDeviceMemoryProperties, Required)                                       \
+    X(vkEnumerateDeviceExtensionProperties, Required)                                      \
+    X(vkCreateDevice, Required)                                                            \
+    X(vkGetDeviceProcAddr, Required)
 
-/// VK_EXT_debug_utils. Resolved best-effort and kept in its own table, because these two are
-/// the only entry points in the module whose absence is not an error: a machine with no
-/// Vulkan SDK has no validation layer and no debug-utils extension, and the plan requires
-/// that machine to still run the game.
+/// VK_EXT_debug_utils. Resolved only when the extension was enabled, and Optional even then:
+/// a machine with no Vulkan SDK has no validation layer and no debug-utils extension, and the
+/// plan requires that machine to still run the game.
 #define MONARC_VK_DEBUG_UTILS_FUNCTIONS(X)                                                 \
-    X(vkCreateDebugUtilsMessengerEXT)                                                      \
-    X(vkDestroyDebugUtilsMessengerEXT)
+    X(vkCreateDebugUtilsMessengerEXT, Optional)                                            \
+    X(vkDestroyDebugUtilsMessengerEXT, Optional)
 
-#define MONARC_VK_DECLARE_TABLE_MEMBER(name) PFN_##name name = nullptr;
+/// Resolved against a created VkDevice through vkGetDeviceProcAddr. All Vulkan 1.3 core --
+/// dynamic rendering, synchronization2, timeline semaphores and copy_commands2 are all
+/// promoted, so Monarc enables no device extension at all and every name here is Required.
+#define MONARC_VK_DEVICE_FUNCTIONS(X)                                                      \
+    X(vkDestroyDevice, Required)                                                           \
+    X(vkGetDeviceQueue, Required)                                                          \
+    X(vkDeviceWaitIdle, Required)                                                          \
+    X(vkCreateSemaphore, Required)                                                         \
+    X(vkDestroySemaphore, Required)                                                        \
+    X(vkGetSemaphoreCounterValue, Required)                                                \
+    X(vkWaitSemaphores, Required)                                                          \
+    X(vkQueueSubmit2, Required)                                                            \
+    X(vkCreateCommandPool, Required)                                                       \
+    X(vkDestroyCommandPool, Required)                                                      \
+    X(vkResetCommandPool, Required)                                                        \
+    X(vkAllocateCommandBuffers, Required)                                                  \
+    X(vkBeginCommandBuffer, Required)                                                      \
+    X(vkEndCommandBuffer, Required)                                                        \
+    X(vkCmdPipelineBarrier2, Required)                                                     \
+    X(vkCmdBeginRendering, Required)                                                       \
+    X(vkCmdEndRendering, Required)                                                         \
+    X(vkCmdCopyImageToBuffer2, Required)                                                   \
+    X(vkCreateImage, Required)                                                             \
+    X(vkDestroyImage, Required)                                                            \
+    X(vkCreateImageView, Required)                                                         \
+    X(vkDestroyImageView, Required)                                                        \
+    X(vkGetImageMemoryRequirements, Required)                                              \
+    X(vkBindImageMemory, Required)                                                         \
+    X(vkCreateBuffer, Required)                                                            \
+    X(vkDestroyBuffer, Required)                                                           \
+    X(vkGetBufferMemoryRequirements, Required)                                             \
+    X(vkBindBufferMemory, Required)                                                        \
+    X(vkAllocateMemory, Required)                                                          \
+    X(vkFreeMemory, Required)                                                              \
+    X(vkMapMemory, Required)                                                               \
+    X(vkUnmapMemory, Required)
+
+#define MONARC_VK_DECLARE_TABLE_MEMBER(name, requirement) PFN_##name name = nullptr;
 
 struct GlobalFunctions {
     MONARC_VK_GLOBAL_FUNCTIONS(MONARC_VK_DECLARE_TABLE_MEMBER)
@@ -74,6 +131,20 @@ struct InstanceFunctions {
 
 struct DebugUtilsFunctions {
     MONARC_VK_DEBUG_UTILS_FUNCTIONS(MONARC_VK_DECLARE_TABLE_MEMBER)
+};
+
+/// One logical device's entry points.
+///
+/// **Not a member of `Loader`, unlike the other three, and the reason is arithmetic.** A
+/// process has one Vulkan runtime and one instance, so one table each is right. It can have as
+/// many logical devices as it has adapters -- two on this machine, and Task 3's device tests
+/// create one on each in turn -- and a device-dispatched function pointer is only valid for the
+/// device it was resolved against. A table on the Loader would hold whichever device was
+/// created last. So each device owns its own, and `Loader::LoadDeviceFunctions` fills one the
+/// caller supplies. (`Private/Loader.h`'s Task 2 comment anticipated a fourth table *on the
+/// Loader*; that part of it was wrong and this is the correction.)
+struct DeviceFunctions {
+    MONARC_VK_DEVICE_FUNCTIONS(MONARC_VK_DECLARE_TABLE_MEMBER)
 };
 
 #undef MONARC_VK_DECLARE_TABLE_MEMBER
@@ -154,9 +225,21 @@ public:
     [[nodiscard]] bool IsOpen() const { return m_library.IsOpen(); }
 
     /// Resolves the instance-level entry points against `instance`. When `debugUtilsEnabled`,
-    /// also resolves the debug-utils pair, best-effort: their absence leaves
+    /// also resolves the debug-utils pair, whose entries are Optional: their absence leaves
     /// `HasDebugUtilsFunctions()` false and is not a failure.
     [[nodiscard]] Status LoadInstanceFunctions(VkInstance instance, bool debugUtilsEnabled);
+
+    /// Resolves `device`'s entry points into `out`, through `vkGetDeviceProcAddr`.
+    ///
+    /// `out` is filled rather than stored, for the reason `DeviceFunctions` gives: a table is
+    /// valid only for the device it was resolved against, and a process can have several
+    /// devices at once. `out` is cleared first, and cleared again if any Required entry is
+    /// missing -- so a partially resolved table never leaves this function, exactly as
+    /// `LoadInstanceFunctions` promises of its own.
+    ///
+    /// `const`, because it writes nothing on the Loader: the only thing it reads is
+    /// `vkGetDeviceProcAddr` out of the instance table.
+    [[nodiscard]] Status LoadDeviceFunctions(VkDevice device, DeviceFunctions& out) const;
 
     [[nodiscard]] const GlobalFunctions&     Global() const { return m_global; }
     [[nodiscard]] const InstanceFunctions&   Instance() const { return m_instance; }

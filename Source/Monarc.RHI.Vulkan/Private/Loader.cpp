@@ -38,6 +38,38 @@ template <typename Function>
 
 }  // namespace
 
+// Resolves one entry point into `table`, and for a Required one reports and returns if the
+// lookup came back null.
+//
+// **One body, four call sites.** Task 2 shipped two near-identical copies of this and said
+// plainly that a third -- the device table -- was the point at which parameterising paid.
+// This is that. The copies differed in exactly the things that are parameters here: which
+// table to write, how to look a name up, what to call the resolver in a message, where the
+// lookup happened, what to put in the log line beside it, and what to clear on the way out.
+//
+// `requirement` is a `Requirement` enumerator's *name*, so `Requirement::requirement` names
+// the value and `if constexpr` folds the whole guard away for an Optional entry. Not a plain
+// `if`: MSVC's C4127 ("conditional expression is constant") is on at /W4 and /WX makes it
+// fatal, so a runtime comparison of two constants would not build.
+//
+// The message stays a string literal, assembled entirely from `#name` and the two literal
+// parameters, because `Error::message` is a non-owning view -- see Loader::Open. `context` is
+// the one thing that may be a runtime value, and it goes only to the log.
+#define MONARC_VK_RESOLVE_ENTRY(table, resolve, name, requirement, resolverName, where,     \
+                                context, onFailure)                                         \
+    (table).name = reinterpret_cast<PFN_##name>(resolve(#name));                            \
+    if constexpr (Requirement::requirement == Requirement::Required) {                      \
+        if ((table).name == nullptr) {                                                      \
+            MONARC_LOG(VulkanLoader, Warning,                                               \
+                       resolverName " returned null for " #name " " where " | {}", context);\
+            onFailure;                                                                      \
+            return Err(ErrorCode::NotFound,                                                 \
+                       resolverName " returned null for " #name " " where                   \
+                       ": this Vulkan implementation does not provide an entry point "      \
+                       "Monarc requires");                                                  \
+        }                                                                                   \
+    }
+
 Loader::Loader(Loader&& other) noexcept
     : m_library(std::move(other.m_library)),
       m_getInstanceProcAddr(other.m_getInstanceProcAddr),
@@ -97,20 +129,17 @@ Result<Loader> Loader::Open(StringView libraryName) {
                    "not a Vulkan runtime library");
     }
 
-    // Every global entry point is required, and there is no partial success: a table with a
+    // Every global entry point is Required, and there is no partial success: a table with a
     // null left in it turns a missing function into a crash at the first call site, which is
-    // strictly worse than a Result naming it here.
-#define MONARC_VK_RESOLVE_GLOBAL(name)                                                      \
-    loader.m_global.name = reinterpret_cast<PFN_##name>(                                    \
-        loader.m_getInstanceProcAddr(VK_NULL_HANDLE, #name));                               \
-    if (loader.m_global.name == nullptr) {                                                   \
-        MONARC_LOG(VulkanLoader, Warning,                                                   \
-                   "\"{}\" opened but vkGetInstanceProcAddr returned null for " #name,      \
-                   libraryName);                                                            \
-        return Err(ErrorCode::NotFound,                                                     \
-                   "vkGetInstanceProcAddr returned null for " #name                         \
-                   ": this Vulkan loader does not provide an entry point Monarc requires");  \
-    }
+    // strictly worse than a Result naming it here. Nothing to clear on the way out, because
+    // the Loader being filled is a local that is only returned once every name resolved.
+    const auto resolveGlobal = [&loader](const char* name) {
+        return loader.m_getInstanceProcAddr(VK_NULL_HANDLE, name);
+    };
+#define MONARC_VK_RESOLVE_GLOBAL(name, requirement)                                        \
+    MONARC_VK_RESOLVE_ENTRY(loader.m_global, resolveGlobal, name, requirement,             \
+                            "vkGetInstanceProcAddr", "before any instance exists",         \
+                            libraryName, (void)0)
 
     MONARC_VK_GLOBAL_FUNCTIONS(MONARC_VK_RESOLVE_GLOBAL)
 #undef MONARC_VK_RESOLVE_GLOBAL
@@ -137,33 +166,61 @@ Status Loader::LoadInstanceFunctions(VkInstance instance, bool debugUtilsEnabled
     // that has Vulkan, `FirstLight --adapters` exited 0xC0000005, a call through a null
     // function pointer from VulkanBackend::State::Shutdown. Fixed on both sides -- the call
     // site is guarded too -- because the two files are maintained independently.
-#define MONARC_VK_RESOLVE_INSTANCE(name)                                                    \
-    m_instance.name = reinterpret_cast<PFN_##name>(m_getInstanceProcAddr(instance, #name)); \
-    if (m_instance.name == nullptr) {                                                       \
-        MONARC_LOG(VulkanLoader, Warning,                                                   \
-                   "vkGetInstanceProcAddr returned null for " #name " on a created "        \
-                   "instance");                                                             \
-        m_instance = InstanceFunctions{};                                                    \
-        return Err(ErrorCode::NotFound,                                                     \
-                   "vkGetInstanceProcAddr returned null for " #name                         \
-                   " on a created instance: this Vulkan implementation does not provide an " \
-                   "entry point Monarc requires");                                          \
-    }
+    const auto resolveInstance = [this, instance](const char* name) {
+        return m_getInstanceProcAddr(instance, name);
+    };
+#define MONARC_VK_RESOLVE_INSTANCE(name, requirement)                                      \
+    MONARC_VK_RESOLVE_ENTRY(m_instance, resolveInstance, name, requirement,                \
+                            "vkGetInstanceProcAddr", "on a created instance", "instance",  \
+                            m_instance = InstanceFunctions{})
 
     MONARC_VK_INSTANCE_FUNCTIONS(MONARC_VK_RESOLVE_INSTANCE)
 #undef MONARC_VK_RESOLVE_INSTANCE
 
-    // Best-effort, and the only table in this file where a null is acceptable. A machine with
-    // no Vulkan SDK has no VK_EXT_debug_utils, and the plan is explicit that such a machine
-    // still runs the game -- so these are resolved without being required, and callers ask
-    // HasDebugUtilsFunctions() rather than assuming.
-#define MONARC_VK_RESOLVE_DEBUG_UTILS(name)                                                 \
-    m_debugUtils.name = reinterpret_cast<PFN_##name>(m_getInstanceProcAddr(instance, #name));
+    // The two Optional entries in the module. A machine with no Vulkan SDK has no
+    // VK_EXT_debug_utils, and the plan is explicit that such a machine still runs the game --
+    // so a null here is not a failure, and callers ask HasDebugUtilsFunctions() rather than
+    // assuming. The same macro handles it: `Optional` folds the guard away entirely, so this
+    // expansion is the assignment and nothing else.
+#define MONARC_VK_RESOLVE_DEBUG_UTILS(name, requirement)                                   \
+    MONARC_VK_RESOLVE_ENTRY(m_debugUtils, resolveInstance, name, requirement,              \
+                            "vkGetInstanceProcAddr", "on a created instance", "instance",  \
+                            (void)0)
 
     if (debugUtilsEnabled) {
         MONARC_VK_DEBUG_UTILS_FUNCTIONS(MONARC_VK_RESOLVE_DEBUG_UTILS)
     }
 #undef MONARC_VK_RESOLVE_DEBUG_UTILS
+
+    return {};
+}
+
+Status Loader::LoadDeviceFunctions(VkDevice device, DeviceFunctions& out) const {
+    out = DeviceFunctions{};
+
+    if (m_instance.vkGetDeviceProcAddr == nullptr) {
+        // The instance table is resolved before any device is created, so reaching this means
+        // a caller asked for a device table without one -- InvalidArgument rather than
+        // NotFound, because the entry point is not missing from the implementation, it was
+        // never looked up.
+        return Err(ErrorCode::InvalidArgument,
+                   "Loader::LoadDeviceFunctions called before the instance entry points were "
+                   "resolved");
+    }
+    if (device == VK_NULL_HANDLE) {
+        return Err(ErrorCode::InvalidArgument,
+                   "Loader::LoadDeviceFunctions called with a null VkDevice");
+    }
+
+    const auto resolveDevice = [this, device](const char* name) {
+        return m_instance.vkGetDeviceProcAddr(device, name);
+    };
+#define MONARC_VK_RESOLVE_DEVICE(name, requirement)                                        \
+    MONARC_VK_RESOLVE_ENTRY(out, resolveDevice, name, requirement, "vkGetDeviceProcAddr",  \
+                            "on a created device", "device", out = DeviceFunctions{})
+
+    MONARC_VK_DEVICE_FUNCTIONS(MONARC_VK_RESOLVE_DEVICE)
+#undef MONARC_VK_RESOLVE_DEVICE
 
     return {};
 }

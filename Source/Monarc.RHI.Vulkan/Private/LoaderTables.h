@@ -30,16 +30,27 @@ namespace Monarc::RHI::Detail {
 /// being touched.
 [[nodiscard]] inline bool AllTablesEmpty(const Loader& loader) {
     bool empty = true;
-#define MONARC_VK_CHECK_NULL(name) empty = empty && loader.Global().name == nullptr;
+#define MONARC_VK_CHECK_NULL(name, requirement) \
+    empty = empty && loader.Global().name == nullptr;
     MONARC_VK_GLOBAL_FUNCTIONS(MONARC_VK_CHECK_NULL)
 #undef MONARC_VK_CHECK_NULL
-#define MONARC_VK_CHECK_NULL(name) empty = empty && loader.Instance().name == nullptr;
+#define MONARC_VK_CHECK_NULL(name, requirement) \
+    empty = empty && loader.Instance().name == nullptr;
     MONARC_VK_INSTANCE_FUNCTIONS(MONARC_VK_CHECK_NULL)
 #undef MONARC_VK_CHECK_NULL
-#define MONARC_VK_CHECK_NULL(name) empty = empty && loader.DebugUtils().name == nullptr;
+#define MONARC_VK_CHECK_NULL(name, requirement) \
+    empty = empty && loader.DebugUtils().name == nullptr;
     MONARC_VK_DEBUG_UTILS_FUNCTIONS(MONARC_VK_CHECK_NULL)
 #undef MONARC_VK_CHECK_NULL
     return empty;
 }
+
+// There is deliberately no `AllDeviceFunctionsResolved` beside this, though the symmetry
+// invites one. A `DeviceFunctions` table belongs to a `VulkanDeviceState`, which is private to
+// VulkanDevice.cpp, so no test can reach one to assert over -- and a helper with no caller is
+// what this module's own comments say does not belong in it. What covers that table instead is
+// that every one of its thirty-two entries has a caller on the readback path in
+// TestsDevice/TestVulkanDevice.cpp: an entry point silently skipped by a resolver that returned
+// success is a null call through it, not a quiet pass.
 
 }  // namespace Monarc::RHI::Detail
