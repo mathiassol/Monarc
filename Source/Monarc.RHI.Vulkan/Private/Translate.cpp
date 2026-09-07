@@ -68,4 +68,18 @@ const char* ToString(VkResult result) {
     }
 }
 
+ErrorCode ToErrorCode(VkResult result) {
+    switch (result) {
+        // "This implementation does not have it", every one of them -- see Translate.h. The
+        // hand-written paths in VulkanBackend.cpp already reach for Unsupported when they
+        // discover a missing layer or extension by *asking*; these are the same discoveries
+        // arriving as a VkResult, and the funnel used to flatten them to BackendFailure.
+        case VK_ERROR_INCOMPATIBLE_DRIVER:
+        case VK_ERROR_LAYER_NOT_PRESENT:
+        case VK_ERROR_EXTENSION_NOT_PRESENT: return ErrorCode::Unsupported;
+
+        default:                             return ErrorCode::BackendFailure;
+    }
+}
+
 }  // namespace Monarc::RHI::Detail

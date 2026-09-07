@@ -1,5 +1,6 @@
 #pragma once
 
+#include <Monarc/Core/Error.h>
 #include <Monarc/Core/Types.h>
 #include <Monarc/RHI/Capabilities.h>
 #include <Monarc/RHI/Types.h>
@@ -59,5 +60,28 @@ namespace Monarc::RHI::Detail {
 /// something new is added -- Tasks 3 and 4 bring `VK_ERROR_DEVICE_LOST`,
 /// `VK_ERROR_OUT_OF_DATE_KHR` and `VK_SUBOPTIMAL_KHR` with them.
 [[nodiscard]] const char* ToString(VkResult result);
+
+/// The `ErrorCode` a failed Vulkan call deserves.
+///
+/// **Three results mean "the capability is absent", not "the API refused a legitimate
+/// call".** `Monarc/Core/Error.h` draws that line itself: `Unsupported` means asking
+/// differently might work, where `BackendFailure` means the call was fine and the
+/// implementation said no. `VK_ERROR_INCOMPATIBLE_DRIVER`, `VK_ERROR_LAYER_NOT_PRESENT` and
+/// `VK_ERROR_EXTENSION_NOT_PRESENT` are all the first meaning, and the first of the three is
+/// the standard outcome of `vkCreateInstance` on a machine that has `vulkan-1.dll` and no
+/// registered ICD -- which is what a CI runner most plausibly is. Branchability is the whole
+/// stated reason `BackendFailure` exists, so a caller written to fall back on `Unsupported`
+/// must fire on the result that most deserves it.
+///
+/// Everything else is `BackendFailure`, `VK_ERROR_OUT_OF_HOST_MEMORY` included: Monarc's
+/// `OutOfMemory` means *Monarc's* allocator returned nothing, and a driver's heap running out
+/// is a different fact that a caller would handle differently. The message stays the
+/// `VkResult`'s own spelling either way -- `ToString` above -- so nothing about what a report
+/// says changes with the code.
+///
+/// A `default` rather than an exhaustive switch, for `ToString`'s reason: `VkResult` has well
+/// over a hundred enumerators and three hundred cases would be a claim of completeness
+/// nothing verifies.
+[[nodiscard]] ErrorCode ToErrorCode(VkResult result);
 
 }  // namespace Monarc::RHI::Detail

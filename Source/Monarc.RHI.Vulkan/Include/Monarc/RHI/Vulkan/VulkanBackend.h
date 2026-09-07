@@ -109,9 +109,11 @@ public:
     /// returns, so a failed `Create` leaves the allocator exactly as it found it. Failures
     /// are `ErrorCode::OutOfMemory` (the allocator returned nothing), `ErrorCode::NotFound`
     /// (no Vulkan runtime, or a missing entry point), `ErrorCode::Unsupported` (the loader or
-    /// a required extension is too old or absent) or `ErrorCode::BackendFailure` (a Vulkan
-    /// call returned an error, whose spelling is the message and whose numeric value is in
-    /// the log line beside it).
+    /// a required extension is too old or absent, **or** a Vulkan call reported that a driver,
+    /// layer or extension is not there -- `VK_ERROR_INCOMPATIBLE_DRIVER` and its two
+    /// neighbours) or `ErrorCode::BackendFailure` (any other Vulkan error). For both of the
+    /// last two the message is the `VkResult`'s own spelling and its numeric value is in the
+    /// log line beside it; the code is what says which kind of answer it is.
     [[nodiscard]] static Result<VulkanBackend> Create(IAllocator&   allocator,
                                                       const Config& config);
 

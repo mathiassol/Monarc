@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <Monarc/Core/Error.h>
 #include <Monarc/RHI/Capabilities.h>
 #include <Monarc/RHI/Types.h>
 
@@ -14,6 +15,7 @@ using Monarc::RHI::Format;
 using Monarc::RHI::Detail::FromVulkan;
 using Monarc::RHI::Detail::ToApiVersion;
 using Monarc::RHI::Detail::ToDeviceType;
+using Monarc::RHI::Detail::ToErrorCode;
 using Monarc::RHI::Detail::ToVulkan;
 
 namespace {
@@ -200,4 +202,32 @@ TEST_CASE("a VkResult outside Monarc's table says so rather than guessing") {
     // calls cannot, so it is deliberately absent from the table today. Pinned here so that
     // adding it is a visible change to this case rather than a silent one.
     CHECK(std::string_view(ToString(VK_ERROR_DEVICE_LOST)) == unknown);
+}
+
+TEST_CASE("a result meaning the capability is absent is Unsupported, not BackendFailure") {
+    // The distinction Monarc/Core/Error.h draws: Unsupported means asking differently might
+    // work, BackendFailure means the call was legitimate and the API refused it. All three
+    // below are the first, and VK_ERROR_INCOMPATIBLE_DRIVER is the one that matters most --
+    // it is what vkCreateInstance returns on a machine with vulkan-1.dll and no registered
+    // ICD, which is plausibly the CI runner's exact state. Branchability is the whole reason
+    // BackendFailure exists, so a caller falling back on Unsupported must fire here.
+    CHECK(ToErrorCode(VK_ERROR_INCOMPATIBLE_DRIVER) == Monarc::ErrorCode::Unsupported);
+    CHECK(ToErrorCode(VK_ERROR_LAYER_NOT_PRESENT) == Monarc::ErrorCode::Unsupported);
+    CHECK(ToErrorCode(VK_ERROR_EXTENSION_NOT_PRESENT) == Monarc::ErrorCode::Unsupported);
+}
+
+TEST_CASE("every other result the backend can receive stays BackendFailure") {
+    // Including the two out-of-memory results, deliberately: Monarc's OutOfMemory means
+    // *Monarc's* allocator returned nothing -- which is what a failed VulkanBackend::Create
+    // reports for its own State -- and a driver heap running out is a different fact a caller
+    // would handle differently. Conflating them would make one code mean two things.
+    CHECK(ToErrorCode(VK_ERROR_OUT_OF_HOST_MEMORY) == Monarc::ErrorCode::BackendFailure);
+    CHECK(ToErrorCode(VK_ERROR_OUT_OF_DEVICE_MEMORY) == Monarc::ErrorCode::BackendFailure);
+    CHECK(ToErrorCode(VK_ERROR_INITIALIZATION_FAILED) == Monarc::ErrorCode::BackendFailure);
+
+    // And a result the table has never heard of. The fallback must not quietly become
+    // Unsupported, which would tell a caller a capability was missing on the strength of a
+    // number nobody recognised.
+    CHECK(ToErrorCode(static_cast<VkResult>(-987654)) == Monarc::ErrorCode::BackendFailure);
+    CHECK(ToErrorCode(VK_ERROR_DEVICE_LOST) == Monarc::ErrorCode::BackendFailure);
 }

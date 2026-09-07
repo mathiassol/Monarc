@@ -268,10 +268,21 @@ struct VulkanBackend::State {
     ///
     /// Not a member of this struct out of necessity any more -- it needs nothing from it --
     /// but left here so every failure the bring-up produces is spelled in one place.
-    [[nodiscard]] std::unexpected<Error> FailVk(const char* operation, VkResult result) {
-        MONARC_LOG(Vulkan, Warning, "{} failed: {} ({})", operation, Detail::ToString(result),
-                   static_cast<i32>(result));
-        return Err(ErrorCode::BackendFailure, Detail::ToString(result));
+    ///
+    /// **The code is `Detail::ToErrorCode(result)` and not a flat `BackendFailure`.** Three
+    /// results mean the capability is absent rather than the call refused, and
+    /// `VK_ERROR_INCOMPATIBLE_DRIVER` from `vkCreateInstance` -- a machine with `vulkan-1.dll`
+    /// and no registered ICD -- is the one a caller most wants to branch on. Translate.h has
+    /// the reasoning and Tests/TestVulkanTranslate.cpp pins the mapping.
+    ///
+    /// `phase` is a literal suffix distinguishing the two calls of a count-then-fill pair in
+    /// the log line, and it can only be a literal: nothing on this path formats a string,
+    /// because `Error::message` is a non-owning view.
+    [[nodiscard]] std::unexpected<Error> FailVk(const char* operation, VkResult result,
+                                                const char* phase = "") {
+        MONARC_LOG(Vulkan, Warning, "{}{} failed: {} ({})", operation, phase,
+                   Detail::ToString(result), static_cast<i32>(result));
+        return Err(Detail::ToErrorCode(result), Detail::ToString(result));
     }
 
     [[nodiscard]] Status BringUp(const Config& config);
