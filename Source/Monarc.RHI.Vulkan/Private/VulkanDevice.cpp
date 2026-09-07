@@ -352,6 +352,30 @@ Result<u64> VulkanQueue::Submit(ICommandList& commands) {
                    "IQueue::Submit was given a command list that has recorded nothing since "
                    "BeginFrame; call Begin and End first");
     }
+    if (list->IsSubmitted()) {
+        // **The third condition, and the one the two above cannot express.** A submitted list
+        // is still recorded -- the recording in its buffer is the one this queue took -- so
+        // `IsRecorded()` says yes and `IsRecording()` says no, exactly as they do for a list
+        // that is ready to go. What has changed is the command buffer: it is *pending*, and
+        // `Begin` records with `VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT`, so once the work
+        // finishes it becomes *invalid* rather than executable again. Neither state may be
+        // submitted, and only `BeginFrame` -- which waits on this slot's timeline value and
+        // resets its pool -- puts the buffer back to initial.
+        //
+        // Measured, on this machine, before the guard: `BeginFrame -> Begin -> End -> Submit
+        // -> Submit` stopped at `VUID-vkQueueSubmit2-commandBuffer-03875` ("is already in use
+        // and is not marked for simultaneous use") and exit 3221226505, and the same sequence
+        // with a `WaitIdle` between the two submissions stopped at
+        // `UNASSIGNED-DrawState-CommandBufferSingleSubmitViolation` ("recorded with
+        // VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT has been submitted 2 times"). **The
+        // second of those is why this is a flag on the list and not a test of the slot's
+        // `timelineValue`**: after a `WaitIdle` nothing is outstanding, so a guard phrased as
+        // "this slot has work in flight" would have let it through. In a build with no
+        // validation layer both exited zero and said nothing.
+        return Err(ErrorCode::InvalidArgument,
+                   "IQueue::Submit was given a command list that has already been submitted; "
+                   "call IDevice::BeginFrame for a fresh one");
+    }
 
     const u64 signalValue = m_state->lastSubmittedValue + 1;
 
@@ -391,6 +415,11 @@ Result<u64> VulkanQueue::Submit(ICommandList& commands) {
     // resetting that slot's pool. The queue is the only thing that knows the value, and the
     // list is the only thing that knows the slot, so this is where the two meet.
     m_state->frames[list->FrameIndex()].timelineValue = signalValue;
+    // Set after the submission succeeded, for the reason `End` sets `m_recorded` after
+    // `vkEndCommandBuffer` succeeded: a `vkQueueSubmit2` the driver rejected took nothing, so
+    // the list is still submittable and marking it otherwise would refuse a retry the caller
+    // is entitled to.
+    list->MarkSubmitted();
     return signalValue;
 }
 

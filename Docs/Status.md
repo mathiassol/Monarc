@@ -1160,6 +1160,98 @@ copy's two usages. The one new device-free case is the memory-location fallback.
 totals, for whoever wants them, are 504 device-free and 350 device-required — but this section
 quotes cases, for the reason the section above it gives.
 
+### A3 Task 3's command list state machine, enumerated
+
+The review above closed four caller mistakes that stopped the process. Two of them had the same
+shape — a list in a state a method did not check — and closing them one at a time was going to
+keep working until Task 4's frame loop found the rest. So the states were written out instead:
+`VulkanCommandList` is in exactly one of **reset, recording, recorded, submitted**, `m_rendering`
+is a sub-state of recording, and detachment is orthogonal to all four. The table, the five
+transitions, and a cell-by-cell account of what each of the seven public methods refuses in each
+state are in `VulkanCommandList`'s class comment in `Private/VulkanDeviceState.h`.
+
+**The enumeration found three holes, not one.** Each was reachable through the public interface
+and each ended the process at a validation error instead of returning a `Status`:
+
+| sequence | Debug, before | Release, before |
+|---|---|---|
+| `BeginFrame → Begin → End → Begin` | `VUID-vkBeginCommandBuffer-commandBuffer-00050`, exit 3221226505 | exited 0, silent, `Begin` returned success |
+| `… → End → Submit → Begin` | `VUID-vkBeginCommandBuffer-commandBuffer-00049`, exit 3221226505 | exited 0, silent, `Begin` returned success |
+| `… → End → Submit → Submit` | `VUID-vkQueueSubmit2-commandBuffer-03875`, exit 3221226505 | exited 0, silent, a timeline value returned |
+| `… → Submit → WaitIdle → Submit` | `UNASSIGNED-DrawState-CommandBufferSingleSubmitViolation`, exit 3221226505 | exited 0, silent, a timeline value returned |
+| `Begin → BeginRendering → Barrier(GlobalBarrier{})` | `VUID-vkCmdPipelineBarrier2-None-09553`, exit 3221226505 | exited 0, silent, the frame submitted and completed |
+
+**The Release column is why these are guards rather than notes.** `ValidationDefault()` is false
+outside Debug, so every one of these was silent undefined behaviour in the configuration that
+ships — the fatal messenger catching them is not a mechanism a Release build has. Each row was
+run on the RTX 3070 Ti, before and after, and the "before" figures above are the runs.
+
+What each hole cost, and what it is now:
+
+- **`Begin` on a recorded list** is a `Status`. `End` leaves the command buffer *executable*, and
+  `vkBeginCommandBuffer` on one of those is an implicit reset, which needs
+  `VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT` — a bit `BringUpDevice` deliberately does not
+  set, because `BeginFrame` resets the whole pool and that is the only reset this design
+  performs. Once the list is also submitted the buffer is *pending* and the same call is a
+  different VUID; `m_recorded` outlives `Submit`, so one guard refuses both. **This is the frame
+  loop that records, submits and comes round again without a fresh `BeginFrame`** — which is
+  what Task 4 is about to write.
+- **`IQueue::Submit` on a submitted list** is a `Status`, carried by a new flag set in `Submit`
+  and cleared in `Reset`. Neither existing check could express it: a submitted list *is*
+  recorded and *is not* recording, so it looks exactly like one that is ready to go. The flag is
+  on the list rather than a test of the frame slot's `timelineValue`, and the `WaitIdle` row
+  above is why — after a wait nothing is outstanding, yet the buffer is *invalid* rather than
+  executable, `Begin` having recorded it with `VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT`.
+- **`Barrier` inside a rendering pass** ends the process, with `MONARC_CHECK` and an
+  unconditional `std::abort()`. `End`, `BeginRendering` and `CopyTextureToBuffer` all refuse
+  mid-pass with a `Status`; the three `Barrier` overloads have no `Status`, so this follows their
+  stale-handle guard instead. Fatal rather than a plain return because `MONARC_CHECK` alters no
+  control flow, and a barrier *skipped* under a handler that declines to break is the
+  synchronisation hole `Monarc/RHI/Device.h` argues about at length. There is no legal call to
+  record in its place: barriers are not permitted inside a dynamic-rendering instance at all,
+  and it was the empty `GlobalBarrier{}` that tripped the VUID — the rule is about the call, not
+  the contents. A pass that needs to read what it wrote is what
+  `VK_KHR_dynamic_rendering_local_read` is for, and this device does not enable it. After the
+  fix the process stops with Monarc's own message and, in Debug, no VUID at all — the layer is
+  never handed the illegal call.
+
+**The fourth combination of flags is unreachable, which is what makes four states the whole
+table rather than a selection from eight.** `m_recording && m_recorded` cannot occur: `End` is
+the only writer that sets `m_recorded` and it clears `m_recording` in the same breath, and
+`Begin` is the only writer that sets `m_recording` and now refuses when `m_recorded`.
+
+**Two new device cases, and five mutations run against them** — each rebuilt from a touched
+source, with `ninja` confirmed not to have said "no work to do":
+
+| mutation | caught by |
+|---|---|
+| `Begin`'s recorded guard removed | "a list that has already been recorded is refused rather than begun again" CRASHED at 00050, exit 3221226505 |
+| `Submit`'s submitted guard removed | "a list already submitted is refused rather than submitted a second time" CRASHED at 03875, exit 3221226505 |
+| `list->MarkSubmitted()` removed | the same case, the same VUID |
+| `Reset` no longer clearing the submitted flag | 2 assertions red — `REQUIRE( reused.has_value() )` in the new case, and `REQUIRE( submitted.has_value() )` in the pre-existing wrap case |
+| `Reset` no longer clearing `m_recorded` | 1 red — `REQUIRE( (*commands)->Begin().has_value() )` in the wrap case, which the new `Begin` guard now catches earlier than the old submit refusal did |
+
+The first three are crashes rather than red assertions, and that is the shape of the finding
+rather than a weakness of the cases: the process is gone at the guarded call, before the
+assertion on its result runs. It is how the four refusals in the review above were measured too.
+
+**The barrier guard has no case and cannot have one**, for the reason the stale-handle guard has
+none: nothing survives the call, so there is no handler under which a test could assert. It
+joins that guard as a fatal path with no in-process case, and
+`TestsDevice/TestVulkanDevice.cpp` records it beside it rather than leaving the gap to be
+discovered.
+
+**Counts: 109 device-free cases and 38 device-required**, up from 109 and 36 — both new cases
+are device-required, since a command buffer's state is only observable against a real device.
+Assertion totals are 504 device-free and 384 device-required.
+
+**Not done, and recommended for Task 4 rather than smuggled in here: make the four states an
+`enum class` and switch on it exhaustively.** With `/w44062` on, a fifth state would then fail to
+compile in every method that has to decide about it, which is the only mechanism that actually
+stops a fourth patch — a comment cannot. It is left out of this change because no test can
+distinguish it from the flags, and a refactor no test can see does not belong in a task being
+closed.
+
 ## Verification gates
 
 Five of M0's thirteen gates are implemented and running under CTest as

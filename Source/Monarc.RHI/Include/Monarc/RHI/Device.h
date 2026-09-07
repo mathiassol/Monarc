@@ -197,9 +197,12 @@ struct DeviceConfig {
 /// record. Building for them now would mean designing a pool allocator for lists with no
 /// caller to shape it.
 ///
-/// Every recording call refuses politely on a list that is not recording, rather than
-/// asserting: `Begin` is what starts recording and `End` is what stops it, and a
-/// `[[nodiscard]] Status` is how a caller finds out it got the order wrong.
+/// Every call that returns a `Status` refuses a list in the wrong state rather than acting on
+/// it: `Begin` is what starts recording, `End` is what stops it, `IDevice::BeginFrame` is what
+/// makes a list recordable again after `End`, and a `[[nodiscard]] Status` is how a caller
+/// finds out it got the order wrong. The four calls that return void have no `Status` to refuse
+/// through and report through the assertion handler instead -- see `Barrier`, which argues at
+/// length which of those reports ends the process and why.
 class ICommandList {
 public:
     virtual ~ICommandList() = default;
@@ -208,7 +211,15 @@ public:
     ICommandList& operator=(const ICommandList&) = delete;
 
     /// Starts recording. Fails with `ErrorCode::InvalidArgument` if this list is already
-    /// recording.
+    /// recording, and equally if it has already been recorded -- `End` has run and no
+    /// `IDevice::BeginFrame` has run since, whether or not the recording has been submitted.
+    ///
+    /// **The second half is not a restatement of the first**, and it is the one a frame loop
+    /// gets wrong: a list `End` closed is not recording, so a loop that records, submits and
+    /// comes round again without a fresh `BeginFrame` calls `Begin` on a list that would have
+    /// passed a "not already recording" check. Only `BeginFrame` makes a list recordable
+    /// again, because only `BeginFrame` waits on the frame's timeline value and resets its
+    /// command pool.
     [[nodiscard]] virtual Status Begin() = 0;
 
     /// Stops recording, leaving the list ready to submit. Fails with
@@ -266,6 +277,18 @@ public:
     /// stale handle rather than dereferencing it. The difference is only in what they can say
     /// afterwards. If a batching overload arrives with a `Status`, it reports like the other
     /// two and this note goes with it.
+    ///
+    /// **A barrier inside a rendering pass ends the process too, and for the same two reasons
+    /// -- the void return, and the fact that there is nothing legal to record.** `End`,
+    /// `BeginRendering` and `CopyTextureToBuffer` all refuse between `BeginRendering` and
+    /// `EndRendering` with a returned `Status`; these three cannot, so they refuse the way the
+    /// stale-handle case does. What makes it fatal rather than a skipped call is that the
+    /// caller asked for a barrier it had a reason to want and there is no version of it that
+    /// could be recorded instead: barriers are not permitted inside a dynamic-rendering
+    /// instance at all, whatever they contain -- an empty `GlobalBarrier{}` is refused exactly
+    /// like a layout transition. A pass that needs to read what it has written is what
+    /// `VK_KHR_dynamic_rendering_local_read` is for, and Monarc does not enable it; the
+    /// portable shape is to end the pass, barrier, and begin another.
     virtual void Barrier(const GlobalBarrier& barrier) = 0;
     virtual void Barrier(const BufferBarrier& barrier) = 0;
     virtual void Barrier(const TextureBarrier& barrier) = 0;
@@ -358,11 +381,20 @@ public:
     /// completes. The value is greater than every value returned before it on this queue.
     ///
     /// Fails with `ErrorCode::InvalidArgument` for a list still recording, for a list that has
-    /// recorded nothing since `IDevice::BeginFrame` handed it out, and for a list belonging to
-    /// another device -- none of the three is undefined behaviour. The last matters on a
-    /// machine with two adapters and therefore two devices; the middle one is what a frame loop
-    /// with an early-out between `BeginFrame` and `Begin` hits, and it is a distinct condition
-    /// from the first because a list that never began recording is not recording either.
+    /// recorded nothing since `IDevice::BeginFrame` handed it out, for a list this queue has
+    /// already submitted, and for a list belonging to another device -- none of the four is
+    /// undefined behaviour. The last matters on a machine with two adapters and therefore two
+    /// devices. The other three are one frame loop's three ways of losing track of where it is,
+    /// and each is a condition the other two cannot express:
+    ///
+    /// - **Recorded nothing** is an early-out between `BeginFrame` and `Begin`. Distinct from
+    ///   "still recording" because a list that never began is not recording either.
+    /// - **Already submitted** is a loop that submits and comes round again without a fresh
+    ///   `BeginFrame`. Distinct from both, because such a list *is* recorded and *is not*
+    ///   recording -- it looks exactly like one that is ready to go. One submission per
+    ///   recording is the rule, and it holds after the work has finished as well as while it is
+    ///   in flight, so waiting does not make a second submission legal. Only `BeginFrame` does,
+    ///   because only `BeginFrame` resets the command pool.
     [[nodiscard]] virtual Result<u64> Submit(ICommandList& commands) = 0;
 
     /// Blocks until the timeline has reached `value`, or until `timeoutNanoseconds` elapses.

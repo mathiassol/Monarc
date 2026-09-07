@@ -920,6 +920,127 @@ TEST_CASE("a list that has recorded nothing since BeginFrame is refused rather t
     REQUIRE(device.WaitIdle().has_value());
 }
 
+TEST_CASE("a list that has already been recorded is refused rather than begun again") {
+    // **The frame loop's other way of losing track of where it is, and the mirror of the case
+    // above.** That one is a list nothing was recorded into; this one is a list that was
+    // recorded and never handed back. `End` leaves the command buffer in Vulkan's *executable*
+    // state, and `vkBeginCommandBuffer` on one of those asks for an implicit reset --
+    // `VUID-vkBeginCommandBuffer-commandBuffer-00050`, which requires
+    // `VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT` on the pool. `BringUpDevice` leaves
+    // that bit unset deliberately, because `BeginFrame` resets the whole pool and that is the
+    // only reset this design performs.
+    //
+    // Measured before the guard: `BeginFrame -> Begin -> End -> Begin` stopped at that VUID
+    // with exit 3221226505 (0xC0000409) and doctest reporting the case CRASHED; the same
+    // sequence with a `Submit` before the second `Begin` stopped at
+    // `VUID-vkBeginCommandBuffer-commandBuffer-00049` instead, the buffer being *pending*
+    // rather than merely executable.
+    //
+    // **In msvc-release both exited zero, reported nothing, and the second `Begin` returned
+    // success**, no validation layer being loaded outside Debug. That is the reason this is a
+    // returned Status rather than a comment saying the layer catches it: the layer is not a
+    // mechanism a shipped build has, and what it was catching here was a driver quietly
+    // accepting an implicit reset of a buffer it was not allowed to reset.
+    DeviceUnderTest held(Adapters()[0]);
+    REQUIRE(held.created.has_value());
+    Monarc::RHI::IDevice& device = *held.created;
+
+    const Monarc::Result<Monarc::RHI::ICommandList*> first = device.BeginFrame();
+    REQUIRE(first.has_value());
+    REQUIRE((*first)->Begin().has_value());
+    REQUIRE((*first)->End().has_value());
+
+    // The assertion, and it is about a list that is *not* recording: "already recording" would
+    // have let this through, which is exactly what the guard beside it was doing.
+    const Monarc::Status again = (*first)->Begin();
+    REQUIRE_FALSE(again.has_value());
+    CHECK(again.error().code == Monarc::ErrorCode::InvalidArgument);
+
+    // Accepted by the queue, so the refusal above is about beginning rather than about the
+    // recording being spoilt by the attempt.
+    REQUIRE(device.GraphicsQueue().Submit(**first).has_value());
+
+    // And submitting does not make it beginnable either -- the buffer is pending now, which is
+    // a different VUID and the same refusal. One guard covers both because `Submit` leaves the
+    // list recorded.
+    const Monarc::Status afterSubmit = (*first)->Begin();
+    REQUIRE_FALSE(afterSubmit.has_value());
+    CHECK(afterSubmit.error().code == Monarc::ErrorCode::InvalidArgument);
+
+    // **The wrap, which is what says `Reset` clears the flag rather than only `End` setting
+    // it.** kFramesInFlight is two, so the second BeginFrame hands out the other slot and the
+    // third comes back to this list -- having waited on its timeline value and reset its pool,
+    // which is the step that makes the buffer beginnable again.
+    REQUIRE(device.BeginFrame().has_value());
+    const Monarc::Result<Monarc::RHI::ICommandList*> wrapped = device.BeginFrame();
+    REQUIRE(wrapped.has_value());
+    CHECK(*wrapped == *first);
+    CHECK((*wrapped)->Begin().has_value());
+    CHECK((*wrapped)->End().has_value());
+
+    REQUIRE(device.WaitIdle().has_value());
+}
+
+TEST_CASE("a list already submitted is refused rather than submitted a second time") {
+    // **The third of the frame loop's three ways of losing its place, and the one neither
+    // `IsRecording()` nor `IsRecorded()` can see.** A submitted list is still recorded -- the
+    // recording in its buffer is the one the queue took -- so it looks exactly like a list
+    // that is ready to go. What has changed is the command buffer: `Begin` records with
+    // `VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT`, so the buffer is pending while the work
+    // runs and *invalid* once it finishes, and neither state may be submitted.
+    //
+    // Measured before the guard: `BeginFrame -> Begin -> End -> Submit -> Submit` stopped at
+    // `VUID-vkQueueSubmit2-commandBuffer-03875` ("is already in use and is not marked for
+    // simultaneous use") with exit 3221226505, and with a `WaitIdle` between the two
+    // submissions it stopped at `UNASSIGNED-DrawState-CommandBufferSingleSubmitViolation`
+    // ("recorded with VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT has been submitted 2
+    // times"). In msvc-release both exited zero, reported nothing, and returned a timeline
+    // value for the second submission -- silent undefined behaviour in the configuration that
+    // ships, which is the argument for the guard.
+    DeviceUnderTest held(Adapters()[0]);
+    REQUIRE(held.created.has_value());
+    Monarc::RHI::IDevice& device = *held.created;
+
+    const Monarc::Result<Monarc::RHI::ICommandList*> first = device.BeginFrame();
+    REQUIRE(first.has_value());
+    REQUIRE((*first)->Begin().has_value());
+    REQUIRE((*first)->End().has_value());
+
+    const Monarc::Result<Monarc::u64> once = device.GraphicsQueue().Submit(**first);
+    REQUIRE(once.has_value());
+    CHECK(*once == 1);
+
+    // The assertion. Without the guard this is the call that ends the process.
+    const Monarc::Result<Monarc::u64> twice = device.GraphicsQueue().Submit(**first);
+    REQUIRE_FALSE(twice.has_value());
+    CHECK(twice.error().code == Monarc::ErrorCode::InvalidArgument);
+
+    // Waiting does not make it submittable, which is the half of the rule that is easy to get
+    // wrong: the buffer does not return to executable when the work completes, it becomes
+    // invalid. Red under the same source changes as the assertion above rather than under new
+    // ones -- it is here because "submit, wait, submit again" is the mistake a caller is most
+    // likely to believe is legal, not because it pins a second mechanism.
+    REQUIRE(device.WaitIdle().has_value());
+    const Monarc::Result<Monarc::u64> afterWait = device.GraphicsQueue().Submit(**first);
+    REQUIRE_FALSE(afterWait.has_value());
+    CHECK(afterWait.error().code == Monarc::ErrorCode::InvalidArgument);
+
+    // **And the wrap says `Reset` clears the flag.** Without the clear this list would be
+    // unsubmittable for the rest of the device's life, which is a frame loop that renders one
+    // frame and then stops -- so this is the assertion that catches it.
+    REQUIRE(device.BeginFrame().has_value());
+    const Monarc::Result<Monarc::RHI::ICommandList*> wrapped = device.BeginFrame();
+    REQUIRE(wrapped.has_value());
+    CHECK(*wrapped == *first);
+    REQUIRE((*wrapped)->Begin().has_value());
+    REQUIRE((*wrapped)->End().has_value());
+    const Monarc::Result<Monarc::u64> reused = device.GraphicsQueue().Submit(**wrapped);
+    REQUIRE(reused.has_value());
+    CHECK(*reused == 2);
+
+    REQUIRE(device.WaitIdle().has_value());
+}
+
 TEST_CASE("a command list outlives its device's shutdown and refuses to record") {
     // **The one surface the device hands out that used to answer a shut-down device by
     // dereferencing it.** `Shutdown` destroys the command pools, and a `VulkanCommandList` a
@@ -1300,6 +1421,34 @@ TEST_CASE("a stale resource handle is reported rather than resolved to its slot'
 // The abort itself was measured out of process rather than asserted here -- a declining
 // handler installed, a stale-handle barrier issued against a real device, and the process
 // gone. Docs/Status.md records the run and its exit code.
+//
+// **A barrier recorded inside a rendering pass has no case here either, for the same reason
+// and with the same shape.** It joined the fatal set when the command list's state machine was
+// enumerated: `End`, `BeginRendering` and `CopyTextureToBuffer` all refuse between
+// `BeginRendering` and `EndRendering` with a returned `Status`, and the three `Barrier`
+// overloads were dispatching. Refusing through the assertion handler and continuing is the
+// skipped-barrier hole again -- so the guard aborts, and no in-process case can survive it.
+//
+// Measured both ways, in both a Debug and a Release build, because the two configurations had
+// different answers before the guard and the Release one is what makes this worth a guard at
+// all. `Begin -> BeginRendering -> Barrier(GlobalBarrier{}) -> EndRendering -> End -> Submit`:
+//
+//   - msvc-debug, before: stopped inside the barrier at
+//     `VUID-vkCmdPipelineBarrier2-None-09553` ("pDependencyInfo can not be called inside a
+//     dynamic rendering instance"), exit 3221226505, the line after the barrier never reached.
+//   - msvc-release, before: **ran to completion and exited zero, reporting nothing.** No
+//     validation layer is loaded outside Debug, so this was silent undefined behaviour --
+//     which is the whole argument for the guard, since the layer catching it is not a
+//     mechanism a shipped build has.
+//   - Both, after: the process stops inside the barrier, `FailInsideRenderingPass` reporting
+//     `(false) ICommandList::Barrier(GlobalBarrier) inside a rendering pass, where
+//     vkCmdPipelineBarrier2 may not be called; end the pass first`, and the line after the
+//     barrier is never reached. In Debug no VUID is printed at all now, the layer never being
+//     handed the illegal call.
+//
+// The `GlobalBarrier{}` is what tripped it, which is the useful part: the rule is about the
+// call rather than about the barrier's contents, so there is no empty barrier that slips
+// through and no version of this that could have been recorded instead.
 
 TEST_CASE("a full resource pool reports rather than growing") {
     // The pools are fixed at device creation and never grown -- JobSystem's discipline, so

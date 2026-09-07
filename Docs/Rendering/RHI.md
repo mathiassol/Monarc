@@ -171,6 +171,13 @@ pool, which is what makes the reset legal — resetting a pool whose buffers are
 is undefined behaviour. Two frames in flight, one command pool each. Binary semaphores arrive
 with presentation, because `vkQueuePresentKHR` accepts only those.
 
+**One `Begin`, one `End` and one `Submit` per `BeginFrame`**, and a second of any of them is
+refused with `ErrorCode::InvalidArgument` rather than attempted: only `BeginFrame` resets the
+pool, so only `BeginFrame` makes a list recordable and submittable again — waiting for the work
+to finish does not. A frame loop that comes round without calling it gets a `Status` and not
+undefined behaviour, in every configuration and not only where a validation layer is loaded.
+`ICommandList` in `Monarc/RHI/Device.h` lists the states each call refuses.
+
 **Resources are handles from device-owned, generation-checked, fixed-capacity pools.** Capacity
 comes from a `DeviceConfig` at device creation and is never grown, which is
 [`JobSystem`](../Runtime/Threading.md)'s discipline and is here for the same reason: a pool that

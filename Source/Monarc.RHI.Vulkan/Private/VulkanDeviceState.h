@@ -142,6 +142,72 @@ struct FrameSlot {
     u64 timelineValue = 0;
 };
 
+/// `ICommandList` for one frame slot, and the state machine that decides which of its calls are
+/// legal now.
+///
+/// **The transition table, written down after a second patch closed the same shape of hole as
+/// the first.** A list is in exactly one of four states, and three of the flags below name it;
+/// `m_rendering` is a sub-state of `Recording`, and detachment is orthogonal to all four. The
+/// right-hand column is the state the `VkCommandBuffer` is in, which is what the validation
+/// layer's VUIDs are phrased in terms of.
+///
+/// | state       | `m_recording` | `m_recorded` | `m_submitted` | command buffer      |
+/// |-------------|---------------|--------------|---------------|---------------------|
+/// | `Reset`     | false         | false        | false         | initial             |
+/// | `Recording` | true          | false        | false         | recording           |
+/// | `Recorded`  | false         | true         | false         | executable          |
+/// | `Submitted` | false         | true         | true          | pending, then invalid |
+///
+/// The transitions, and there are only five:
+///
+/// - `Attach` and `Reset` -> `Reset`, from any state. `IDevice::BeginFrame` is what calls
+///   `Reset`, and it does so *after* waiting on the slot's timeline value and resetting the
+///   pool -- which is the step that actually returns the command buffer to `initial`.
+/// - `Reset` --`Begin`--> `Recording`.
+/// - `Recording` --`End`--> `Recorded`, refused while `m_rendering`.
+/// - `Recorded` --`IQueue::Submit`--> `Submitted`.
+/// - `Submitted` --`IDevice::BeginFrame`--> `Reset`. **The only way out**, and the reason both
+///   flags outlive the submission: nothing else waits on the timeline, so nothing else may
+///   reset the pool.
+///
+/// `Detach` is `Reset` plus forgetting the buffer, so a detached list reads as `Reset` with no
+/// `VkCommandBuffer`. It therefore needs no guards of its own: `Begin` refuses on the null
+/// buffer, and every other call refuses because `Reset` cleared `m_recording`. The detached
+/// column below is that, not a separate set of checks.
+///
+/// **`m_recording && m_recorded` is unreachable**, which is what keeps the four rows above the
+/// whole table rather than a selection from eight. `End` is the only writer that sets
+/// `m_recorded` and it clears `m_recording` in the same breath; `Begin` is the only writer that
+/// sets `m_recording` and it refuses when `m_recorded`. Likewise `m_submitted` implies
+/// `m_recorded`: `Submit` refuses a list that is not recorded, and only `Reset` clears either.
+///
+/// `m_rendering` belongs to `Recording` alone: `BeginRendering` is the only thing that sets it
+/// and it requires `m_recording`, `End` refuses while it is set, and `Attach`, `Reset`, `Begin`
+/// and `EndRendering` clear it. So no other state can carry a rendering pass.
+///
+/// **What each method refuses, checked against every state rather than against the one that
+/// prompted the guard.** `ok` is the only state a call is legal in; `Status` is a returned
+/// `ErrorCode::InvalidArgument`; `check` is `MONARC_CHECK` and a plain return, which is all a
+/// void function has; `fatal` is `MONARC_CHECK` and `std::abort()`.
+///
+/// |                       | detached | `Reset`  | `Recording` | + pass       | `Recorded` | `Submitted` |
+/// |-----------------------|----------|----------|-------------|--------------|------------|-------------|
+/// | `Begin`               | `Status` | **ok**   | `Status`    | `Status`     | `Status`   | `Status`    |
+/// | `End`                 | `Status` | `Status` | **ok**      | `Status`     | `Status`   | `Status`    |
+/// | `Barrier` x3          | `check`  | `check`  | **ok**      | `fatal`      | `check`    | `check`     |
+/// | `BeginRendering`      | `Status` | `Status` | **ok**      | `Status`     | `Status`   | `Status`    |
+/// | `EndRendering`        | `check`  | `check`  | `check`     | **ok**       | `check`    | `check`     |
+/// | `CopyTextureToBuffer` | `Status` | `Status` | **ok**      | `Status`     | `Status`   | `Status`    |
+/// | `IQueue::Submit`      | `Status` | `Status` | `Status`    | unreachable  | **ok**     | `Status`    |
+///
+/// `Submit`'s `+ pass` cell is unreachable rather than guarded, and that is a consequence of
+/// two other cells: `End` refuses inside a pass and `Submit` refuses a list that is not
+/// recorded, so there is no order of calls that presents a mid-pass list to the queue.
+///
+/// Three of those cells were holes when the table was first written out, each of them a caller
+/// ordering mistake that ended the process at a validation error instead of returning a
+/// `Status`: `Begin` in `Recorded`, `Submit` in `Submitted`, and `Barrier` inside a pass. All
+/// three were measured on this machine before and after -- see each guard, and Docs/Status.md.
 class VulkanCommandList final : public ICommandList {
 public:
     VulkanCommandList() = default;
@@ -176,6 +242,21 @@ public:
     /// difference between "finished recording" and "never started".
     [[nodiscard]] bool IsRecorded() const { return m_recorded; }
 
+    /// Whether `IQueue::Submit` has already taken this list's recording since it was last
+    /// reset.
+    ///
+    /// **Separate from `IsRecorded()` for the same reason `IsRecorded()` is separate from
+    /// `!IsRecording()`**: `Submit` leaves the list recorded, because it is -- the recording it
+    /// took is still the one in the buffer. What changes is that the buffer is no longer
+    /// submittable. `VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT` is what makes that true even
+    /// after the work finishes, since the buffer moves from pending to *invalid* rather than
+    /// back to executable, so a `WaitIdle` between the two submissions does not help.
+    [[nodiscard]] bool IsSubmitted() const { return m_submitted; }
+
+    /// Records that `IQueue::Submit` has taken this recording. Called by `VulkanQueue::Submit`
+    /// once `vkQueueSubmit2` has succeeded, beside the stamp it puts on the frame slot.
+    void MarkSubmitted() { m_submitted = true; }
+
     [[nodiscard]] Status Begin() override;
     [[nodiscard]] Status End() override;
     void                 Barrier(const GlobalBarrier& barrier) override;
@@ -198,12 +279,19 @@ private:
     /// pattern for one is a check.
     [[nodiscard]] bool CanRecord(const char* operation) const;
 
+    /// Reports `operation` and ends the process. What the three `Barrier` overloads call when
+    /// they are asked to record inside a rendering pass, which is the one cell of the table
+    /// above where a void function has no legal call to make and no `Status` to refuse
+    /// through. See the definition for why it is fatal rather than a return.
+    [[noreturn]] static void FailInsideRenderingPass(const char* operation);
+
     VulkanDeviceState* m_state      = nullptr;
     VkCommandBuffer    m_buffer     = VK_NULL_HANDLE;
     u32                m_frameIndex = 0;
     bool               m_recording  = false;
     bool               m_rendering  = false;
     bool               m_recorded   = false;
+    bool               m_submitted  = false;
 };
 
 class VulkanQueue final : public IQueue {

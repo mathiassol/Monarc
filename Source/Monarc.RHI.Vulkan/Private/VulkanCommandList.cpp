@@ -40,6 +40,7 @@ void VulkanCommandList::Attach(VulkanDeviceState* state, u32 frameIndex) {
     m_recording  = false;
     m_rendering  = false;
     m_recorded   = false;
+    m_submitted  = false;
 }
 
 void VulkanCommandList::Reset() {
@@ -48,6 +49,12 @@ void VulkanCommandList::Reset() {
     // Cleared here and set in `End`, which is what makes `IQueue::Submit` able to tell a list
     // that finished recording from one whose pool `BeginFrame` has just reset.
     m_recorded = false;
+    // Cleared here and set in `IQueue::Submit`. `BeginFrame` is the only caller of this that
+    // matters for the bit, and it is also the only thing that makes a resubmission legal
+    // again: it waits on the slot's timeline value and resets the pool, which is what returns
+    // the command buffer from pending -- or, once execution finished, from invalid -- to
+    // initial. Nothing else in this class or in `VulkanDevice` clears it.
+    m_submitted = false;
 }
 
 void VulkanCommandList::Detach() {
@@ -64,6 +71,27 @@ bool VulkanCommandList::CanRecord(const char* operation) const {
     return true;
 }
 
+void VulkanCommandList::FailInsideRenderingPass(const char* operation) {
+    // **`CanRecord`'s report and `Barrier`'s abort, in one place because the three overloads
+    // need both and neither has a `Status` to carry it.** The literal is the caller's, for the
+    // house rule's reason; the break and the `std::abort()` are `OnResourceExhausted`'s shape
+    // in Monarc.Jobs and the stale-handle guard's shape twenty lines below.
+    //
+    // **Fatal rather than a plain return, and this is the one guard in this file where the
+    // choice is forced.** `vkCmdPipelineBarrier2` may not be called inside a rendering
+    // instance begun by `vkCmdBeginRendering` at all -- not with different flags, not with a
+    // different barrier, not with an empty one -- so there is no legal call to record and
+    // nothing this function could do instead. `MONARC_CHECK` alters no control flow, so a
+    // `return` here would *skip the barrier* under any handler that declines to break, and
+    // Monarc/RHI/Device.h argues at length why a dropped barrier is a synchronisation hole
+    // rather than a refused operation. The other half of that argument is what makes
+    // `CanRecord`'s plain return right where this is not: a list that is not recording has no
+    // open command buffer, so skipping is the only thing available there.
+    MONARC_CHECK(false, operation);
+    MONARC_DEBUG_BREAK();
+    std::abort();
+}
+
 Status VulkanCommandList::Begin() {
     if (m_state == nullptr || m_buffer == VK_NULL_HANDLE) {
         return Err(ErrorCode::InvalidArgument,
@@ -72,6 +100,31 @@ Status VulkanCommandList::Begin() {
     if (m_recording) {
         return Err(ErrorCode::InvalidArgument,
                    "ICommandList::Begin called on a list that is already recording");
+    }
+    if (m_recorded) {
+        // **The other half of the same mistake, and it is a distinct condition rather than a
+        // spelling of the one above.** A list that `End` closed is in Vulkan's *executable*
+        // state, and `vkBeginCommandBuffer` on one of those is an implicit reset --
+        // `VUID-vkBeginCommandBuffer-commandBuffer-00050`, which needs
+        // `VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT` on the pool. `BringUpDevice`
+        // deliberately does not set it: `BeginFrame` resets the whole pool and that is the
+        // only reset this design performs. Once the list has also been submitted the buffer is
+        // *pending* instead and the same call is
+        // `VUID-vkBeginCommandBuffer-commandBuffer-00049`; `m_recorded` outlives `Submit`, so
+        // this one guard refuses both.
+        //
+        // Measured, on this machine, before the guard: `BeginFrame -> Begin -> End -> Begin`
+        // stopped at 00050 and exit 3221226505 with doctest reporting the case CRASHED, and
+        // the same four calls with a `Submit` before the second `Begin` stopped at 00049. In a
+        // build with no validation layer both exited zero and said nothing, which is what
+        // makes this a returned `Status` rather than a comment saying the layer catches it.
+        //
+        // **Reachable from the frame loop Task 4 builds**, which is why it is here now: a loop
+        // that records, submits and comes round again without a fresh `BeginFrame` makes
+        // exactly this call.
+        return Err(ErrorCode::InvalidArgument,
+                   "ICommandList::Begin called on a list that has already been recorded; call "
+                   "IDevice::BeginFrame for a fresh one");
     }
 
     VkCommandBufferBeginInfo beginInfo{};
@@ -118,6 +171,20 @@ void VulkanCommandList::Barrier(const GlobalBarrier& barrier) {
     if (!CanRecord("ICommandList::Barrier(GlobalBarrier) on a list that is not recording")) {
         return;
     }
+    if (m_rendering) {
+        // **The state the other three recording calls already refuse and these three did
+        // not.** `End`, `BeginRendering` and `CopyTextureToBuffer` each return
+        // `ErrorCode::InvalidArgument` inside a rendering pass; a barrier recorded there was
+        // dispatched. See `FailInsideRenderingPass` for why this one ends the process instead
+        // of returning, and for the measurement.
+        //
+        // The empty `GlobalBarrier{}` is what tripped it in the measurement, which is the
+        // useful half: the rule is about the call and not about the barrier's contents, so
+        // there is no no-op barrier that slips through.
+        FailInsideRenderingPass(
+            "ICommandList::Barrier(GlobalBarrier) inside a rendering pass, where "
+            "vkCmdPipelineBarrier2 may not be called; end the pass first");
+    }
 
     // Recorded even when nothing changes. `GlobalBarrier{}` is a value a caller can mean --
     // Barrier.h says why -- and dropping it here would be this function deciding on the
@@ -134,6 +201,14 @@ void VulkanCommandList::Barrier(const GlobalBarrier& barrier) {
 void VulkanCommandList::Barrier(const BufferBarrier& barrier) {
     if (!CanRecord("ICommandList::Barrier(BufferBarrier) on a list that is not recording")) {
         return;
+    }
+    if (m_rendering) {
+        // `Barrier(GlobalBarrier)`'s reasoning, unchanged: the refusal is about
+        // `vkCmdPipelineBarrier2` and not about which of the three barrier structs is being
+        // translated into it.
+        FailInsideRenderingPass(
+            "ICommandList::Barrier(BufferBarrier) inside a rendering pass, where "
+            "vkCmdPipelineBarrier2 may not be called; end the pass first");
     }
     const BufferSlot* slot = m_state->Resolve(barrier.buffer);
     if (slot == nullptr) {
@@ -189,6 +264,15 @@ void VulkanCommandList::Barrier(const BufferBarrier& barrier) {
 void VulkanCommandList::Barrier(const TextureBarrier& barrier) {
     if (!CanRecord("ICommandList::Barrier(TextureBarrier) on a list that is not recording")) {
         return;
+    }
+    if (m_rendering) {
+        // `Barrier(GlobalBarrier)`'s reasoning, unchanged. A layout transition is the one a
+        // caller is most likely to want here -- an attachment read back inside the pass it was
+        // written in -- and it is the one Vulkan is most explicit about: that is what
+        // `VK_KHR_dynamic_rendering_local_read` exists for, and this device does not enable it.
+        FailInsideRenderingPass(
+            "ICommandList::Barrier(TextureBarrier) inside a rendering pass, where "
+            "vkCmdPipelineBarrier2 may not be called; end the pass first");
     }
     const TextureSlot* slot = m_state->Resolve(barrier.Texture());
     if (slot == nullptr) {
