@@ -67,6 +67,10 @@ none of them — `Monarc.Host.Headless` includes none.
 | `Monarc.Host.Windowed` | Runtime | `Engine`, `Render` | Window, surface, input event loop |
 | `Monarc.Host.Headless` | Runtime | `Engine` | Headless/dedicated-server host. **Links no Tier 2 module** |
 
+`Monarc.Host.Windowed` is declared with `Core` + `RHI` deps today, because `Engine` and
+`Render` do not exist yet. The row above is its destination, not its present state; the tier
+is the same either way, and the entry that adds those two edges is Phase D's.
+
 `Monarc.Engine` is the only module that sees both `Monarc.World` and `Monarc.Render`. It is
 the adapter, and that is deliberate — it is where extraction lives
 ([Frame-Model.md](../Runtime/Frame-Model.md)).
@@ -90,6 +94,26 @@ the adapter, and that is deliberate — it is where extraction lives
 A game module cannot reference `Monarc.Editor` or `Monarc.Cook` even by accident: the kind
 rule forbids it.
 
+### Apps
+
+An **app** is an executable that is a node in the module graph rather than an exception to
+it: same kind, same tier, same dependency rules, same `module-graph.json` entry, marked
+`"app": true`. It is declared with `monarc_app()` instead of `monarc_module()`.
+
+Two things follow from an app being a link target rather than an interface, and both are
+enforced:
+
+- **Nothing may depend on an app** — rule 8 below. An app is where a dependency chain ends,
+  not something a chain passes through, and depending on one would mean linking a second
+  `main()`.
+- **An app has no `Include/` directory.** It exports nothing, so there is no public header
+  for anyone to include, and the layout gate exempts it from having one rather than
+  accepting an empty directory that exists only to satisfy a gate.
+
+| App | Kind | Tier | Depends on | Responsibility |
+|---|---|---|---|---|
+| `Monarc.FirstLight` | Runtime | 3 | `Core`, `RHI`, `RHI.Vulkan`, `Host.Windowed` | A window that clears to a known colour: M0's first-light proof |
+
 ## Declaring a module
 
 Module metadata is declarative and queryable, not buried in build logic:
@@ -101,6 +125,17 @@ monarc_module(
     TIER         2
     PUBLIC_DEPS  Monarc.Core Monarc.RHI Monarc.Shaders
     PRIVATE_DEPS Monarc.Jobs
+)
+```
+
+An executable is declared the same way, with `monarc_app()`:
+
+```cmake
+monarc_app(
+    NAME         Monarc.FirstLight
+    KIND         Runtime
+    TIER         3
+    PRIVATE_DEPS Monarc.Core Monarc.RHI Monarc.RHI.Vulkan Monarc.Host.Windowed
 )
 ```
 
@@ -127,9 +162,21 @@ These are build failures or test failures, not conventions:
    symbols.
 7. **Platform containment.** Platform-conditional compilation appears only in
    `Monarc.Core/Platform`.
+8. **Apps are leaves.** No module may list an app in `PUBLIC_DEPS` or `PRIVATE_DEPS`.
 
 Rules 4, 5, 6, and 7 are the ones that would decay silently without automation, so they are
 gates in [M0](../Milestones/M0-First-Light.md#verification-gates) rather than later additions.
+
+The two mechanisms divide the rules as follows. `monarc_validate_modules()` refuses rules 2,
+3 and 8 at configure time, which is where a developer wants to hear about them.
+`Tools/check_architecture.py` checks rules 1, 4, 7 and 8 against the emitted
+`module-graph.json` and the source tree, and runs under `ctest`.
+
+**Rule 8 is the one checked in both places, deliberately.** `module-graph.json` is the
+product [`monarc explain`](../Product/Build-And-Export.md) reads, so a stale or hand-edited
+graph would otherwise answer "why is this in the export" from a shape CMake never approved.
+Rule 1 goes the other way: CMake does no cycle detection at all, so the gate is the only
+thing enforcing it.
 
 ## Third-party dependencies
 

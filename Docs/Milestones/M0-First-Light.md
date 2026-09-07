@@ -69,7 +69,7 @@ failure, not a judgement.
 |---|---|---|
 | 1 | No `Monarc::Editor` or `Monarc::Cook` symbols in a shipped game binary | [ADR-0001](../Architecture/Decisions/ADR-0001-layered-modules.md), export purity |
 | 2 | Module graph is acyclic; no `Runtime` module depends on `Tool` or `Editor` | [ADR-0001](../Architecture/Decisions/ADR-0001-layered-modules.md) |
-| 3 | No Tier 2 translation unit includes a header from Tier 1 or Tier 3 — `Monarc.Reflect`, `Monarc.Serialize`, `Monarc.World`, `Monarc.Assets` | [ADR-0007](../Architecture/Decisions/ADR-0007-renderer-package-boundary.md) |
+| 3 | No Tier 2 translation unit includes a header from Tier 1 or Tier 3 — `Monarc.Reflect`, `Monarc.Serialize`, `Monarc.World`, `Monarc.Assets`, `Monarc.Host.Windowed` | [ADR-0007](../Architecture/Decisions/ADR-0007-renderer-package-boundary.md) |
 | 4 | Two clean cooks produce identical output hashes | [ADR-0008](../Architecture/Decisions/ADR-0008-asset-identity.md), determinism |
 | 5 | Cook, change nothing, cook again: zero work performed | [ADR-0008](../Architecture/Decisions/ADR-0008-asset-identity.md), incrementality |
 | 6 | Rename a source asset, reimport: the scene still resolves it | [ADR-0008](../Architecture/Decisions/ADR-0008-asset-identity.md), identity |
@@ -78,6 +78,7 @@ failure, not a judgement.
 | 9 | The headless binary contains no RHI or graphics-API symbols | [Module-Graph](../Architecture/Module-Graph.md), headless purity |
 | 10 | Platform-conditional compilation appears only in `Monarc.Core/Platform` | [ADR-0012](../Architecture/Decisions/ADR-0012-backend-rollout.md), macOS viability |
 | 11 | A serialized schema migration round-trips older data forward | [Serialization](../Content/Serialization.md) |
+| 12 | Nothing depends on an app: apps are graph leaves | [Module-Graph](../Architecture/Module-Graph.md) rule 8 |
 
 Gates 1, 3, 9, and 10 are the ones that would decay silently. They should be red-green from the
 first week they can be, rather than added once they would already fail.

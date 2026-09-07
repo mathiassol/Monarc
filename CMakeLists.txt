@@ -53,6 +53,10 @@ endif()
 
 add_subdirectory(Source/Monarc.Core)
 add_subdirectory(Source/Monarc.Jobs)
+add_subdirectory(Source/Monarc.RHI)
+add_subdirectory(Source/Monarc.RHI.Vulkan)
+add_subdirectory(Source/Monarc.Host.Windowed)
+add_subdirectory(Source/Monarc.FirstLight)
 
 monarc_validate_modules()
 
