@@ -64,12 +64,20 @@ none of them — `Monarc.Host.Headless` includes none.
 |---|---|---|---|
 | `Monarc.World` | Runtime | `Core`, `Jobs`, `Reflect`, `Serialize`, `Assets` | Actors, Components, transforms, relationships, world kinds, tick phases |
 | `Monarc.Engine` | Runtime | `World`, `Render`, `Assets`, `Jobs` | Subsystem lifecycle, frame loop, input, time, **render extraction** |
-| `Monarc.Host.Windowed` | Runtime | `Engine`, `Render` | Window, surface, input event loop |
+| `Monarc.Host.Windowed` | Runtime | `RHI`, `Engine`, `Render` | Window, surface, input event loop |
 | `Monarc.Host.Headless` | Runtime | `Engine` | Headless/dedicated-server host. **Links no Tier 2 module** |
 
 `Monarc.Host.Windowed` is declared with `Core` + `RHI` deps today, because `Engine` and
 `Render` do not exist yet. The row above is its destination, not its present state; the tier
 is the same either way, and the entry that adds those two edges is Phase D's.
+
+The `RHI` edge in that row is deliberate and permanent, not a leftover. It changes nothing
+about what is reachable — `Monarc.Render` depends on `Monarc.RHI` *publicly*, so a windowed
+host sees RHI headers transitively whether or not it says so — and a window that must
+recreate a swapchain when the OS resizes it is RHI-aware by nature. Declaring the edge states
+a dependency that already exists rather than inheriting one silently. It costs headless
+nothing: `Monarc.Host.Headless` does not depend on `Monarc.Host.Windowed`, so rule 5 is
+untouched.
 
 `Monarc.Engine` is the only module that sees both `Monarc.World` and `Monarc.Render`. It is
 the adapter, and that is deliberate — it is where extraction lives
