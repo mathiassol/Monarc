@@ -24,24 +24,26 @@ TEST_CASE("a default-constructed window is not open") {
     CHECK_FALSE(window.IsOpen());
 }
 
-TEST_CASE("destroying a window that was never opened is harmless, and repeatable") {
-    Window window;
-    window.Destroy();
-    window.Destroy();
-    CHECK_FALSE(window.IsOpen());
-}
-
 TEST_CASE("a window description defaults to a size a swapchain could use") {
     const WindowDescription description;
     CHECK_FALSE(description.size.IsEmpty());
 }
 
-// There is deliberately no run-time test of the move operations. Create never returns an
-// open window, so m_nativeHandle is null before and after every move -- a test asserting
-// IsOpen() on either side of one would pass just as happily against a move constructor that
-// copied the handle instead of taking it, which is the exact bug those operations exist to
-// prevent. Task 4 is the first point at which such a test can fail, and is where it belongs.
-// What can be asserted now is the type's shape, which is what these do: a window owns an OS
+// There is deliberately no run-time test of the move operations, and none of Destroy(). The
+// two omissions are the same omission: Create never returns an open window, so
+// m_nativeHandle is null throughout every test in this file, and any assertion phrased in
+// terms of IsOpen() is reading a value that cannot be anything else.
+//
+// For the moves, a test asserting IsOpen() on either side of one would pass just as happily
+// against a move constructor that copied the handle instead of taking it, which is the exact
+// bug those operations exist to prevent. For Destroy(), a case calling it once or twice on a
+// never-opened window and then checking IsOpen() is false measures nothing: emptying
+// Destroy()'s body entirely was confirmed to leave this whole suite green. Such a case had
+// been here, and asserting the same standard in both directions means it is gone rather than
+// kept for the look of coverage.
+//
+// Task 4 is the first point at which either test can fail, and is where both belong. What
+// can be asserted now is the type's shape, which is what these do: a window owns an OS
 // resource, so copying it must not compile.
 static_assert(!std::is_copy_constructible_v<Window>);
 static_assert(!std::is_copy_assignable_v<Window>);

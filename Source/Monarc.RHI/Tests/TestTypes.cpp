@@ -4,6 +4,7 @@
 
 #include <Monarc/RHI/Types.h>
 
+#include <iterator>
 #include <string_view>
 
 using Monarc::RHI::BytesPerPixel;
@@ -17,19 +18,15 @@ namespace {
 /// compiler already refuses a new enumerator that nobody gave a case to. This list covers
 /// the half the compiler cannot: that the case it was given returns a real name and a real
 /// size rather than one belonging to a neighbouring row.
+///
+/// That the list is *complete* is checked by "kAllFormats lists every Format enumerator"
+/// below. It has to be a run-time case rather than a static_assert: the only thing that can
+/// answer whether a value names a format is ToString, which is not constexpr.
 constexpr Format kAllFormats[] = {
     Format::Unknown,
     Format::R8G8B8A8_UNORM,
     Format::B8G8R8A8_UNORM,
 };
-
-// The list is only worth iterating if it is complete, and nothing else checks that -- a new
-// enumerator with a correct case label but no entry here would be skipped silently by every
-// loop below. Format's enumerators are contiguous from Unknown = 0 with no explicit values
-// after it, so the last one's numeric value is the count minus one.
-static_assert(sizeof(kAllFormats) / sizeof(kAllFormats[0]) ==
-                  static_cast<Monarc::usize>(Format::B8G8R8A8_UNORM) + 1,
-              "kAllFormats must list every Format enumerator");
 
 std::string_view Name(Format format) { return std::string_view(ToString(format)); }
 
@@ -45,7 +42,37 @@ TEST_CASE("a format's name is the enumerator's own spelling") {
     CHECK(Name(Format::B8G8R8A8_UNORM) == "B8G8R8A8_UNORM");
 }
 
+TEST_CASE("kAllFormats lists every Format enumerator") {
+    // The list is only worth iterating if it is complete: an enumerator with a correct case
+    // label in Types.cpp but no entry here would be skipped silently by every loop below,
+    // and nothing else in the build would notice.
+    //
+    // C++ cannot ask an enum how many enumerators it has, so the check is indirect: it asks
+    // whether the index one past the end of the list names a format. ToString answers with
+    // its own not-a-format marker for any value no enumerator names, and comparing against
+    // ToString of a value that is definitely not a format is how that marker is identified
+    // without this file hardcoding its spelling. Append an enumerator, give it its cases,
+    // and leave the list alone, and that index becomes a named format -- the two names
+    // differ and this fails. Update both and the index is unnamed again.
+    //
+    // What it rests on: Format's enumerators are one contiguous run from Unknown = 0, which
+    // Types.h keeps by giving no explicit value after it. An enumerator added with a value
+    // outside that run would still slip past. The guard covers the append, which is the only
+    // way a format has been added or is documented to be added.
+    const Format onePastTheList = static_cast<Format>(std::size(kAllFormats));
+    CHECK(Name(onePastTheList) == Name(kNotAFormat));
+}
+
 TEST_CASE("every format is named exactly once") {
+    // The pair this matters most for is B8G8R8A8_UNORM and R8G8B8A8_UNORM, which differ only
+    // in channel order and are the same size -- a copy-paste in Types.cpp giving them one
+    // name is exactly the confusion the exact-value readback test in Task 3 exists to catch,
+    // and the loop below covers it along with every other pair.
+    //
+    // Two enumerators sharing a *value* needs no test: Types.cpp would then have duplicate
+    // case labels, which is "error C2196: case value already used" on cl and "duplicate case
+    // value" on clang-cl. No build that compiles can have that fault, so a CHECK that two
+    // format enumerators differ would only ever be asserting 1 != 2.
     for (const Format outer : kAllFormats) {
         for (const Format inner : kAllFormats) {
             if (outer != inner) {
@@ -80,15 +107,6 @@ TEST_CASE("Unknown is the only named format with no size") {
             CHECK(BytesPerPixel(format) > 0u);
         }
     }
-}
-
-TEST_CASE("the two byte-order formats are distinct despite being the same size") {
-    // B8G8R8A8 and R8G8B8A8 differ only in channel order, which is precisely the bug the
-    // exact-value readback test in Task 3 exists to catch. Equal sizes must not tempt
-    // anything into treating them as interchangeable.
-    CHECK(Format::B8G8R8A8_UNORM != Format::R8G8B8A8_UNORM);
-    CHECK(BytesPerPixel(Format::B8G8R8A8_UNORM) == BytesPerPixel(Format::R8G8B8A8_UNORM));
-    CHECK(Name(Format::B8G8R8A8_UNORM) != Name(Format::R8G8B8A8_UNORM));
 }
 
 TEST_CASE("a default extent is empty") {

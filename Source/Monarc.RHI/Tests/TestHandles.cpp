@@ -22,6 +22,18 @@ TEST_CASE("a default handle is invalid") {
     CHECK_FALSE(BufferHandle{}.IsValid());
 }
 
+TEST_CASE("ForTesting takes index first, generation second") {
+    // Every other case in this file -- and every pool test Tasks 2 and 3 will add -- reads
+    // its meaning through this function: `ForTesting(3, 1)` says "slot 3, generation 1" only
+    // because the parameters are in that order. Nothing else pins it. A test that compares
+    // one handle against another built the same way cannot tell the two arguments apart, so
+    // swapping them inside ForTesting was confirmed to leave the rest of the suite green.
+    // This is the one place the order is checked against the member names directly.
+    const TextureHandle handle = TextureHandle::ForTesting(3, 1);
+    CHECK(handle.index == 3u);
+    CHECK(handle.generation == 1u);
+}
+
 TEST_CASE("handles compare on both index and generation") {
     const TextureHandle a = TextureHandle::ForTesting(3, 1);
     const TextureHandle b = TextureHandle::ForTesting(3, 1);
@@ -40,19 +52,15 @@ TEST_CASE("generation zero is a valid generation") {
     CHECK(TextureHandle::ForTesting(0, 0).IsValid());
 }
 
-TEST_CASE("two handle types can name the same slot without being the same resource") {
-    // Buffer pool slot 7 and texture pool slot 7 are unrelated. Nothing at run time
-    // distinguishes them -- the type does, which is the whole point of the tag.
-    const BufferHandle  buffer  = BufferHandle::ForTesting(7, 2);
-    const TextureHandle texture = TextureHandle::ForTesting(7, 2);
-    CHECK(buffer.index == texture.index);
-    CHECK(buffer.generation == texture.generation);
-}
-
 // The tag parameter's entire purpose, and the one property no run-time CHECK can express:
-// mixing handle types must not compile. If the tag were dropped -- or the comparison
-// operators written over two independent template parameters -- these assertions fail and
-// say so at build time, which is when it matters.
+// mixing handle types must not compile. Buffer pool slot 7 and texture pool slot 7 name
+// unrelated resources, and nothing about the two handles at run time says so -- both carry
+// index 7 and the same generation, so every member-by-member comparison a test could write
+// passes whether the tag does its job or not. Only the type distinguishes them, which means
+// only the compiler can be asked. A TEST_CASE doing exactly that comparison used to sit
+// here; it was deleted because it reduced to 7 == 7. If the tag were dropped -- or the
+// comparison operators written over two independent template parameters -- these assertions
+// fail and say so at build time, which is when it matters.
 static_assert(!std::is_same_v<TextureHandle, BufferHandle>);
 static_assert(!std::is_assignable_v<TextureHandle&, BufferHandle>);
 static_assert(!std::is_convertible_v<BufferHandle, TextureHandle>);
