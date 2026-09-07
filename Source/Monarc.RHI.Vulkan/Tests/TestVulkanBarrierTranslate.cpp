@@ -458,11 +458,11 @@ TEST_CASE("texture and buffer usages translate to the Vulkan bits with the same 
     CHECK(ToVulkanBit(TextureUsage::None) == 0);
     CHECK(ToVulkanBit(TextureUsage::ColorAttachment) == VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
     CHECK(ToVulkanBit(TextureUsage::TransferSource) == VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
-    CHECK(ToVulkanBit(TextureUsage::TransferDestination) == VK_IMAGE_USAGE_TRANSFER_DST_BIT);
 
-    // Source against destination is the pair worth naming: swapping them creates a texture
-    // that cannot be read back, which is the exact failure the readback test would report as a
+    // Source against destination is the pair worth naming: swapping them creates a buffer that
+    // cannot receive a copy, which is the exact failure the readback test would report as a
     // validation error rather than as wrong bytes.
+    CHECK(ToVulkanBit(BufferUsage::None) == 0);
     CHECK(ToVulkanBit(BufferUsage::TransferSource) == VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
     CHECK(ToVulkanBit(BufferUsage::TransferDestination) == VK_BUFFER_USAGE_TRANSFER_DST_BIT);
 
@@ -480,6 +480,13 @@ TEST_CASE("load and store operations translate to the Vulkan ones with the same 
 
     CHECK(ToVulkan(StoreOp::Store) == VK_ATTACHMENT_STORE_OP_STORE);
     CHECK(ToVulkan(StoreOp::DontCare) == VK_ATTACHMENT_STORE_OP_DONT_CARE);
+
+    // A value no enumerator names becomes DONT_CARE and not LOAD, which Translate.h explains:
+    // of the three, LOAD is the one that would render over whatever was there and produce a
+    // frame that looks almost right. DONT_CARE leaves the attachment undefined, which cannot
+    // be mistaken for a correct result.
+    CHECK(ToVulkan(static_cast<LoadOp>(99)) == VK_ATTACHMENT_LOAD_OP_DONT_CARE);
+    CHECK(ToVulkan(static_cast<StoreOp>(99)) == VK_ATTACHMENT_STORE_OP_DONT_CARE);
 }
 
 TEST_CASE("a host-visible buffer asks for coherent memory as well as visible") {

@@ -397,10 +397,9 @@ TextureBarrier FromVulkan(const VkImageMemoryBarrier2& barrier, TextureHandle te
 
 VkImageUsageFlags ToVulkanBit(TextureUsage usage) {
     switch (usage) {
-        case TextureUsage::None:                return 0;
-        case TextureUsage::ColorAttachment:     return VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-        case TextureUsage::TransferSource:      return VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-        case TextureUsage::TransferDestination: return VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        case TextureUsage::None:            return 0;
+        case TextureUsage::ColorAttachment: return VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        case TextureUsage::TransferSource:  return VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     }
     return 0;
 }

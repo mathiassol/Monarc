@@ -341,9 +341,11 @@ static_assert(std::is_aggregate_v<BufferBarrier>);
 static_assert(std::is_default_constructible_v<GlobalBarrier>);
 static_assert(std::is_default_constructible_v<BufferBarrier>);
 
-// Trivially copyable, all three. A barrier is a value a render graph will build by the
-// thousand into an array and hand to a backend; a type with a non-trivial copy would make that
-// array's construction a loop of constructor calls.
+// Trivially copyable, all three, which is what lets a barrier be an element of a plain array
+// a backend can hand to `vkCmdPipelineBarrier2` -- the shape ADR-0005's split into three
+// variants is built for. `TextureBarrier` having a user-provided constructor is what makes
+// this worth asserting rather than obvious: a constructor is not what costs triviality, but a
+// member with an initialiser that did something would be.
 static_assert(std::is_trivially_copyable_v<GlobalBarrier>);
 static_assert(std::is_trivially_copyable_v<BufferBarrier>);
 static_assert(std::is_trivially_copyable_v<TextureBarrier>);

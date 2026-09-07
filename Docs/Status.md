@@ -863,10 +863,10 @@ The following tests did not run:
 ```
 
 - Green on all six presets, zero warnings, 9 CTest entries each
-- **1059 device-free assertions across 104 cases** — `Monarc.RHI.Tests` 47 cases / 453
-  assertions and `Monarc.RHI.Vulkan.Tests` 57 / 606 — plus **31 device-required cases and 290
+- **1061 device-free assertions across 104 cases** — `Monarc.RHI.Tests` 47 cases / 453
+  assertions and `Monarc.RHI.Vulkan.Tests` 57 / 608 — plus **31 device-required cases and 290
   assertions**, that last number scaling with how many adapters a machine has. Task 2 left 67
-  device-free cases and 247 assertions, so Task 3 adds 37 cases and 812 assertions device-free
+  device-free cases and 247 assertions, so Task 3 adds 37 cases and 814 assertions device-free
 - **What only runs with a device, and is therefore invisible in CI**: everything through
   `VulkanBackend::CreateDevice` — device creation on each adapter, the readback itself, the
   frame/pool/timeline cycle, every resource-pool and stale-handle assertion, the cross-device
@@ -890,6 +890,19 @@ The following tests did not run:
 - The messenger block came out of `BringUp` as `State::InstallMessenger`, as Task 2's review
   asked. What stayed is everything whose storage `vkCreateInstance` reads —`messengerInfo`,
   `enabledExtensions` and `applicationInfo` all have to outlive that call
+
+**Three things the self-review changed, and one of them was a false claim.**
+`kMaxColorAttachments`' comment said eight was "Vulkan's own guaranteed floor" for
+`maxColorAttachments`. It is not — the spec's required minimum is lower, and eight is
+D3D12's fixed `D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT`. Both local adapters do report eight,
+measured with `vulkaninfo`, and the constant now says what it is: a bound on the array
+`BeginRendering` builds, not a capability claim. Second, `ICommandList`'s comment on its
+protected move operations claimed nothing derived from it was movable, which is not true of a
+defaulted protected move — the reason those operations exist is that deleting copy
+suppresses the implicit moves, and `VulkanDevice` needs one. Third,
+`TextureUsage::TransferDestination` had no caller: nothing uploads to a texture yet, so the
+enumerator was removed and the header says when it comes back. That last one is the rule the
+same header states about itself, applied to the header.
 
 ## Verification gates
 

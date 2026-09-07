@@ -27,11 +27,15 @@ inline constexpr u32 kFramesInFlight = 2;
 /// covered by pure-function tests. A usage bit is not that: it is a claim about a resource a
 /// backend must create differently, so `Sampled` and `Storage` arrive with the first shader
 /// that binds one -- the same rule `Format` in Types.h states for itself.
+/// **Two usages, and `TransferDestination` is absent on purpose.** Nothing uploads *to* a
+/// texture yet -- the readback's texture is `ColorAttachment | TransferSource` and its
+/// destination is a buffer -- so an image transfer-destination bit would be an enumerator with
+/// no caller, which is the shape this rule exists to keep out. It arrives with the first thing
+/// that uploads, alongside the writable mapping that feeds it.
 enum class TextureUsage : u32 {
-    None                   = 0,
-    ColorAttachment        = 1u << 0,
-    TransferSource         = 1u << 1,
-    TransferDestination    = 1u << 2,
+    None            = 0,
+    ColorAttachment = 1u << 0,
+    TransferSource  = 1u << 1,
 };
 
 /// What a buffer will be used for. `TextureUsage`'s membership rule applies: vertex, index,
@@ -122,9 +126,14 @@ struct ColorAttachment {
 
 /// Largest number of colour attachments `ICommandList::BeginRendering` accepts.
 ///
-/// Eight is Vulkan's own guaranteed floor for `maxColorAttachments` and D3D12's fixed count,
-/// so it is the number both APIs agree a caller may rely on. A device that reported fewer
-/// would be a capability question rather than a constant; none does.
+/// Eight is D3D12's fixed `D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT`, and both adapters on the
+/// development machine report `maxColorAttachments = 8` (measured with `vulkaninfo`).
+///
+/// **It is not a claim that every device offers eight.** Vulkan's *required* minimum is lower,
+/// so this is a bound on the fixed array `BeginRendering` builds rather than a capability. The
+/// first caller that uses more than one attachment is also the first with a reason to ask the
+/// device its own limit, and that question belongs with the capability tiers in
+/// Capabilities.h -- where a field is only added when a requirement reads it.
 inline constexpr usize kMaxColorAttachments = 8;
 
 /// A rendering pass, as Vulkan 1.3 dynamic rendering and D3D12 both express one: attachments,
@@ -260,9 +269,11 @@ protected:
     ICommandList() = default;
 
     // Protected and defaulted rather than absent. Deleting the copy operations above suppresses
-    // the implicit move operations too, and a derived class that wants to be movable then finds
-    // the base's deleted copy constructor instead. Nothing derived from this is movable today;
-    // declaring these keeps that a decision the derived class makes.
+    // the implicit move operations too, so a derived class that needs to be movable would find
+    // the base's *deleted copy* constructor instead of a move. `VulkanDevice` is the one that
+    // needs it -- it is returned by value from a factory -- and declaring these on all three
+    // interfaces keeps movability a decision the derived class makes rather than one the
+    // interface forecloses.
     ICommandList(ICommandList&&)            = default;
     ICommandList& operator=(ICommandList&&) = default;
 };
@@ -303,6 +314,14 @@ public:
     /// The value the most recent `Submit` will signal, or zero if nothing has been submitted.
     /// The timeline starts at zero and no submission signals it, so zero unambiguously means
     /// "nothing submitted".
+    ///
+    /// **These two have no caller in shipped code yet, and the exception is stated rather than
+    /// left.** Their caller today is the device test, and that is what they buy: `Wait` alone
+    /// cannot tell "the GPU reached this value" from "the wait returned early", and nothing
+    /// else can assert that a fresh device's timeline is at zero or that a submission's value
+    /// is one greater than the last. A frame loop that wants to know whether frame N-2 has
+    /// finished *without* blocking -- which is what frame pacing needs, and
+    /// Docs/Rendering/RHI.md defers -- asks `CompletedValue`.
     [[nodiscard]] virtual u64 LastSubmittedValue() const = 0;
 
 protected:
