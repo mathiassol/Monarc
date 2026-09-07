@@ -4,7 +4,10 @@
 #include <Monarc/Core/Error.h>
 #include <Monarc/Core/Log.h>
 #include <Monarc/Core/Types.h>
+#include <Monarc/RHI/Barrier.h>
 #include <Monarc/RHI/Capabilities.h>
+#include <Monarc/RHI/Device.h>
+#include <Monarc/RHI/Handles.h>
 #include <Monarc/RHI/Types.h>
 
 #include <vulkan/vulkan.h>
@@ -20,6 +23,14 @@ namespace Monarc::RHI::Detail {
 /// all. That is why `ContainsExtension` and `SeverityToLogLevel` live here rather than in
 /// VulkanBackend.cpp's anonymous namespace, where they were unreachable by any test and
 /// mutations to them passed both suites.
+///
+/// The barrier translators at the foot of this file are in it under that same rule, and one of
+/// them is worth being precise about: they take a `VkBuffer` or a `VkImage` and copy it into
+/// the structure they build. That is not touching state -- the handle is never dereferenced,
+/// never dispatched through, and never compared against anything -- so `VK_NULL_HANDLE` is a
+/// legitimate argument, which is exactly how the device-free tests round-trip a barrier with no
+/// device to make a real image on. Resolving an RHI handle *to* a `VkImage` is device state and
+/// stays in VulkanDevice.cpp, on the other side of these calls.
 ///
 /// The `default`-less switches are the other point: adding an RHI enumerator becomes a
 /// compile error in Translate.cpp rather than a silent fall-through to whatever the trailing
@@ -121,5 +132,183 @@ namespace Monarc::RHI::Detail {
 /// flag-bits enum whose enumerators are individual bits, a caller may pass more than one, and
 /// a severity Vulkan adds later is a new bit that no switch would have covered either.
 [[nodiscard]] LogLevel SeverityToLogLevel(VkDebugUtilsMessageSeverityFlagBitsEXT severity);
+
+// ---------------------------------------------------------------------------------------
+// The barrier model -- ADR-0005, as Monarc/RHI/Barrier.h declares it.
+//
+// **Every enumerator is translated, though A3 records only three barriers.** The plan asks
+// for exactly that: translation for all of the model, two barriers used, and the rest carried
+// by the pure-function tests in Tests/TestVulkanBarrierTranslate.cpp. So the coverage claim
+// here is a test's, not a caller's.
+//
+// The forward direction is split in two for each flag set, because a mask and one bit are the
+// same C++ type and cannot be overloads. `ToVulkanBit` is the exhaustive `default`-less switch
+// over the enumerators; `ToVulkan` walks a mask's set bits through it and ORs the results, so
+// `ToVulkan(Copy | Blit)` is the union and `ToVulkan(None)` is zero. Callers want `ToVulkan`.
+//
+// The reverse direction is `FromVulkanStages` / `FromVulkanAccess` rather than two overloads
+// of one name, because `VkPipelineStageFlags2` and `VkAccessFlags2` are both `VkFlags64` and
+// are therefore the same type: an overload pair would not compile, and one that did would be
+// picked by the argument's width rather than by its meaning.
+// ---------------------------------------------------------------------------------------
+
+/// The Vulkan stage bit `stage` names, for one enumerator.
+///
+/// **An unrecognised value translates to `VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT`, and that is
+/// the opposite of what `ToVulkan(Format)` above does with one.** A format has an
+/// obviously-invalid answer -- `VK_FORMAT_UNDEFINED` makes Vulkan reject the call, loudly. A
+/// stage mask has none: every bit pattern is a legal mask, so the choice is between
+/// under-synchronising and over-synchronising, and only one of those is safe. Over-
+/// synchronising is indistinguishable from `PipelineStage::AllCommands` in the result, which
+/// is accepted: both mean "wait for everything".
+///
+/// Reachable only through a cast -- `PipelineStage` has a fixed underlying type -- or through a
+/// mask carrying a bit no enumerator names, which is the same thing. Tests/ pins it.
+[[nodiscard]] VkPipelineStageFlags2 ToVulkanBit(PipelineStage stage);
+
+/// The union of `ToVulkanBit` over every bit set in `stages`. `PipelineStage::None` is zero,
+/// which is `VK_PIPELINE_STAGE_2_NONE`.
+[[nodiscard]] VkPipelineStageFlags2 ToVulkan(PipelineStage stages);
+
+/// Every stage in `stages` that Monarc models, as a `PipelineStage` mask.
+///
+/// **Not exhaustive, and cannot be**, for the reason `FromVulkan(VkFormat)` gives: Vulkan
+/// names far more stages than Monarc does. A bit Monarc does not model is dropped rather than
+/// approximated, because there is no honest stage to approximate it with -- and the property
+/// the tests pin is the one that matters, that `FromVulkanStages(ToVulkan(s)) == s` for every
+/// `s` Monarc does model.
+[[nodiscard]] PipelineStage FromVulkanStages(VkPipelineStageFlags2 stages);
+
+/// `ToVulkanBit(PipelineStage)`'s counterpart for access. An unrecognised value becomes
+/// `VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT` -- the conservative answer,
+/// for the reason given there.
+[[nodiscard]] VkAccessFlags2 ToVulkanBit(Access access);
+
+/// The union of `ToVulkanBit` over every bit set in `accesses`.
+[[nodiscard]] VkAccessFlags2 ToVulkan(Access accesses);
+
+/// Every access in `accesses` that Monarc models. `FromVulkanStages`'s note applies.
+[[nodiscard]] Access FromVulkanAccess(VkAccessFlags2 accesses);
+
+/// The Vulkan layout `layout` names. `VK_IMAGE_LAYOUT_MAX_ENUM` for a value outside the
+/// enumerator set -- an answer Vulkan rejects wherever it is used, which is what a layout's
+/// equivalent of `VK_FORMAT_UNDEFINED` has to be: `VK_IMAGE_LAYOUT_UNDEFINED` would be
+/// accepted as a `layoutBefore` and would silently discard the texture's contents.
+[[nodiscard]] VkImageLayout ToVulkan(TextureLayout layout);
+
+/// The RHI layout `layout` names, or `TextureLayout::Undefined` if Monarc does not model it.
+/// Not exhaustive; `FromVulkan(VkFormat)`'s reasoning.
+[[nodiscard]] TextureLayout FromVulkan(VkImageLayout layout);
+
+/// A global memory barrier. `sType` is set: a structure handed to `vkCmdPipelineBarrier2` with
+/// a zero `sType` is rejected, and nothing else in the pipeline would notice the omission.
+///
+/// A barrier that changes nothing translates to a real `VkMemoryBarrier2` with `NONE` masks
+/// rather than to nothing at all. Dropping it is not this function's decision to make -- see
+/// `ICommandList::Barrier`.
+[[nodiscard]] VkMemoryBarrier2 ToVulkan(const GlobalBarrier& barrier);
+
+/// A buffer memory barrier over the whole of `buffer` -- offset zero, `VK_WHOLE_SIZE`.
+///
+/// A sub-range arrives with a caller that has one; A3's readback barriers the buffer it just
+/// filled, entire. Queue family indices are `VK_QUEUE_FAMILY_IGNORED` on both sides: Monarc
+/// has one queue, so there is no ownership to transfer.
+[[nodiscard]] VkBufferMemoryBarrier2 ToVulkan(const BufferBarrier& barrier, VkBuffer buffer);
+
+/// An image memory barrier over the whole of `image` -- every mip level, every array layer.
+///
+/// The aspect is `VK_IMAGE_ASPECT_COLOR_BIT`, and that is a consequence of `Format` in
+/// Types.h having no depth or stencil format rather than a simplification: there is no
+/// texture in Monarc today whose aspect could be anything else. A depth aspect arrives with
+/// the first depth format, alongside the aspect-aware size query Types.h already says that
+/// format needs.
+[[nodiscard]] VkImageMemoryBarrier2 ToVulkan(const TextureBarrier& barrier, VkImage image);
+
+/// The RHI barrier `barrier` came from. The reverse of `ToVulkan(const GlobalBarrier&)`, and
+/// what makes "the struct round-trips through translation unchanged" a statement a test can
+/// make rather than an inspection of two switches.
+[[nodiscard]] GlobalBarrier FromVulkan(const VkMemoryBarrier2& barrier);
+
+/// The RHI barrier `barrier` came from, over `buffer`.
+///
+/// The handle is a parameter because it is not in the Vulkan structure: that carries a
+/// `VkBuffer`, and turning one back into a pool handle would need the device's pools. So the
+/// round-trip this supports is over the sync and access fields, and that the `VkBuffer` was
+/// carried across at all is asserted directly on `ToVulkan`'s result instead.
+[[nodiscard]] BufferBarrier FromVulkan(const VkBufferMemoryBarrier2& barrier,
+                                       BufferHandle                  buffer);
+
+/// The RHI barrier `barrier` came from, over `texture`. See `FromVulkan(const
+/// VkBufferMemoryBarrier2&, BufferHandle)` for why the handle is a parameter.
+[[nodiscard]] TextureBarrier FromVulkan(const VkImageMemoryBarrier2& barrier,
+                                        TextureHandle                texture);
+
+// ---------------------------------------------------------------------------------------
+// Resource creation and rendering. Not part of ADR-0005's model, and governed by the
+// narrower membership rule Monarc/RHI/Device.h states for its own enums: an enumerator
+// arrives with the resource that needs one.
+// ---------------------------------------------------------------------------------------
+
+/// The Vulkan image usage bit `usage` names, for one enumerator. Zero for an unrecognised
+/// value, which is `ToVulkanBit(PipelineStage)`'s opposite and deliberately so: a dropped
+/// usage is caught by validation at the first use of the resource, where a dropped stage would
+/// be a synchronisation hole nothing reports.
+[[nodiscard]] VkImageUsageFlags ToVulkanBit(TextureUsage usage);
+
+/// The union of `ToVulkanBit` over every bit set in `usage`.
+[[nodiscard]] VkImageUsageFlags ToVulkan(TextureUsage usage);
+
+/// `ToVulkanBit(TextureUsage)` for buffers.
+[[nodiscard]] VkBufferUsageFlags ToVulkanBit(BufferUsage usage);
+
+/// The union of `ToVulkanBit` over every bit set in `usage`.
+[[nodiscard]] VkBufferUsageFlags ToVulkan(BufferUsage usage);
+
+/// The Vulkan load operation `loadOp` names.
+///
+/// No reverse. The round-trip requirement is ADR-0005's, about barriers; for these two the
+/// property worth pinning is that each enumerator maps to the *right* Vulkan value and that no
+/// two share one, which a test asserts on the forward direction alone. A reverse function
+/// existing only to be called by a test would be the machinery, not the coverage.
+[[nodiscard]] VkAttachmentLoadOp ToVulkan(LoadOp loadOp);
+
+/// The Vulkan store operation `storeOp` names. `ToVulkan(LoadOp)`'s note about the missing
+/// reverse applies.
+[[nodiscard]] VkAttachmentStoreOp ToVulkan(StoreOp storeOp);
+
+/// The memory property bits a buffer in `location` must be allocated from.
+///
+/// `HostVisible` asks for `HOST_COHERENT` as well as `HOST_VISIBLE`, which is what lets
+/// `IDevice::MapBufferForRead` return a span a caller may simply read: without coherence a
+/// mapped read needs `vkInvalidateMappedMemoryRanges` around it, and every Vulkan
+/// implementation is required to expose at least one memory type with both bits.
+[[nodiscard]] VkMemoryPropertyFlags ToVulkan(MemoryLocation location);
+
+/// No memory type has this index. Returned by `FindMemoryType` when none matches.
+inline constexpr u32 kNoMemoryType = static_cast<u32>(-1);
+
+/// Index of the first memory type that is both allowed by `allowedTypeBits` and has every bit
+/// of `required` set, or `kNoMemoryType`.
+///
+/// `allowedTypeBits` is `VkMemoryRequirements::memoryTypeBits` -- a mask over
+/// `properties.memoryTypes`, bit *i* meaning type *i* is usable for that resource. Both halves
+/// have to hold: a type the resource cannot use is no good however well its properties match,
+/// and a matching-but-unusable type is exactly the mistake that produces a mapped pointer into
+/// device-local memory.
+///
+/// **First match, not best.** Vulkan requires implementations to list memory types in an order
+/// where the earlier of two equally-suitable types is no worse -- the spec's own recommended
+/// search is this one -- so "first" is the ordering the driver chose rather than an arbitrary
+/// pick. `required` is a *subset* test and not equality: a host-visible, host-coherent type
+/// that is also device-local satisfies a HostVisible request, and on an integrated part like
+/// the Intel UHD 730 that is the only kind there is.
+///
+/// Pure, and in this file rather than in VulkanDevice.cpp, under the membership rule at the
+/// top: it reads a properties struct the caller hands it and touches no device. That is what
+/// makes it testable in CI against memory layouts this machine does not have -- an
+/// all-device-local device, a type whose bit is masked out -- which is the half a real GPU
+/// cannot exercise.
+[[nodiscard]] u32 FindMemoryType(const VkPhysicalDeviceMemoryProperties& properties,
+                                 u32 allowedTypeBits, VkMemoryPropertyFlags required);
 
 }  // namespace Monarc::RHI::Detail

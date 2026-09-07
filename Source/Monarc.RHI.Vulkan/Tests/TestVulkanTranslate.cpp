@@ -209,10 +209,21 @@ TEST_CASE("a VkResult outside Monarc's table says so rather than guessing") {
     CHECK(unknown != "VK_SUCCESS");
     CHECK(unknown.find("not in Monarc's table") != std::string_view::npos);
 
-    // VK_ERROR_DEVICE_LOST is a real result that Task 3's submissions can return and Task 2's
-    // calls cannot, so it is deliberately absent from the table today. Pinned here so that
-    // adding it is a visible change to this case rather than a silent one.
-    CHECK(std::string_view(ToString(VK_ERROR_DEVICE_LOST)) == unknown);
+    // The five results Task 3 added, each because a call this module now makes can return it.
+    // Named individually rather than looped, so a row deleted from the table is a red
+    // assertion naming the result rather than a count going down by one.
+    CHECK(std::string_view(ToString(VK_TIMEOUT)) == "VK_TIMEOUT");
+    CHECK(std::string_view(ToString(VK_ERROR_FEATURE_NOT_PRESENT)) ==
+          "VK_ERROR_FEATURE_NOT_PRESENT");
+    CHECK(std::string_view(ToString(VK_ERROR_TOO_MANY_OBJECTS)) == "VK_ERROR_TOO_MANY_OBJECTS");
+    CHECK(std::string_view(ToString(VK_ERROR_MEMORY_MAP_FAILED)) ==
+          "VK_ERROR_MEMORY_MAP_FAILED");
+    CHECK(std::string_view(ToString(VK_ERROR_DEVICE_LOST)) == "VK_ERROR_DEVICE_LOST");
+
+    // And one that is still absent, so the fallback stays exercised by a real result rather
+    // than only by the cast above. VK_ERROR_SURFACE_LOST_KHR belongs to the swapchain, which
+    // is Task 4's; when that call arrives, this line is where it says so.
+    CHECK(std::string_view(ToString(VK_ERROR_SURFACE_LOST_KHR)) == unknown);
 }
 
 TEST_CASE("a result meaning the capability is absent is Unsupported, not BackendFailure") {
@@ -225,6 +236,10 @@ TEST_CASE("a result meaning the capability is absent is Unsupported, not Backend
     CHECK(ToErrorCode(VK_ERROR_INCOMPATIBLE_DRIVER) == Monarc::ErrorCode::Unsupported);
     CHECK(ToErrorCode(VK_ERROR_LAYER_NOT_PRESENT) == Monarc::ErrorCode::Unsupported);
     CHECK(ToErrorCode(VK_ERROR_EXTENSION_NOT_PRESENT) == Monarc::ErrorCode::Unsupported);
+
+    // The fourth, added in Task 3 with the call that produces it: vkCreateDevice reports this
+    // when a requested feature is absent, and Monarc requests three of them by name.
+    CHECK(ToErrorCode(VK_ERROR_FEATURE_NOT_PRESENT) == Monarc::ErrorCode::Unsupported);
 }
 
 TEST_CASE("every other result the backend can receive stays BackendFailure") {
