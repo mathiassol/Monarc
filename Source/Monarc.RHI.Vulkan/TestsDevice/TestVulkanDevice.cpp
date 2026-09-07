@@ -29,8 +29,12 @@
 #include <Monarc/Core/Log.h>
 #include <Monarc/Core/Memory/SystemAllocator.h>
 #include <Monarc/RHI/Adapter.h>
+#include <Monarc/RHI/Barrier.h>
 #include <Monarc/RHI/Capabilities.h>
+#include <Monarc/RHI/Device.h>
+#include <Monarc/RHI/Types.h>
 #include <Monarc/RHI/Vulkan/VulkanBackend.h>
+#include <Monarc/RHI/Vulkan/VulkanDevice.h>
 
 #include <Loader.h>
 #include <LoaderTables.h>
@@ -70,6 +74,37 @@ Monarc::Array<Monarc::RHI::AdapterInfo>* g_rawAdapters = nullptr;
 [[nodiscard]] const Monarc::Array<Monarc::RHI::AdapterInfo>& Adapters() { return *g_adapters; }
 [[nodiscard]] const Monarc::Array<Monarc::RHI::AdapterInfo>& RawAdapters() {
     return *g_rawAdapters;
+}
+
+/// The colour the readback clears to and asserts, as bytes and as the floats that produce them.
+///
+/// **Exact, with no tolerance, and the values are chosen so that exactness is available.**
+/// Each of 64, 128 and 192 over 255 survives the round trip through `f32` and back through
+/// UNORM quantisation, so the driver has no rounding decision to make -- which is the whole
+/// point: a tolerance here would hide exactly the two bugs this test exists to catch, a
+/// channel order swapped (64 and 192 are far apart and asymmetric, so R and B swapping is
+/// visible) and a colour space applied (an sRGB encode of 0.251 lands near 137, not 64).
+constexpr Monarc::u8 kExpectedBytes[4] = {64, 128, 192, 255};
+
+constexpr Monarc::RHI::ClearColor kClearColor{
+    static_cast<Monarc::f32>(kExpectedBytes[0]) / 255.0F,
+    static_cast<Monarc::f32>(kExpectedBytes[1]) / 255.0F,
+    static_cast<Monarc::f32>(kExpectedBytes[2]) / 255.0F,
+    static_cast<Monarc::f32>(kExpectedBytes[3]) / 255.0F};
+
+/// The readback target's size.
+///
+/// Four by four rather than one by one, deliberately: a single pixel would pass with a copy
+/// whose row pitch was wrong, and sixteen is enough for a row-stride mistake to land the
+/// second row's bytes somewhere this test looks. Small enough that every pixel is asserted
+/// individually rather than sampled.
+constexpr Monarc::RHI::Extent2D kReadbackExtent{4, 4};
+
+constexpr Monarc::RHI::Format kReadbackFormat = Monarc::RHI::Format::R8G8B8A8_UNORM;
+
+[[nodiscard]] Monarc::u64 ReadbackByteCount() {
+    return static_cast<Monarc::u64>(kReadbackExtent.width) * kReadbackExtent.height *
+           Monarc::RHI::BytesPerPixel(kReadbackFormat);
 }
 
 void ReportAdapter(const char* label, Monarc::usize index,
@@ -390,6 +425,824 @@ TEST_CASE("opening a library that is not the Vulkan loader still fails on a mach
     REQUIRE_FALSE(opened.has_value());
     CHECK(opened.error().code == Monarc::ErrorCode::NotFound);
     CHECK(opened.error().message.find("vkGetInstanceProcAddr") != std::string_view::npos);
+}
+
+// ---------------------------------------------------------------------------------------
+// Task 3: the device, its queue and timeline, its resource pools, and the readback.
+// ---------------------------------------------------------------------------------------
+
+namespace {
+
+/// A device brought up on `adapter`, with an allocator of its own.
+///
+/// A struct and not a factory function, for the ordering: the allocator must outlive the
+/// device, and declaring it first is what guarantees that -- members are destroyed in reverse
+/// declaration order, so the device releases its state before the allocator it came from goes
+/// away. A pair of locals in each case would work too and would put the ordering rule in
+/// twelve places instead of one.
+struct DeviceUnderTest {
+    explicit DeviceUnderTest(const Monarc::RHI::AdapterInfo&  adapter,
+                             const Monarc::RHI::DeviceConfig& config = {})
+        : created(Backend().CreateDevice(allocator, adapter, config)) {}
+
+    Monarc::SystemAllocator                   allocator;
+    Monarc::Result<Monarc::RHI::VulkanDevice> created;
+};
+
+}  // namespace
+
+TEST_CASE("a device comes up on every deduplicated adapter in turn and shuts down cleanly") {
+    // **Both local GPUs, not just the default**, which is the checkbox's own wording and the
+    // reason the Intel part is worth having: a device-creation path that only ever ran on the
+    // NVIDIA card would be validated against one driver.
+    REQUIRE_FALSE(Adapters().IsEmpty());
+
+    for (Monarc::usize i = 0; i < Adapters().Size(); ++i) {
+        const Monarc::RHI::AdapterInfo& adapter = Adapters()[i];
+        DeviceUnderTest                 device(adapter);
+
+        REQUIRE(device.created.has_value());
+        CHECK(device.created->IsInitialized());
+
+        // The device describes itself from the driver rather than echoing the argument --
+        // VulkanBackend::CreateDevice re-queries, and only the UUID is taken from what was
+        // passed in. The UUID must match (that is the lookup) and the name must too (that is
+        // the re-query having found the same device).
+        CHECK(device.created->Adapter().uuid == adapter.uuid);
+        CHECK(std::string_view(device.created->Adapter().name) ==
+              std::string_view(adapter.name));
+
+        // The queue came from a family the adapter reported as graphics-capable. Six families
+        // on the RTX 3070 Ti and two on the Intel UHD 730, one graphics family each, so an
+        // off-by-one in the family search would produce a different index on the two.
+        CHECK(device.created->GraphicsQueueFamilyIndex() < adapter.queueFamilyCount);
+
+        // Nothing submitted, so the timeline is untouched. Zero means "nothing submitted"
+        // because no submission ever signals zero -- FrameSlot::timelineValue depends on that.
+        CHECK(device.created->GraphicsQueue().LastSubmittedValue() == 0);
+        const Monarc::Result<Monarc::u64> completed =
+            device.created->GraphicsQueue().CompletedValue();
+        REQUIRE(completed.has_value());
+        CHECK(*completed == 0);
+
+        REQUIRE(device.created->WaitIdle().has_value());
+
+        // Shut down twice, then confirm the queries answer as an empty device rather than
+        // dereferencing. Getting the teardown order wrong inside Shutdown is a validation
+        // error and not a crash -- which, with the fatal messenger installed, stops this
+        // process -- so this case is also what catches that.
+        device.created->Shutdown();
+        device.created->Shutdown();
+        CHECK_FALSE(device.created->IsInitialized());
+
+        MONARC_LOG(VulkanDeviceTest, Info, "device created and destroyed on \"{}\" | tier {}",
+                   adapter.name, Monarc::RHI::ToString(adapter.tier));
+    }
+}
+
+TEST_CASE("a device releases everything it allocated") {
+    Monarc::SystemAllocator allocator;
+    REQUIRE(allocator.BytesAllocated() == 0);
+    {
+        Monarc::Result<Monarc::RHI::VulkanDevice> device =
+            Backend().CreateDevice(allocator, Adapters()[0], Monarc::RHI::DeviceConfig{});
+        REQUIRE(device.has_value());
+
+        // Non-zero before the scope ends, so the assertion after it is about a release rather
+        // than about nothing ever having been allocated.
+        CHECK(allocator.BytesAllocated() > 0);
+    }
+    CHECK(allocator.BytesAllocated() == 0);
+}
+
+TEST_CASE("THE READBACK: a clear through BeginRendering reads back as the exact bytes") {
+    // **The headline of the phase, and it runs on every adapter in turn.** A result that
+    // differs between vendors is a finding and not a flake, which is why every pixel is
+    // asserted and the bytes are logged per adapter rather than only on failure.
+    //
+    // The clear goes through `BeginRendering` with `LoadOp::Clear` and *not* through a
+    // clear-image command, and that is the point of the whole case. A readback that proved a
+    // clear-image path would be coverage for a code path nothing else in the engine uses:
+    // Task 4's swapchain clear and A4's render graph both clear through a dynamic-rendering
+    // load-op, so this is the path that has to be the one under test.
+    REQUIRE_FALSE(Adapters().IsEmpty());
+
+    for (Monarc::usize adapterIndex = 0; adapterIndex < Adapters().Size(); ++adapterIndex) {
+        const Monarc::RHI::AdapterInfo& adapter = Adapters()[adapterIndex];
+        DeviceUnderTest                 held(adapter);
+        REQUIRE(held.created.has_value());
+        Monarc::RHI::IDevice& device = *held.created;
+
+        Monarc::RHI::TextureDescription textureDescription{};
+        textureDescription.extent = kReadbackExtent;
+        textureDescription.format = kReadbackFormat;
+        textureDescription.usage  = Monarc::RHI::TextureUsage::ColorAttachment |
+                                   Monarc::RHI::TextureUsage::TransferSource;
+
+        const Monarc::Result<Monarc::RHI::TextureHandle> texture =
+            device.CreateTexture(textureDescription);
+        REQUIRE(texture.has_value());
+
+        Monarc::RHI::BufferDescription bufferDescription{};
+        bufferDescription.size     = ReadbackByteCount();
+        bufferDescription.usage    = Monarc::RHI::BufferUsage::TransferDestination;
+        bufferDescription.location = Monarc::RHI::MemoryLocation::HostVisible;
+
+        const Monarc::Result<Monarc::RHI::BufferHandle> buffer =
+            device.CreateBuffer(bufferDescription);
+        REQUIRE(buffer.has_value());
+
+        const Monarc::Result<Monarc::RHI::ICommandList*> commands = device.BeginFrame();
+        REQUIRE(commands.has_value());
+        REQUIRE(*commands != nullptr);
+        Monarc::RHI::ICommandList& list = **commands;
+        REQUIRE(list.Begin().has_value());
+
+        // Barrier one. Undefined is the layout every texture starts in, and transitioning out
+        // of it discards whatever the memory held -- correct here, because the very next thing
+        // is a clear.
+        list.Barrier(Monarc::RHI::TextureBarrier(
+            *texture, Monarc::RHI::TextureLayout::Undefined,
+            Monarc::RHI::TextureLayout::ColorAttachment, Monarc::RHI::PipelineStage::None,
+            Monarc::RHI::PipelineStage::ColorAttachmentOutput, Monarc::RHI::Access::None,
+            Monarc::RHI::Access::ColorAttachmentWrite));
+
+        const Monarc::RHI::ColorAttachment attachments[1] = {
+            {*texture, Monarc::RHI::LoadOp::Clear, Monarc::RHI::StoreOp::Store, kClearColor}};
+
+        Monarc::RHI::RenderingDescription rendering{};
+        rendering.extent           = kReadbackExtent;
+        rendering.colorAttachments = attachments;
+
+        // No draw call, and none is needed: a load-op clear happens when rendering begins.
+        REQUIRE(list.BeginRendering(rendering).has_value());
+        list.EndRendering();
+
+        // Barrier two.
+        list.Barrier(Monarc::RHI::TextureBarrier(
+            *texture, Monarc::RHI::TextureLayout::ColorAttachment,
+            Monarc::RHI::TextureLayout::TransferSource,
+            Monarc::RHI::PipelineStage::ColorAttachmentOutput, Monarc::RHI::PipelineStage::Copy,
+            Monarc::RHI::Access::ColorAttachmentWrite, Monarc::RHI::Access::TransferRead));
+
+        REQUIRE(list.CopyTextureToBuffer(*texture, *buffer).has_value());
+
+        // **Barrier three, which the phase plan did not list and correctness needs.** Waiting
+        // on the timeline makes the copy's writes *available*; it does not make them visible
+        // to the host. A memory dependency into the host stage is what does, and without it a
+        // mapped read is reading memory whose visibility nothing established -- a bug that
+        // would show up as intermittently stale bytes on some driver rather than as a failure
+        // here. It also gives `BufferBarrier` a real caller instead of only a pure-function
+        // test, which is worth having on its own.
+        list.Barrier(Monarc::RHI::BufferBarrier{
+            *buffer, Monarc::RHI::PipelineStage::Copy, Monarc::RHI::PipelineStage::Host,
+            Monarc::RHI::Access::TransferWrite, Monarc::RHI::Access::HostRead});
+
+        REQUIRE(list.End().has_value());
+
+        const Monarc::Result<Monarc::u64> submitted = device.GraphicsQueue().Submit(list);
+        REQUIRE(submitted.has_value());
+
+        // The first submission on a fresh device signals one, from a timeline that started at
+        // zero. A queue that signalled zero would make FrameSlot::timelineValue's "zero means
+        // never submitted" wrong, and BeginFrame would stop waiting.
+        CHECK(*submitted == 1);
+        CHECK(device.GraphicsQueue().LastSubmittedValue() == *submitted);
+
+        REQUIRE(device.GraphicsQueue().Wait(*submitted, 5'000'000'000ULL).has_value());
+
+        const Monarc::Result<Monarc::u64> completed = device.GraphicsQueue().CompletedValue();
+        REQUIRE(completed.has_value());
+        CHECK(*completed >= *submitted);
+
+        const Monarc::Result<std::span<const Monarc::u8>> mapped =
+            device.MapBufferForRead(*buffer);
+        REQUIRE(mapped.has_value());
+        REQUIRE(mapped->size() == ReadbackByteCount());
+
+        // Every pixel, individually. The first-pixel assertion is the headline and the loop is
+        // what catches a copy whose row pitch was wrong -- on a 4-wide target a stride bug
+        // moves the second row's bytes somewhere inside this span rather than past the end.
+        MONARC_LOG(VulkanDeviceTest, Info,
+                   "readback on \"{}\": first pixel = ({}, {}, {}, {}), expected ({}, {}, {}, "
+                   "{})",
+                   adapter.name, (*mapped)[0], (*mapped)[1], (*mapped)[2], (*mapped)[3],
+                   kExpectedBytes[0], kExpectedBytes[1], kExpectedBytes[2], kExpectedBytes[3]);
+
+        CHECK((*mapped)[0] == kExpectedBytes[0]);
+        CHECK((*mapped)[1] == kExpectedBytes[1]);
+        CHECK((*mapped)[2] == kExpectedBytes[2]);
+        CHECK((*mapped)[3] == kExpectedBytes[3]);
+
+        Monarc::usize matchingPixels = 0;
+        for (Monarc::usize pixel = 0; pixel < mapped->size() / 4; ++pixel) {
+            const Monarc::u8* bytes = mapped->data() + pixel * 4;
+            if (bytes[0] == kExpectedBytes[0] && bytes[1] == kExpectedBytes[1] &&
+                bytes[2] == kExpectedBytes[2] && bytes[3] == kExpectedBytes[3]) {
+                ++matchingPixels;
+            }
+        }
+        CHECK(matchingPixels == mapped->size() / 4);
+        MONARC_LOG(VulkanDeviceTest, Info, "readback on \"{}\": {} of {} pixel(s) exact",
+                   adapter.name, matchingPixels, mapped->size() / 4);
+
+        device.UnmapBuffer(*buffer);
+
+        // Destroyed explicitly rather than left to Shutdown, so the release path a frame loop
+        // uses is the one under test. Shutdown's own sweep is covered by the case above, which
+        // destroys a device with live resources still in its pools.
+        device.DestroyBuffer(*buffer);
+        device.DestroyTexture(*texture);
+    }
+}
+
+TEST_CASE("a second frame reuses the other slot's pool after waiting for it") {
+    // kFramesInFlight is two, so this is what exercises the wrap: the third BeginFrame returns
+    // slot 0 again and must wait on the value the *first* submission signalled before resetting
+    // that pool. Resetting a command pool whose buffers are still executing is undefined
+    // behaviour and a validation error, so a missing wait stops this process rather than
+    // producing a wrong number.
+    DeviceUnderTest held(Adapters()[0]);
+    REQUIRE(held.created.has_value());
+    Monarc::RHI::IDevice& device = *held.created;
+
+    Monarc::RHI::ICommandList* first = nullptr;
+    Monarc::u64                previous = 0;
+
+    for (Monarc::u32 frame = 0; frame < Monarc::RHI::kFramesInFlight + 1; ++frame) {
+        const Monarc::Result<Monarc::RHI::ICommandList*> commands = device.BeginFrame();
+        REQUIRE(commands.has_value());
+        REQUIRE(*commands != nullptr);
+
+        if (frame == 0) {
+            first = *commands;
+        } else if (frame == 1) {
+            // Distinct lists, which is what says the frames really do have their own pools
+            // rather than one pool handed out twice.
+            CHECK(*commands != first);
+        } else {
+            // And the wrap comes back to the first one.
+            CHECK(*commands == first);
+        }
+
+        REQUIRE((*commands)->Begin().has_value());
+        // A barrier that changes nothing, recorded on purpose: an empty command buffer is
+        // legal, and this makes the submission carry the barrier the interface says is never
+        // dropped rather than nothing at all.
+        (*commands)->Barrier(Monarc::RHI::GlobalBarrier{});
+        REQUIRE((*commands)->End().has_value());
+
+        const Monarc::Result<Monarc::u64> submitted =
+            device.GraphicsQueue().Submit(**commands);
+        REQUIRE(submitted.has_value());
+
+        // Strictly increasing, one per submission, which is what a caller holding an earlier
+        // value depends on: a timeline that reused a value would let a wait return for work
+        // that had not run.
+        CHECK(*submitted == previous + 1);
+        previous = *submitted;
+    }
+
+    REQUIRE(device.WaitIdle().has_value());
+}
+
+TEST_CASE("a command list from one device is refused by another device's queue") {
+    // Two adapters means two devices, so this is a mistake that can actually be made here
+    // rather than a hypothetical. It is refused by identity -- the queue looks for the list
+    // among its own device's -- and not by a downcast, which is what keeps it safe rather than
+    // undefined; see VulkanDeviceState::FindOwnList.
+    if (Adapters().Size() < 2) {
+        MONARC_LOG(VulkanDeviceTest, Info,
+                   "this machine has one adapter, so there is no second device to cross; "
+                   "skipping the cross-device submission case");
+        return;
+    }
+
+    DeviceUnderTest first(Adapters()[0]);
+    DeviceUnderTest second(Adapters()[1]);
+    REQUIRE(first.created.has_value());
+    REQUIRE(second.created.has_value());
+
+    const Monarc::Result<Monarc::RHI::ICommandList*> commands = first.created->BeginFrame();
+    REQUIRE(commands.has_value());
+    REQUIRE((*commands)->Begin().has_value());
+    REQUIRE((*commands)->End().has_value());
+
+    const Monarc::Result<Monarc::u64> crossed =
+        second.created->GraphicsQueue().Submit(**commands);
+    REQUIRE_FALSE(crossed.has_value());
+    CHECK(crossed.error().code == Monarc::ErrorCode::InvalidArgument);
+
+    // And the same list is accepted by the queue it does belong to, so the refusal above is
+    // about ownership rather than about the list being unusable.
+    const Monarc::Result<Monarc::u64> accepted =
+        first.created->GraphicsQueue().Submit(**commands);
+    CHECK(accepted.has_value());
+    REQUIRE(first.created->WaitIdle().has_value());
+}
+
+TEST_CASE("a list that is still recording is refused rather than submitted") {
+    DeviceUnderTest held(Adapters()[0]);
+    REQUIRE(held.created.has_value());
+
+    const Monarc::Result<Monarc::RHI::ICommandList*> commands = held.created->BeginFrame();
+    REQUIRE(commands.has_value());
+    REQUIRE((*commands)->Begin().has_value());
+
+    // Submitting a command buffer that vkEndCommandBuffer has not closed is a validation
+    // error, which with the fatal messenger installed would stop this process -- so the
+    // interface refusing it is what keeps the mistake reportable.
+    const Monarc::Result<Monarc::u64> submitted =
+        held.created->GraphicsQueue().Submit(**commands);
+    REQUIRE_FALSE(submitted.has_value());
+    CHECK(submitted.error().code == Monarc::ErrorCode::InvalidArgument);
+
+    // Beginning twice is refused too, and for the same reason: vkBeginCommandBuffer on a
+    // buffer already in the recording state is a validation error.
+    const Monarc::Status again = (*commands)->Begin();
+    REQUIRE_FALSE(again.has_value());
+    CHECK(again.error().code == Monarc::ErrorCode::InvalidArgument);
+
+    REQUIRE((*commands)->End().has_value());
+}
+
+TEST_CASE("a rendering pass must be ended before the list is") {
+    DeviceUnderTest held(Adapters()[0]);
+    REQUIRE(held.created.has_value());
+    Monarc::RHI::IDevice& device = *held.created;
+
+    Monarc::RHI::TextureDescription description{};
+    description.extent = kReadbackExtent;
+    description.format = kReadbackFormat;
+    description.usage  = Monarc::RHI::TextureUsage::ColorAttachment;
+
+    const Monarc::Result<Monarc::RHI::TextureHandle> texture = device.CreateTexture(description);
+    REQUIRE(texture.has_value());
+
+    const Monarc::Result<Monarc::RHI::ICommandList*> commands = device.BeginFrame();
+    REQUIRE(commands.has_value());
+    Monarc::RHI::ICommandList& list = **commands;
+    REQUIRE(list.Begin().has_value());
+
+    list.Barrier(Monarc::RHI::TextureBarrier(
+        *texture, Monarc::RHI::TextureLayout::Undefined,
+        Monarc::RHI::TextureLayout::ColorAttachment, Monarc::RHI::PipelineStage::None,
+        Monarc::RHI::PipelineStage::ColorAttachmentOutput, Monarc::RHI::Access::None,
+        Monarc::RHI::Access::ColorAttachmentWrite));
+
+    const Monarc::RHI::ColorAttachment attachments[1] = {
+        {*texture, Monarc::RHI::LoadOp::Clear, Monarc::RHI::StoreOp::Store, kClearColor}};
+    Monarc::RHI::RenderingDescription rendering{};
+    rendering.extent           = kReadbackExtent;
+    rendering.colorAttachments = attachments;
+
+    REQUIRE(list.BeginRendering(rendering).has_value());
+
+    // Nested passes and copies inside a pass are both validation errors, and both are refused
+    // here instead. Refusing is what keeps a caller mistake a returned Status rather than a
+    // process that stops at 0x80000003.
+    const Monarc::Status nested = list.BeginRendering(rendering);
+    REQUIRE_FALSE(nested.has_value());
+    CHECK(nested.error().code == Monarc::ErrorCode::InvalidArgument);
+
+    const Monarc::Status ended = list.End();
+    REQUIRE_FALSE(ended.has_value());
+    CHECK(ended.error().code == Monarc::ErrorCode::InvalidArgument);
+
+    // And after ending the pass properly, the list closes.
+    list.EndRendering();
+    CHECK(list.End().has_value());
+
+    device.DestroyTexture(*texture);
+}
+
+TEST_CASE("a stale resource handle is reported rather than resolved to its slot's new owner") {
+    // ADR-0002's whole point, on a real device. A destroyed handle must not resolve, and a
+    // handle to a *recycled* slot must not resolve to whatever now occupies it -- which is
+    // what the generation counter is for and what an index-only handle could not do.
+    DeviceUnderTest held(Adapters()[0]);
+    REQUIRE(held.created.has_value());
+    Monarc::RHI::IDevice& device = *held.created;
+
+    Monarc::RHI::TextureDescription textureDescription{};
+    textureDescription.extent = kReadbackExtent;
+    textureDescription.format = kReadbackFormat;
+    textureDescription.usage  = Monarc::RHI::TextureUsage::ColorAttachment |
+                               Monarc::RHI::TextureUsage::TransferSource;
+
+    Monarc::RHI::BufferDescription bufferDescription{};
+    bufferDescription.size     = ReadbackByteCount();
+    bufferDescription.usage    = Monarc::RHI::BufferUsage::TransferDestination;
+    bufferDescription.location = Monarc::RHI::MemoryLocation::HostVisible;
+
+    const Monarc::Result<Monarc::RHI::TextureHandle> first =
+        device.CreateTexture(textureDescription);
+    REQUIRE(first.has_value());
+    device.DestroyTexture(*first);
+
+    // **Destroyed and not yet replaced, which is the half a generation check alone misses.**
+    // The slot's generation is bumped when it is *claimed*, so immediately after a destroy the
+    // handle's generation still matches -- and what refuses it is the slot no longer being
+    // live. Measured: dropping the live check from `Resolve` while keeping the generation check
+    // passed every other assertion in this suite, because every other stale-handle case here
+    // has an intervening creation that bumps the generation. The consequence of the hole is a
+    // VK_NULL_HANDLE image handed to vkCmdCopyImageToBuffer2, which is a validation error and
+    // stops the process.
+    const Monarc::Result<Monarc::RHI::BufferHandle> scratch =
+        device.CreateBuffer(bufferDescription);
+    REQUIRE(scratch.has_value());
+    {
+        const Monarc::Result<Monarc::RHI::ICommandList*> probe = device.BeginFrame();
+        REQUIRE(probe.has_value());
+        REQUIRE((*probe)->Begin().has_value());
+        const Monarc::Status justDestroyed = (*probe)->CopyTextureToBuffer(*first, *scratch);
+        REQUIRE_FALSE(justDestroyed.has_value());
+        CHECK(justDestroyed.error().code == Monarc::ErrorCode::InvalidArgument);
+
+        // And the buffer half of the same fact, through the one call that takes a buffer
+        // handle and reports.
+        device.DestroyBuffer(*scratch);
+        const Monarc::Result<std::span<const Monarc::u8>> mappedDead =
+            device.MapBufferForRead(*scratch);
+        REQUIRE_FALSE(mappedDead.has_value());
+        CHECK(mappedDead.error().code == Monarc::ErrorCode::InvalidArgument);
+
+        REQUIRE((*probe)->End().has_value());
+    }
+
+    // The same slot, claimed again. The index is expected to repeat -- it is the first free
+    // slot -- and the generation is what must not.
+    const Monarc::Result<Monarc::RHI::TextureHandle> second =
+        device.CreateTexture(textureDescription);
+    REQUIRE(second.has_value());
+    CHECK(second->index == first->index);
+    CHECK(second->generation != first->generation);
+    CHECK(*second != *first);
+
+    const Monarc::Result<Monarc::RHI::BufferHandle> buffer =
+        device.CreateBuffer(bufferDescription);
+    REQUIRE(buffer.has_value());
+
+    const Monarc::Result<Monarc::RHI::ICommandList*> commands = device.BeginFrame();
+    REQUIRE(commands.has_value());
+    Monarc::RHI::ICommandList& list = **commands;
+    REQUIRE(list.Begin().has_value());
+
+    // Now the stale handle names a live slot with a live image in it, so a resolve that
+    // checked only the index -- or only whether the slot was live -- would succeed and render
+    // into the wrong texture. These two are the fallible calls that take a handle, so they
+    // are where the generation check is observable.
+    const Monarc::RHI::ColorAttachment stale[1] = {
+        {*first, Monarc::RHI::LoadOp::Clear, Monarc::RHI::StoreOp::Store, kClearColor}};
+    Monarc::RHI::RenderingDescription rendering{};
+    rendering.extent           = kReadbackExtent;
+    rendering.colorAttachments = stale;
+
+    const Monarc::Status begun = list.BeginRendering(rendering);
+    REQUIRE_FALSE(begun.has_value());
+    CHECK(begun.error().code == Monarc::ErrorCode::InvalidArgument);
+
+    const Monarc::Status copied = list.CopyTextureToBuffer(*first, *buffer);
+    REQUIRE_FALSE(copied.has_value());
+    CHECK(copied.error().code == Monarc::ErrorCode::InvalidArgument);
+
+    // A handle no device ever issued, and a default-constructed one, are refused the same way.
+    const Monarc::Status forged = list.CopyTextureToBuffer(
+        Monarc::RHI::TextureHandle::ForTesting(4242, 1), *buffer);
+    REQUIRE_FALSE(forged.has_value());
+    CHECK(forged.error().code == Monarc::ErrorCode::InvalidArgument);
+
+    const Monarc::Status invalid =
+        list.CopyTextureToBuffer(Monarc::RHI::TextureHandle{}, *buffer);
+    REQUIRE_FALSE(invalid.has_value());
+    CHECK(invalid.error().code == Monarc::ErrorCode::InvalidArgument);
+
+    // And the live handle works, so the four refusals above are about staleness rather than
+    // about the call being broken.
+    CHECK(list.CopyTextureToBuffer(*second, *buffer).has_value());
+    REQUIRE(list.End().has_value());
+
+    // Destroying a stale handle a second time is a no-op and not a double free, which is what
+    // a teardown path actually needs. Under clang-asan a double free here would be reported.
+    device.DestroyTexture(*first);
+    device.DestroyTexture(*second);
+    device.DestroyBuffer(*buffer);
+    device.DestroyBuffer(*buffer);
+}
+
+TEST_CASE("a full resource pool reports rather than growing") {
+    // The pools are fixed at device creation and never grown -- JobSystem's discipline, so
+    // that creation cannot reallocate and invalidate a handle's slot. Two slots, so the third
+    // creation is the one that must fail.
+    Monarc::RHI::DeviceConfig config{};
+    config.maxTextures = 2;
+    config.maxBuffers  = 2;
+
+    DeviceUnderTest held(Adapters()[0], config);
+    REQUIRE(held.created.has_value());
+    Monarc::RHI::IDevice& device = *held.created;
+
+    Monarc::RHI::TextureDescription description{};
+    description.extent = kReadbackExtent;
+    description.format = kReadbackFormat;
+    description.usage  = Monarc::RHI::TextureUsage::ColorAttachment;
+
+    const Monarc::Result<Monarc::RHI::TextureHandle> a = device.CreateTexture(description);
+    const Monarc::Result<Monarc::RHI::TextureHandle> b = device.CreateTexture(description);
+    REQUIRE(a.has_value());
+    REQUIRE(b.has_value());
+    CHECK(a->index != b->index);
+
+    const Monarc::Result<Monarc::RHI::TextureHandle> overflow =
+        device.CreateTexture(description);
+    REQUIRE_FALSE(overflow.has_value());
+    // OutOfMemory and not Unsupported: the device can make this texture, there is simply no
+    // slot left to name it by.
+    CHECK(overflow.error().code == Monarc::ErrorCode::OutOfMemory);
+
+    // Freeing one makes room again, which is what says a full pool is a full pool and not a
+    // pool that has stopped working.
+    device.DestroyTexture(*a);
+    const Monarc::Result<Monarc::RHI::TextureHandle> reused = device.CreateTexture(description);
+    REQUIRE(reused.has_value());
+    CHECK(reused->index == a->index);
+
+    device.DestroyTexture(*b);
+    device.DestroyTexture(*reused);
+}
+
+TEST_CASE("resource creation refuses a description it cannot honour") {
+    DeviceUnderTest held(Adapters()[0]);
+    REQUIRE(held.created.has_value());
+    Monarc::RHI::IDevice& device = *held.created;
+
+    Monarc::RHI::TextureDescription valid{};
+    valid.extent = kReadbackExtent;
+    valid.format = kReadbackFormat;
+    valid.usage  = Monarc::RHI::TextureUsage::ColorAttachment;
+
+    // Each of the three fields cleared in turn, from a description that is otherwise good --
+    // so a failure names which check is missing rather than only that something refused.
+    Monarc::RHI::TextureDescription noExtent = valid;
+    noExtent.extent                          = Monarc::RHI::Extent2D{};
+    CHECK(device.CreateTexture(noExtent).error().code == Monarc::ErrorCode::InvalidArgument);
+
+    Monarc::RHI::TextureDescription noFormat = valid;
+    noFormat.format                          = Monarc::RHI::Format::Unknown;
+    CHECK(device.CreateTexture(noFormat).error().code == Monarc::ErrorCode::InvalidArgument);
+
+    Monarc::RHI::TextureDescription noUsage = valid;
+    noUsage.usage                           = Monarc::RHI::TextureUsage::None;
+    CHECK(device.CreateTexture(noUsage).error().code == Monarc::ErrorCode::InvalidArgument);
+
+    Monarc::RHI::BufferDescription noSize{};
+    noSize.usage = Monarc::RHI::BufferUsage::TransferDestination;
+    CHECK(device.CreateBuffer(noSize).error().code == Monarc::ErrorCode::InvalidArgument);
+
+    Monarc::RHI::BufferDescription noBufferUsage{};
+    noBufferUsage.size = 64;
+    CHECK(device.CreateBuffer(noBufferUsage).error().code ==
+          Monarc::ErrorCode::InvalidArgument);
+
+    // And the valid one still works, so the five refusals are about the fields cleared rather
+    // than about creation being broken on this device.
+    const Monarc::Result<Monarc::RHI::TextureHandle> created = device.CreateTexture(valid);
+    REQUIRE(created.has_value());
+    device.DestroyTexture(*created);
+}
+
+TEST_CASE("a copy into a buffer too small to hold the texture is refused") {
+    // `CopyTextureToBuffer` documents this bound, and it is worth checking rather than
+    // trusting: the copy would otherwise be recorded, and a destination smaller than the
+    // region is a validation error that stops the process rather than a returned Status.
+    DeviceUnderTest held(Adapters()[0]);
+    REQUIRE(held.created.has_value());
+    Monarc::RHI::IDevice& device = *held.created;
+
+    Monarc::RHI::TextureDescription textureDescription{};
+    textureDescription.extent = kReadbackExtent;
+    textureDescription.format = kReadbackFormat;
+    textureDescription.usage  = Monarc::RHI::TextureUsage::TransferSource;
+    const Monarc::Result<Monarc::RHI::TextureHandle> texture =
+        device.CreateTexture(textureDescription);
+    REQUIRE(texture.has_value());
+
+    Monarc::RHI::BufferDescription tooSmall{};
+    // One byte short of the whole texture, which is the boundary the check has to get right:
+    // a `<=` where a `<` belongs would accept this.
+    tooSmall.size     = ReadbackByteCount() - 1;
+    tooSmall.usage    = Monarc::RHI::BufferUsage::TransferDestination;
+    tooSmall.location = Monarc::RHI::MemoryLocation::HostVisible;
+    const Monarc::Result<Monarc::RHI::BufferHandle> small = device.CreateBuffer(tooSmall);
+    REQUIRE(small.has_value());
+
+    Monarc::RHI::BufferDescription exact = tooSmall;
+    exact.size                           = ReadbackByteCount();
+    const Monarc::Result<Monarc::RHI::BufferHandle> fits = device.CreateBuffer(exact);
+    REQUIRE(fits.has_value());
+
+    const Monarc::Result<Monarc::RHI::ICommandList*> commands = device.BeginFrame();
+    REQUIRE(commands.has_value());
+    Monarc::RHI::ICommandList& list = **commands;
+    REQUIRE(list.Begin().has_value());
+
+    // The texture is moved into TransferSource before either copy, because the accepted one
+    // below is submitted: a copy recorded against an image in the wrong layout is a validation
+    // error at submit time, and the point of this case is the size bound, not that.
+    list.Barrier(Monarc::RHI::TextureBarrier(
+        *texture, Monarc::RHI::TextureLayout::Undefined,
+        Monarc::RHI::TextureLayout::TransferSource, Monarc::RHI::PipelineStage::None,
+        Monarc::RHI::PipelineStage::Copy, Monarc::RHI::Access::None,
+        Monarc::RHI::Access::TransferRead));
+
+    const Monarc::Status refused = list.CopyTextureToBuffer(*texture, *small);
+    REQUIRE_FALSE(refused.has_value());
+    CHECK(refused.error().code == Monarc::ErrorCode::InvalidArgument);
+
+    // Exactly the right size is accepted, so the refusal above is about the bound rather than
+    // about the call. This is the assertion an off-by-one in the other direction fails.
+    CHECK(list.CopyTextureToBuffer(*texture, *fits).has_value());
+
+    // And a transfer-only texture cannot be an attachment, which is the other half of the same
+    // fact: it has no image view, because Vulkan will not create one for an image whose usage
+    // has no view-compatible bit. **Found by the fatal messenger during this task**, on the
+    // first texture created with `TransferSource` alone -- `CreateTexture` was making a view
+    // unconditionally and the layer stopped the process at
+    // `VUID-VkImageViewCreateInfo-image-04441`. Now it is a returned Status naming the missing
+    // usage, and this is the assertion that keeps it one.
+    const Monarc::RHI::ColorAttachment noView[1] = {
+        {*texture, Monarc::RHI::LoadOp::Clear, Monarc::RHI::StoreOp::Store, kClearColor}};
+    Monarc::RHI::RenderingDescription intoNoView{};
+    intoNoView.extent           = kReadbackExtent;
+    intoNoView.colorAttachments = noView;
+
+    const Monarc::Status unrenderable = list.BeginRendering(intoNoView);
+    REQUIRE_FALSE(unrenderable.has_value());
+    CHECK(unrenderable.error().code == Monarc::ErrorCode::InvalidArgument);
+
+    REQUIRE(list.End().has_value());
+    REQUIRE(device.GraphicsQueue().Submit(list).has_value());
+    REQUIRE(device.WaitIdle().has_value());
+
+    device.DestroyBuffer(*small);
+    device.DestroyBuffer(*fits);
+    device.DestroyTexture(*texture);
+}
+
+TEST_CASE("only a host-visible buffer can be mapped, and only once at a time") {
+    DeviceUnderTest held(Adapters()[0]);
+    REQUIRE(held.created.has_value());
+    Monarc::RHI::IDevice& device = *held.created;
+
+    Monarc::RHI::BufferDescription deviceLocal{};
+    // 250 and not 256, deliberately. Vulkan rounds a buffer's *allocation* up to the memory
+    // type's alignment, so a mapped span whose length came from `VkMemoryRequirements::size`
+    // rather than from the description would be 256 here and indistinguishable at 256.
+    deviceLocal.size     = 250;
+    deviceLocal.usage    = Monarc::RHI::BufferUsage::TransferDestination;
+    deviceLocal.location = Monarc::RHI::MemoryLocation::DeviceLocal;
+
+    const Monarc::Result<Monarc::RHI::BufferHandle> fast = device.CreateBuffer(deviceLocal);
+    REQUIRE(fast.has_value());
+
+    // Unsupported and not InvalidArgument: the handle is fine and the request is not something
+    // this buffer's memory can do. Mapping it anyway would fail at vkMapMemory with a
+    // VkResult, much further from the cause.
+    const Monarc::Result<std::span<const Monarc::u8>> refused = device.MapBufferForRead(*fast);
+    REQUIRE_FALSE(refused.has_value());
+    CHECK(refused.error().code == Monarc::ErrorCode::Unsupported);
+
+    Monarc::RHI::BufferDescription hostVisible = deviceLocal;
+    hostVisible.location = Monarc::RHI::MemoryLocation::HostVisible;
+
+    const Monarc::Result<Monarc::RHI::BufferHandle> readable =
+        device.CreateBuffer(hostVisible);
+    REQUIRE(readable.has_value());
+
+    const Monarc::Result<std::span<const Monarc::u8>> mapped =
+        device.MapBufferForRead(*readable);
+    REQUIRE(mapped.has_value());
+    // The buffer's own size and not the allocation's, which the driver rounds up -- see the
+    // note on 250 above, which is what makes this assertion able to tell the two apart.
+    CHECK(mapped->size() == hostVisible.size);
+    CHECK(mapped->data() != nullptr);
+
+    // Vulkan forbids mapping already-mapped memory. Refusing beats returning the same pointer,
+    // which would leave two callers each expecting to unmap.
+    const Monarc::Result<std::span<const Monarc::u8>> twice =
+        device.MapBufferForRead(*readable);
+    REQUIRE_FALSE(twice.has_value());
+    CHECK(twice.error().code == Monarc::ErrorCode::InvalidArgument);
+
+    // Unmapping twice is a no-op, and mapping again after an unmap works -- so the guard above
+    // tracks the mapping rather than latching on the first one.
+    device.UnmapBuffer(*readable);
+    device.UnmapBuffer(*readable);
+    CHECK(device.MapBufferForRead(*readable).has_value());
+    device.UnmapBuffer(*readable);
+
+    device.DestroyBuffer(*fast);
+    device.DestroyBuffer(*readable);
+}
+
+TEST_CASE("a device on an adapter no physical device reports is NotFound") {
+    // Only `adapter.uuid` is taken from the argument, so this is the one field that can be
+    // wrong in a way the backend has to notice. A UUID no device reports must be NotFound and
+    // not a device created on whichever adapter happened to be first.
+    Monarc::RHI::AdapterInfo fabricated = Adapters()[0];
+    fabricated.uuid.bytes[0] = static_cast<Monarc::u8>(fabricated.uuid.bytes[0] ^ 0xFF);
+
+    Monarc::SystemAllocator allocator;
+    const Monarc::Result<Monarc::RHI::VulkanDevice> device =
+        Backend().CreateDevice(allocator, fabricated, Monarc::RHI::DeviceConfig{});
+    REQUIRE_FALSE(device.has_value());
+    CHECK(device.error().code == Monarc::ErrorCode::NotFound);
+    CHECK(allocator.BytesAllocated() == 0);
+}
+
+TEST_CASE("a device configured with an empty pool is refused") {
+    Monarc::RHI::DeviceConfig config{};
+    config.maxTextures = 0;
+
+    Monarc::SystemAllocator allocator;
+    const Monarc::Result<Monarc::RHI::VulkanDevice> device =
+        Backend().CreateDevice(allocator, Adapters()[0], config);
+    REQUIRE_FALSE(device.has_value());
+    CHECK(device.error().code == Monarc::ErrorCode::InvalidArgument);
+
+    // Nothing allocated, which is what says the refusal happened before the state was created
+    // rather than after -- a check placed later would leak on this path or have to unwind.
+    CHECK(allocator.BytesAllocated() == 0);
+}
+
+TEST_CASE("a moved-from device answers every query rather than dereferencing") {
+    Monarc::SystemAllocator allocator;
+    Monarc::Result<Monarc::RHI::VulkanDevice> source =
+        Backend().CreateDevice(allocator, Adapters()[0], Monarc::RHI::DeviceConfig{});
+    REQUIRE(source.has_value());
+
+    Monarc::RHI::VulkanDevice destination(std::move(*source));
+    CHECK(destination.IsInitialized());
+
+    // The moved-from object has no state at all, so every accessor has to answer without
+    // dereferencing. This is the case that would be a null dereference if one forgot, and it
+    // is reachable in ordinary code: a device handed to something else by value leaves one of
+    // these behind.
+    CHECK_FALSE(source->IsInitialized());
+    CHECK(source->Adapter().uuid == Monarc::RHI::AdapterUuid{});
+    CHECK(source->GraphicsQueueFamilyIndex() == 0);
+    source->Shutdown();
+
+    CHECK(source->CreateTexture(Monarc::RHI::TextureDescription{}).error().code ==
+          Monarc::ErrorCode::InvalidArgument);
+    CHECK(source->BeginFrame().error().code == Monarc::ErrorCode::InvalidArgument);
+    CHECK(source->WaitIdle().error().code == Monarc::ErrorCode::InvalidArgument);
+    source->DestroyTexture(Monarc::RHI::TextureHandle{});
+    source->UnmapBuffer(Monarc::RHI::BufferHandle{});
+
+    // GraphicsQueue() has to return a reference to *something*, and the detached queue is what
+    // it returns -- a null object whose every call refuses. An abort here would have been the
+    // alternative, and it would have made this line untestable.
+    Monarc::RHI::IQueue& detached = source->GraphicsQueue();
+    CHECK(detached.LastSubmittedValue() == 0);
+    CHECK(detached.CompletedValue().error().code == Monarc::ErrorCode::InvalidArgument);
+    CHECK(detached.Wait(1, 0).error().code == Monarc::ErrorCode::InvalidArgument);
+
+    // Move assignment releases what the destination held before adopting. One state's worth of
+    // memory has to go, and nothing about the object's behaviour would show it -- which is why
+    // this measures the allocator.
+    Monarc::Result<Monarc::RHI::VulkanDevice> other =
+        Backend().CreateDevice(allocator, Adapters()[0], Monarc::RHI::DeviceConfig{});
+    REQUIRE(other.has_value());
+    const Monarc::usize beforeMove = allocator.BytesAllocated();
+    REQUIRE(beforeMove > 0);
+    destination = std::move(*other);
+    CHECK(allocator.BytesAllocated() < beforeMove);
+    CHECK(destination.IsInitialized());
+    CHECK_FALSE(other->IsInitialized());
+}
+
+TEST_CASE("a build that asked for validation actually has a messenger") {
+    // **The stronger half of Task 2's implication, and the plan's own checkbox**: "assert the
+    // messenger was installed, so a build that quietly failed to load the layer cannot pass as
+    // clean." Zero validation errors across this suite is a claim the fatal messenger enforces,
+    // and it means nothing if no messenger was ever installed.
+    //
+    // Conditioned on ValidationDefault() and on nothing else, which means **the device suite
+    // requires a Vulkan SDK in a Debug build**. That is the trade the checkbox asks for: the
+    // only way this can fail is the case it exists for -- a build that asked for validation and
+    // did not get it -- and weakening it to "if the layer happens to be present" would make it
+    // unable to fail at all.
+    if (Monarc::RHI::ValidationDefault()) {
+        CHECK(Backend().ValidationLayerEnabled());
+        CHECK(Backend().DebugMessengerInstalled());
+    } else {
+        // Release asks for neither, and having one anyway would mean the generator expression
+        // in this module's CMakeLists.txt had inverted -- a mutation Task 2 measured, which
+        // turns exactly the non-Debug legs red.
+        CHECK_FALSE(Backend().ValidationLayerEnabled());
+        CHECK_FALSE(Backend().DebugMessengerInstalled());
+    }
 }
 
 int main(int argc, char** argv) {
