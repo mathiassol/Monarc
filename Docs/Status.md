@@ -790,10 +790,16 @@ implicit conversion between them are what buys it. `Tests/TestBarrier.cpp` pins 
 `std::is_constructible_v`, plus the positive form so the negatives cannot be satisfied by a
 type nobody can build.
 
-**Thirty-six behavioural mutations, thirty-five caught and one that would not compile. No
-survivors.** Twenty-seven were caught as red assertions and eight by the fatal messenger
-stopping the process at a named VUID, which is a different and stronger signal — the code was
-wrong in a way Vulkan itself objects to:
+**Thirty-six behavioural mutations, thirty-five caught and one that would not compile.**
+Twenty-seven were caught as red assertions and eight by the fatal messenger stopping the
+process at a named VUID, which is a different and stronger signal — the code was wrong in a way
+Vulkan itself objects to. An earlier version of this line added "No survivors", which was true
+of the thirty-six listed and not of the module: the set was chosen from the translation tables,
+the pool and generation machinery, the frame/pool/timeline cycle and the readback, and five
+things outside it did survive mutation. The review below found them, and what the set covered is
+now stated rather than implied.
+
+The thirty-six:
 
 | Mutation | How it was caught |
 |---|---|
@@ -940,7 +946,7 @@ The following tests did not run:
 - Green on all six presets, zero warnings, 9 CTest entries each
 - **108 device-free cases** — `Monarc.RHI.Tests` 51 and `Monarc.RHI.Vulkan.Tests` 57 — plus
   **31 device-required cases**, and Task 2 left 67 device-free, so Task 3 adds 41 device-free
-  cases and 31 that need a GPU.
+  cases and 31 that need a GPU. *(The review below takes these to 109 and 36.)*
 
   **Four of those device-free cases and one of the missing device-required ones are the same
   change**: `Barrier`'s fatal refusal, above, moved the barrier-description check out of the
@@ -994,6 +1000,161 @@ suppresses the implicit moves, and `VulkanDevice` needs one. Third,
 `TextureUsage::TransferDestination` had no caller: nothing uploads to a texture yet, so the
 enumerator was removed and the header says when it comes back. That last one is the rule the
 same header states about itself, applied to the header.
+
+### A3 Task 3's code-quality review, and what it found
+
+A second mutation-based pass over the delivered task, from outside the set the thirty-six above
+were drawn from. It caught twelve of fifteen mutations, most by a single named assertion — and
+it found **two paths that ended the process where every neighbour returned a `Status`, five
+things that survived mutation, and one comment asserting a test case that did not exist**. Every
+finding below was measured, and each fix was demonstrated by breaking the thing it guards.
+
+**Two caller mistakes ended the process at a named VUID.** `IQueue::Submit` checked that a list
+was not still recording and never that it had recorded anything, and `BeginFrame` resets the
+pool — which returns the command buffer to Vulkan's *initial* state, where `IsRecording()` is
+false for a second reason. A frame loop with an early-out between `BeginFrame` and `Begin` hit
+`VUID-vkQueueSubmit2-commandBuffer-03874`, "is unrecorded and contains no commands", at exit
+`0xC0000409`. And `VulkanDeviceState::Shutdown` destroyed the command pools without detaching
+the lists, so a list a caller still held kept its recording flag and its `VkCommandBuffer`
+across the shutdown: `BeginFrame → Begin → Shutdown → Barrier(GlobalBarrier{})` exited
+`0xC0000409` where the same sequence without the barrier exited zero. Both are now returned
+`Status`es, which is what the rest of the module already did for `Begin` twice, `End` outside a
+pass, `End` inside one, a copy inside a pass, a nested pass, and a list from another device.
+With the detach loop removed the rest of the device suite is green at 35 cases and 338
+assertions, so nothing else reached it.
+
+**`CopyTextureToBuffer` documented one usage precondition it did not check and never mentioned
+the other.** The destination's `BufferUsage::TransferDestination` was in the comment and not in
+the code (`VUID-VkCopyImageToBufferInfo2-dstBuffer-00191`); the source's
+`TextureUsage::TransferSource` was in neither (`…-srcImage-00186`). Both stopped the process,
+both are now one `HasAny` against a description the slot already holds, and both are pinned by a
+case that also submits the pair that does carry them — so the refusals are about the bits and
+not about the call. The sibling case, an attachment created without
+`TextureUsage::ColorAttachment`, was already a named `Status` with a test.
+
+**Five things survived mutation, and all five are now pinned.** Each was measured green before
+and red after:
+
+| What survived | The mutation | What it turns red now |
+|---|---|---|
+| `ToVulkan(MemoryLocation)`'s `MAX_ENUM` fallback | returns `0` | 2 assertions |
+| `ToVulkanBit(TextureUsage)`'s zero fallback | returns `VK_IMAGE_USAGE_STORAGE_BIT` | 2 assertions |
+| `ToVulkanBit(BufferUsage)`'s zero fallback | returns `VK_BUFFER_USAGE_STORAGE_BUFFER_BIT` | 1 assertion |
+| `Shutdown`'s two live-slot loops | both deleted | `VUID-vkDestroyDevice-device-05137`, "has 5 leaked objects" |
+| `ReleaseBufferSlot`'s unmap-on-release branch | deleted | 1 assertion |
+
+The three translation mutations were applied together and turned 5 assertions red across 2
+cases, attributed above by the function each assertion names. Every one of those 5 is an
+assertion this pass added, which is what "it survived" means: with the mutation in and the new
+assertions out, the suites were green. The two device-side rows were measured the other way
+round, with the mutation in and the new case *excluded* by name — 35 cases and 344 assertions
+green in both, so nothing already in the suite reached either.
+
+The memory-location fallback is asserted as its *consequence* rather than as the constant, which
+is what its five-line argument is actually about: the fallback matches no memory type, where
+zero is a subset of every type's properties and so matches index 0 — device-local memory for a
+`HostVisible` request, failing at `vkMapMemory` a long way from the value that caused it.
+
+**A comment asserted a test case that did not exist.** The readback said `Shutdown`'s sweep over
+live pool slots was "covered by the case above, which destroys a device with live resources
+still in its pools"; the case above created no textures and no buffers, and no case among the 31
+left a live resource in a pool at teardown. There is now a case that leaves a `ColorAttachment`
+texture and a mapped `HostVisible` buffer live and lets the device go — and **the validation
+layer enforces it rather than an assertion**, which the case says outright: a leaked `VkImage`
+is invisible through `IDevice`, because `BytesAllocated()` reaches zero whether or not the pool
+arrays' contents were destroyed.
+
+**One finding in that review was wrong, and measurement is what said so.** It held that the same
+teardown case covers `ReleaseBufferSlot`'s unmap-on-release branch, because the buffer is left
+mapped. It does not: freeing memory that is still mapped is legal Vulkan and draws no validation
+error, and with the branch deleted the case is green at 6 of 6. What the branch actually protects
+is the *slot* — it clears `mapped` as well as calling `vkUnmapMemory`, so without it the next
+buffer to claim that slot is refused by `MapBufferForRead` as "already mapped". A pool of one
+buffer, a map, a `DestroyBuffer` with no unmap, and a second map is what pins it, and that
+assertion goes red where the teardown case does not.
+
+**`Barrier.h`'s cost claim was true for two of its three enum sets, and the count was worse than
+the review said.** "An unused enumerator costs one row in one switch" is exact for
+`PipelineStage`'s fifteen and `Access`'s eighteen — inert data, translated both ways, nothing
+downstream reads them. It is not true of `TextureLayout`, because a layout is only valid for an
+image whose *usage* permits it and `TextureUsage` has two bits. Probed on the RTX 3070 Ti,
+barriering a `ColorAttachment | TransferSource` texture into each of the eight in turn:
+
+| Layout | Result |
+|---|---|
+| `Undefined`, `General`, `ColorAttachment`, `TransferSource` | no validation error |
+| `DepthStencilAttachment` | `VUID-VkImageMemoryBarrier2-oldLayout-01209` |
+| `DepthStencilReadOnly` | `…-oldLayout-01210` |
+| `ShaderReadOnly` | `…-oldLayout-01211` |
+| `TransferDestination` | `…-oldLayout-01213` |
+
+**Four of eight and not three** — the review named the two depth layouts and
+`TransferDestination` and missed `ShaderReadOnly`, which wants `VK_IMAGE_USAGE_SAMPLED_BIT` or
+`VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT` and gets neither. The enumerators stay, because
+ADR-0005's model arriving whole is the plan's decision and `DepthStencilAttachment` is needed
+the moment a depth pass exists; the claim is what changed. `TextureLayout`'s own note now counts
+them and connects the two disclosures that already existed on either side — `TextureUsage`'s
+deliberately absent transfer-destination bit in `Device.h`, and `ToVulkan(const TextureBarrier&,
+VkImage)`'s unconditional `VK_IMAGE_ASPECT_COLOR_BIT` in `Translate.h`, which is the second
+thing a depth pass has to fix and would be silently wrong rather than loudly refused.
+
+**`VulkanCommandList.cpp` is the file the plan named, and now it exists.** The A3 plan's listing
+names `VulkanBackend.cpp  VulkanDevice.cpp  VulkanCommandList.cpp`; the third did not exist and
+nothing recorded the deviation, which made it the only departure from that listing on this
+branch that was not argued anywhere. `VulkanDevice.cpp` was 1533 lines holding the device, the
+command list and the queue at once, with Task 4's swapchain to come. The three pool-slot structs
+and the three class declarations moved to `Private/VulkanDeviceState.h` and the command list's
+implementation to `Private/VulkanCommandList.cpp`: **1533 → 1030, plus 402 and 295**, with
+nothing duplicated and no behaviour changed. `VulkanQueue` is declared on the new header and
+still implemented beside the device, because `Submit` stamps `FrameSlot::timelineValue` and
+`BeginFrame` is what waits on it and clears it — the only two functions that write that field.
+`VulkanDeviceState.h` is itself a departure from the plan's listing in the other direction, and
+the header records that at the top.
+
+**The one failure path that leaked a Vulkan object no longer does.**
+`Loader::LoadDeviceFunctions` clears the whole device table when a Required entry is missing —
+its promise, and worth keeping — so the freshly created `VkDevice` had nothing left able to
+destroy it and `Shutdown` logged "it is leaked until the process exits". Measured by forcing
+that failure: without the fix the layer then stops the process at
+`VUID-vkDestroyInstance-instance-00629`, "object VkDevice 0x254806800d0 has not been destroyed",
+exit `0x80000003`; with `Loader::ResolveDeviceDestroyer` resolving that one entry back, the same
+forced failure produces neither the log line nor a validation error.
+
+**Smaller corrections, each measured or argued:**
+
+- `BeginRendering` reads the attachment's `TextureUsage::ColorAttachment` rather than inferring
+  it from a null image view. The two are observationally identical today — with the null-view
+  test back in, the device suite is green at 36 cases and 350 assertions, and that is stated
+  rather than dressed up as a caught bug — but `CreateTexture` already records that `Sampled`
+  and `Storage` will make a view too, at which point a `Sampled`-only texture passes a null
+  check and becomes the validation error the refusal exists to prevent
+- `kNoSlot` documented one of its two meanings: it was also returned by
+  `FindGraphicsQueueFamily` and compared against a queue-family index, an unrelated domain. The
+  family search has `kNoQueueFamily` of its own
+- `FrameSlot::timelineValue` is cleared by the `BeginFrame` whose wait on it returned, so "zero
+  means nothing outstanding" stays true of a slot that was begun and never submitted. Nothing
+  observable through the interface changes — the re-wait it removes was on an already-signalled
+  value — and no test claims otherwise; what changed is that the field means what it says
+- `ICommandList`'s and `IQueue`'s protected move operations are gone. Nothing derived from
+  either is ever moved: the one implementation of each is a member of a heap-allocated
+  `VulkanDeviceState` whose *pointer* is what moves. `IDevice` keeps its own, which
+  `VulkanDevice`'s move constructor names, and the header now says which of the three needs
+  them and why. Same rule this diff already applied to `TextureUsage::TransferDestination`,
+  `Describe(const GlobalBarrier&)` and `AllDeviceFunctionsResolved`
+- `TestBarrier.cpp` said "this file's total went from 453 to 169", and neither figure was that
+  file's total — both were the whole binary's, at a commit several behind. The file is **15
+  cases and 46 assertions**, measured with `--source-file=*TestBarrier.cpp`. The 286 in the same
+  sentence is right and is now shown as its parts: 105 pairs for fifteen stages, 153 for
+  eighteen accesses, 28 for eight layouts. Which makes the mistake the mistake that paragraph
+  warns about, made inside the warning
+
+**Counts after the review: 109 device-free cases** — `Monarc.RHI.Tests` 51 and
+`Monarc.RHI.Vulkan.Tests` 58 — **and 36 device-required**, up from 108 and 31. The five new
+device cases are the never-recorded submission (with the wrap that proves the bit is cleared and
+not merely set), recording after a shutdown, the teardown sweep, the slot-reuse unmap, and the
+copy's two usages. The one new device-free case is the memory-location fallback. Assertion
+totals, for whoever wants them, are 504 device-free and 350 device-required — but this section
+quotes cases, for the reason the section above it gives.
 
 ## Verification gates
 

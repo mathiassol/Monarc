@@ -32,6 +32,13 @@ inline constexpr u32 kFramesInFlight = 2;
 /// destination is a buffer -- so an image transfer-destination bit would be an enumerator with
 /// no caller, which is the shape this rule exists to keep out. It arrives with the first thing
 /// that uploads, alongside the writable mapping that feeds it.
+///
+/// **Being two bits is what makes four of `TextureLayout`'s eight unreachable, and
+/// `TextureLayout`'s own note in Barrier.h is where that is counted.** A layout is valid only
+/// for an image whose usage permits it: the two depth layouts want a depth-stencil attachment
+/// bit, `ShaderReadOnly` wants a sampled or input-attachment bit, and `TransferDestination`
+/// wants the bit this note says is deliberately absent. So the list above is short by the rule
+/// stated here, and the consequence is disclosed there.
 enum class TextureUsage : u32 {
     None            = 0,
     ColorAttachment = 1u << 0,

@@ -116,9 +116,17 @@ constexpr std::string_view kNoCollision = "no two collide";
 ///
 /// **One assertion per property rather than one per pair, and the collapse cost nothing that
 /// was measured to matter.** Written as `n * (n - 1) / 2` separate `CHECK`s, the three
-/// distinctness loops below reported 286 assertions between them; this file's total went from
-/// 453 to 169 when they became three. A duplicated `ToString` case collides exactly one pair,
-/// so it turned exactly one of the 286 red -- and it turns this one red, with the pair named.
+/// distinctness properties below would report 286 assertions between them -- 105 for fifteen
+/// stages, 153 for eighteen accesses, 28 for eight layouts. As three named reports they cost
+/// three, so 283 identical greens are gone and no detection is: a duplicated `ToString` case
+/// collides exactly one pair, so it turned exactly one of the 286 red -- and it turns one of
+/// these three red, with the pair named.
+///
+/// **The numbers that belong to this file are 15 cases and 46 assertions**, measured with
+/// `--source-file=*TestBarrier.cpp`, out of the binary's 51 and 174. An earlier version of this
+/// note said "this file's total went from 453 to 169 when they became three", and neither
+/// figure was this file's total: both were the whole binary's, at a commit several behind. That
+/// is precisely the mistake the next paragraph warns about, made inside the warning.
 ///
 /// **This property does have to be here, and that is worth separating from the count.** A
 /// duplicated `ToString` case is invisible to everything else in either suite: the mutation

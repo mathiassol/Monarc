@@ -222,6 +222,13 @@ namespace Monarc::RHI::Detail {
 /// texture in Monarc today whose aspect could be anything else. A depth aspect arrives with
 /// the first depth format, alongside the aspect-aware size query Types.h already says that
 /// format needs.
+///
+/// **It is hard-coded and not asserted, so a depth `Format` makes a depth barrier silently
+/// wrong rather than loudly refused, and that is the cost worth naming.** `TextureLayout`'s
+/// note in Monarc/RHI/Barrier.h counts this as the second of the two things a depth pass has
+/// to fix -- the first being that `TextureUsage` cannot express
+/// `VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT`, which is why the two depth layouts cannot be
+/// reached validly today at all.
 [[nodiscard]] VkImageMemoryBarrier2 ToVulkan(const TextureBarrier& barrier, VkImage image);
 
 /// The RHI barrier `barrier` came from. The reverse of `ToVulkan(const GlobalBarrier&)`, and

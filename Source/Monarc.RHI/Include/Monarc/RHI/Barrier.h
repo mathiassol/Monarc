@@ -20,8 +20,16 @@ namespace Monarc::RHI {
 /// The plan is explicit that the barrier model arrives whole and that translation covers all
 /// of it, with the unused part carried by the pure-function tests -- which is the opposite of
 /// `Format`'s "a format arrives with its first user" in Types.h, and deliberately so: a format
-/// costs a size claim nothing verifies, where a stage costs one row in one switch. So the line
-/// drawn here is instead:
+/// costs a size claim nothing verifies, where a stage costs one row in one switch.
+///
+/// **That cost claim is exactly true of this set and of `Access`, and it is not true of four
+/// of `TextureLayout`'s eight -- see the note on that enum.** A stage and an access bit are
+/// inert data: translated both ways, nothing downstream reads them, and an unused one really
+/// does cost one row in one switch. A layout is a claim about the image it names, which the
+/// backend has to be able to *create*. So the rule is stated here for the two sets it holds
+/// for, and `TextureLayout` carries the narrower version of it.
+///
+/// So the line drawn here is instead:
 ///
 /// - **Vulkan 1.3 core only.** Nothing that needs an extension. `VK_IMAGE_LAYOUT_PRESENT_SRC_KHR`
 ///   is the case that makes this a rule worth stating: presentation is a layout the swapchain
@@ -109,6 +117,39 @@ enum class Access : u32 {
 ///
 /// A single value rather than a set: a texture is in exactly one layout at a time, which is
 /// the whole reason a transition needs naming.
+///
+/// **`PipelineStage`'s "an unused enumerator costs one row in one switch" does not hold for
+/// half of this set, and the narrower version is this: four of these eight name a transition
+/// no texture Monarc can create today may legally be put into.** A layout is only valid for an
+/// image whose *usage* permits it, and `TextureUsage` in Device.h has two bits --
+/// `ColorAttachment` and `TransferSource`. Measured on both local adapters, each of the four
+/// stops the process at its own VUID rather than producing a wrong picture:
+///
+/// - `DepthStencilAttachment` needs `VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT` --
+///   `VUID-VkImageMemoryBarrier2-oldLayout-01209`, "newLayout
+///   (VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) is not compatible with VkImage ...
+///   usage flags VK_IMAGE_USAGE_2_TRANSFER_SRC_BIT_KHR|VK_IMAGE_USAGE_2_COLOR_ATTACHMENT_BIT_KHR".
+/// - `DepthStencilReadOnly` needs the same bit -- `...-oldLayout-01210`.
+/// - `ShaderReadOnly` needs `VK_IMAGE_USAGE_SAMPLED_BIT` or
+///   `VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT`, and `TextureUsage` has neither --
+///   `...-oldLayout-01211`.
+/// - `TransferDestination` needs `VK_IMAGE_USAGE_TRANSFER_DST_BIT`, and
+///   `TextureUsage::TransferDestination` is absent **on purpose**: Device.h's note on that enum
+///   says nothing uploads to a texture yet, so an image transfer-destination bit would be an
+///   enumerator with no caller.
+///
+/// The other four -- `Undefined`, `General`, `ColorAttachment`, `TransferSource` -- are reached
+/// by the same probe with no validation error at all.
+///
+/// **They stay, and the plan is why**: ADR-0005's model arrives whole, and
+/// `DepthStencilAttachment` is needed the moment a depth pass exists. What changes is the
+/// claim, not the set. Two consequences are already disclosed elsewhere and are worth reading
+/// together with this: Device.h's `TextureUsage` note explains the deliberate absence of the
+/// transfer-destination bit, and `ToVulkan(const TextureBarrier&, VkImage)` in
+/// Monarc.RHI.Vulkan/Private/Translate.h records that the aspect it writes is
+/// `VK_IMAGE_ASPECT_COLOR_BIT` unconditionally -- so the first depth `Format` makes a depth
+/// barrier silently wrong rather than loudly refused, and that aspect is the second thing a
+/// depth pass has to fix.
 enum class TextureLayout : u32 {
     /// The contents are not defined. Every texture starts here, and a transition *out* of it
     /// discards whatever the memory held rather than preserving it.
