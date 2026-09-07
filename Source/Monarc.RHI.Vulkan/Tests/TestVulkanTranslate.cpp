@@ -1,24 +1,45 @@
 #include <doctest/doctest.h>
 
+#include <Monarc/Core/Containers/Array.h>
 #include <Monarc/Core/Error.h>
+#include <Monarc/Core/Log.h>
+#include <Monarc/Core/Memory/SystemAllocator.h>
 #include <Monarc/RHI/Capabilities.h>
 #include <Monarc/RHI/Types.h>
 
 #include <Translate.h>
 
+#include <cstring>
 #include <iterator>
 #include <string_view>
 
 using Monarc::RHI::ApiVersion;
 using Monarc::RHI::DeviceType;
 using Monarc::RHI::Format;
+using Monarc::RHI::Detail::ContainsExtension;
+using Monarc::RHI::Detail::ContainsLayer;
 using Monarc::RHI::Detail::FromVulkan;
+using Monarc::RHI::Detail::SeverityToLogLevel;
 using Monarc::RHI::Detail::ToApiVersion;
 using Monarc::RHI::Detail::ToDeviceType;
 using Monarc::RHI::Detail::ToErrorCode;
 using Monarc::RHI::Detail::ToVulkan;
 
 namespace {
+
+/// A VkExtensionProperties naming `name`, as a driver would hand one back. The name is a
+/// fixed-size char array in the struct, so this is what building one by hand takes.
+[[nodiscard]] VkExtensionProperties Extension(const char* name) {
+    VkExtensionProperties properties{};
+    std::memcpy(properties.extensionName, name, std::strlen(name));
+    return properties;
+}
+
+[[nodiscard]] VkLayerProperties Layer(const char* name) {
+    VkLayerProperties properties{};
+    std::memcpy(properties.layerName, name, std::strlen(name));
+    return properties;
+}
 
 /// Every enumerator of Format, once. Same list and same reasoning as TestTypes.cpp's: the
 /// `default`-less switch in Translate.cpp already refuses a new enumerator nobody gave a case
@@ -230,4 +251,105 @@ TEST_CASE("every other result the backend can receive stays BackendFailure") {
     // number nobody recognised.
     CHECK(ToErrorCode(static_cast<VkResult>(-987654)) == Monarc::ErrorCode::BackendFailure);
     CHECK(ToErrorCode(VK_ERROR_DEVICE_LOST) == Monarc::ErrorCode::BackendFailure);
+}
+
+TEST_CASE("an extension is found by its whole name and never by a prefix of one") {
+    Monarc::SystemAllocator                       allocator;
+    Monarc::Array<VkExtensionProperties>          extensions(allocator);
+    extensions.Push(Extension("VK_KHR_surface_maintenance1"));
+    extensions.Push(Extension("VK_KHR_win32_surface"));
+    extensions.Push(Extension("VK_NV_mesh_shader"));
+
+    CHECK(ContainsExtension(extensions, "VK_KHR_win32_surface"));
+    CHECK(ContainsExtension(extensions, "VK_KHR_surface_maintenance1"));
+
+    // **The near-misses are the point.** `VK_KHR_surface` is a prefix of an entry that *is*
+    // present, and `VK_EXT_mesh_shader` differs from one by two letters. A prefix or substring
+    // match would report both as available, which is a capability claim the implementation
+    // would then fail to honour -- and Tasks 3 and 4 add many more of these queries.
+    CHECK_FALSE(ContainsExtension(extensions, "VK_KHR_surface"));
+    CHECK_FALSE(ContainsExtension(extensions, "VK_EXT_mesh_shader"));
+
+    // And the other direction: a name longer than an available one must not match it either.
+    CHECK_FALSE(ContainsExtension(extensions, "VK_KHR_win32_surface_2"));
+    CHECK_FALSE(ContainsExtension(extensions, ""));
+}
+
+TEST_CASE("an empty extension list contains nothing, including the empty name") {
+    // What a machine with no Vulkan SDK hands back, and the case a loop written with a
+    // do-while or an off-by-one bound would read one element of anyway.
+    Monarc::SystemAllocator              allocator;
+    Monarc::Array<VkExtensionProperties> extensions(allocator);
+    CHECK_FALSE(ContainsExtension(extensions, "VK_EXT_debug_utils"));
+    CHECK_FALSE(ContainsExtension(extensions, ""));
+}
+
+TEST_CASE("a layer is found by its whole name, and the validation layer by exactly its own") {
+    Monarc::SystemAllocator          allocator;
+    Monarc::Array<VkLayerProperties> layers(allocator);
+    layers.Push(Layer("VK_LAYER_KHRONOS_validation"));
+    layers.Push(Layer("VK_LAYER_MEDAL_HOOK"));
+
+    CHECK(ContainsLayer(layers, "VK_LAYER_KHRONOS_validation"));
+    CHECK(ContainsLayer(layers, "VK_LAYER_MEDAL_HOOK"));
+
+    // VK_LAYER_KHRONOS_validation is the one name whose presence decides whether Monarc's
+    // instance gets validation at all, and the overlay layers this machine really does have
+    // installed are what a loose match would collide with.
+    CHECK_FALSE(ContainsLayer(layers, "VK_LAYER_KHRONOS"));
+    CHECK_FALSE(ContainsLayer(layers, "VK_LAYER_LUNARG_standard_validation"));
+
+    Monarc::Array<VkLayerProperties> none(allocator);
+    CHECK_FALSE(ContainsLayer(none, "VK_LAYER_KHRONOS_validation"));
+}
+
+TEST_CASE("each debug-utils severity logs at the level that will actually be printed") {
+    // The VulkanValidation category's minimum is Warning, so one level too low is not a
+    // cosmetic difference: an ERROR mapped to Info is filtered out at the sink and the
+    // validation finding disappears. Each of the four is pinned by name.
+    CHECK(SeverityToLogLevel(VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) ==
+          Monarc::LogLevel::Error);
+    CHECK(SeverityToLogLevel(VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) ==
+          Monarc::LogLevel::Warning);
+    CHECK(SeverityToLogLevel(VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) ==
+          Monarc::LogLevel::Info);
+    CHECK(SeverityToLogLevel(VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT) ==
+          Monarc::LogLevel::Trace);
+}
+
+TEST_CASE("several severity bits at once report the loudest of them") {
+    // Vulkan documents the callback's severity as a single bit, and the ordered tests take the
+    // maximum rather than the first match so that this function does not depend on that.
+    // Reversing the order of the tests -- the mistake the shape invites -- turns these red.
+    CHECK(SeverityToLogLevel(static_cast<VkDebugUtilsMessageSeverityFlagBitsEXT>(
+              VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT |
+              VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT)) == Monarc::LogLevel::Error);
+    CHECK(SeverityToLogLevel(static_cast<VkDebugUtilsMessageSeverityFlagBitsEXT>(
+              VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+              VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT)) == Monarc::LogLevel::Warning);
+}
+
+TEST_CASE("no severity maps to Debug or Fatal, which is what the callback's switch assumes") {
+    // DebugMessengerCallback's switch is `default`-less over all six LogLevels, so it must
+    // give Debug and Fatal a case -- and it currently folds them in with Trace. That is only
+    // sound while this function cannot return either, so the range is pinned here rather than
+    // assumed there. A severity that started returning Fatal would log the loudest level at
+    // the quietest with no compile error; this is the case that would notice.
+    constexpr VkDebugUtilsMessageSeverityFlagBitsEXT kAll[] = {
+        VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT,
+        VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT,
+        VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT,
+        VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+        VK_DEBUG_UTILS_MESSAGE_SEVERITY_FLAG_BITS_MAX_ENUM_EXT,
+    };
+    for (const VkDebugUtilsMessageSeverityFlagBitsEXT severity : kAll) {
+        const Monarc::LogLevel level = SeverityToLogLevel(severity);
+        CHECK(level != Monarc::LogLevel::Debug);
+        CHECK(level != Monarc::LogLevel::Fatal);
+    }
+
+    // A bit Vulkan has not defined is a new severity as far as this is concerned, and it lands
+    // at Trace -- the quietest level, which is the right place for something unrecognised.
+    CHECK(SeverityToLogLevel(static_cast<VkDebugUtilsMessageSeverityFlagBitsEXT>(0x40000)) ==
+          Monarc::LogLevel::Trace);
 }

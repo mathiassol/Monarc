@@ -115,6 +115,40 @@ TEST_CASE("enumeration finds at least one adapter") {
     CHECK_FALSE(RawAdapters().IsEmpty());
 }
 
+TEST_CASE("enumeration clears what it was handed rather than appending to it") {
+    // VulkanBackend.h states this -- "`out` is cleared first: enumeration is a snapshot, not
+    // something to accumulate" -- and nothing tested it: deleting `out.Clear()` from
+    // EnumerateAdaptersRaw passed both suites, because every other case hands it an array that
+    // was already empty. A sentinel is the whole difference.
+    Monarc::SystemAllocator                 allocator;
+    Monarc::Array<Monarc::RHI::AdapterInfo> out(allocator);
+
+    Monarc::RHI::AdapterInfo sentinel{};
+    Monarc::RHI::CopyAdapterName(sentinel.name, "not an adapter");
+    sentinel.uuid.bytes[0] = 0xAB;
+    out.Push(sentinel);
+    out.Push(sentinel);
+    REQUIRE(out.Size() == 2);
+
+    REQUIRE(Backend().EnumerateAdaptersRaw(out).has_value());
+
+    // The count is the assertion that catches an append, and the name is the one that catches
+    // a clear that ran too late. Both, because a machine with two adapters and two sentinels
+    // would give the same size either way.
+    CHECK(out.Size() == RawAdapters().Size());
+    for (Monarc::usize i = 0; i < out.Size(); ++i) {
+        CHECK(std::string_view(out[i].name) != "not an adapter");
+    }
+
+    // The deduplicating overload goes through the same clear, so it gets the same question.
+    out.Push(sentinel);
+    REQUIRE(Backend().EnumerateAdapters(out).has_value());
+    CHECK(out.Size() == Adapters().Size());
+    for (Monarc::usize i = 0; i < out.Size(); ++i) {
+        CHECK(std::string_view(out[i].name) != "not an adapter");
+    }
+}
+
 TEST_CASE("no two adapters in the returned list share a UUID") {
     // The headline of Task 2. On the development machine the raw list has five entries for two
     // devices, four of them a single Intel GPU re-registered by virtual display adapters, and
@@ -244,8 +278,13 @@ TEST_CASE("a moved-from backend is unusable and says so rather than crashing") {
     // InvalidArgument rather than an empty list: "there are no adapters" and "this backend is
     // not up" are different answers, and a caller told the first would go looking for a driver
     // problem.
+    //
+    // Pre-filled, so `adapters.IsEmpty()` is a question about the clear rather than about the
+    // array having started empty -- the clear runs before the IsInitialized check, so the
+    // failure path owes the same contract the success path does.
     Monarc::Array<Monarc::RHI::AdapterInfo> adapters(allocator);
-    const Monarc::Status                    raw = source->EnumerateAdaptersRaw(adapters);
+    adapters.Push(Monarc::RHI::AdapterInfo{});
+    const Monarc::Status raw = source->EnumerateAdaptersRaw(adapters);
     REQUIRE_FALSE(raw.has_value());
     CHECK(raw.error().code == Monarc::ErrorCode::InvalidArgument);
     CHECK(adapters.IsEmpty());

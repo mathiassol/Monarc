@@ -90,23 +90,6 @@ static_assert(AdapterUuid::kSize == VK_UUID_SIZE,
 static_assert(kMaxAdapterNameLength >= VK_MAX_PHYSICAL_DEVICE_NAME_SIZE,
               "AdapterInfo::name must hold a full VkPhysicalDeviceProperties::deviceName");
 
-[[nodiscard]] LogLevel SeverityToLogLevel(VkDebugUtilsMessageSeverityFlagBitsEXT severity) {
-    // Not a `default`-less switch: VkDebugUtilsMessageSeverityFlagBitsEXT is a *flag bits*
-    // enum whose enumerators are individual bits plus a MAX_ENUM sentinel. Ordered tests read
-    // better than four cases, and there is no exhaustiveness to guarantee -- a severity Vulkan
-    // adds later is a new bit, which no switch would have covered either.
-    if ((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0) {
-        return LogLevel::Error;
-    }
-    if ((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) != 0) {
-        return LogLevel::Warning;
-    }
-    if ((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) != 0) {
-        return LogLevel::Info;
-    }
-    return LogLevel::Trace;
-}
-
 VKAPI_ATTR VkBool32 VKAPI_CALL DebugMessengerCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT      severity,
     VkDebugUtilsMessageTypeFlagsEXT             types,
@@ -124,7 +107,7 @@ VKAPI_ATTR VkBool32 VKAPI_CALL DebugMessengerCallback(
     // filtered out. The level therefore cannot be passed as a value, and one call per level is
     // the price. The switch is `default`-less so a level added to LogLevel is a compile error
     // here rather than a message that silently stops being logged.
-    switch (SeverityToLogLevel(severity)) {
+    switch (Detail::SeverityToLogLevel(severity)) {
         case LogLevel::Error:
             MONARC_LOG(VulkanValidation, Error, "{} | {}", messageIdName, message);
             break;
@@ -182,35 +165,6 @@ void ShrinkTo(Array<T>& array, usize count) {
     while (array.Size() > count) {
         array.Pop();
     }
-}
-
-[[nodiscard]] bool ContainsExtension(const Array<VkExtensionProperties>& extensions,
-                                     const char*                        name) {
-    const std::string_view wanted(name);
-    for (const VkExtensionProperties& extension : extensions) {
-        if (std::string_view(extension.extensionName) == wanted) {
-            return true;
-        }
-    }
-    return false;
-}
-
-[[nodiscard]] bool ContainsLayer(const Array<VkLayerProperties>& layers, const char* name) {
-    const std::string_view wanted(name);
-    for (const VkLayerProperties& layer : layers) {
-        if (std::string_view(layer.layerName) == wanted) {
-            return true;
-        }
-    }
-    return false;
-}
-
-void CopyName(char (&destination)[kMaxAdapterNameLength], const char* source) {
-    const std::string_view text(source != nullptr ? source : "");
-    const usize            length =
-        text.size() < kMaxAdapterNameLength - 1 ? text.size() : kMaxAdapterNameLength - 1;
-    std::memcpy(destination, text.data(), length);
-    destination[length] = '\0';
 }
 
 [[nodiscard]] VkDebugUtilsMessengerCreateInfoEXT MakeMessengerCreateInfo() {
@@ -358,7 +312,7 @@ Status VulkanBackend::State::BringUp(const Config& config) {
     const char* enabledExtensions[std::size(requiredExtensions) + 1] = {};
     u32         enabledExtensionCount                                = 0;
     for (const char* name : requiredExtensions) {
-        if (!ContainsExtension(availableExtensions, name)) {
+        if (!Detail::ContainsExtension(availableExtensions, name)) {
             MONARC_LOG(Vulkan, Warning,
                        "this Vulkan implementation does not offer the required instance "
                        "extension {}",
@@ -384,9 +338,9 @@ Status VulkanBackend::State::BringUp(const Config& config) {
             return queried;
         }
 
-        const bool layerPresent = ContainsLayer(availableLayers, kValidationLayerName);
+        const bool layerPresent = Detail::ContainsLayer(availableLayers, kValidationLayerName);
         const bool debugUtilsPresent =
-            ContainsExtension(availableExtensions, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+            Detail::ContainsExtension(availableExtensions, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 
         if (layerPresent && debugUtilsPresent) {
             validationLayerEnabled                     = true;
@@ -677,7 +631,7 @@ Status VulkanBackend::State::DescribeAdapter(VkPhysicalDevice device, AdapterInf
     baseProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
     fns.vkGetPhysicalDeviceProperties2(device, &baseProperties);
 
-    CopyName(out.name, baseProperties.properties.deviceName);
+    CopyAdapterName(out.name, baseProperties.properties.deviceName);
     out.type                    = Detail::ToDeviceType(baseProperties.properties.deviceType);
     out.vendorId                = baseProperties.properties.vendorID;
     out.deviceId                = baseProperties.properties.deviceID;
@@ -755,12 +709,12 @@ Status VulkanBackend::State::DescribeAdapter(VkPhysicalDevice device, AdapterInf
         return queried;
     }
     out.capabilities.meshShading =
-        ContainsExtension(deviceExtensions, VK_EXT_MESH_SHADER_EXTENSION_NAME);
+        Detail::ContainsExtension(deviceExtensions, VK_EXT_MESH_SHADER_EXTENSION_NAME);
     // Both, not either: a ray-tracing pipeline with no acceleration structure to trace against
     // is not a capability, and the two ship together on every implementation that has them.
     out.capabilities.rayTracing =
-        ContainsExtension(deviceExtensions, VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME) &&
-        ContainsExtension(deviceExtensions, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
+        Detail::ContainsExtension(deviceExtensions, VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME) &&
+        Detail::ContainsExtension(deviceExtensions, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
 
     out.tier = DetermineTier(out.capabilities);
     return {};

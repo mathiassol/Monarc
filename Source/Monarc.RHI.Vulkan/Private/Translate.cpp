@@ -1,5 +1,7 @@
 #include <Translate.h>
 
+#include <string_view>
+
 namespace Monarc::RHI::Detail {
 
 // ToVulkan(Format) and ToDeviceType below are deliberately `default`-less, the same shape
@@ -80,6 +82,44 @@ ErrorCode ToErrorCode(VkResult result) {
 
         default:                             return ErrorCode::BackendFailure;
     }
+}
+
+bool ContainsExtension(const Array<VkExtensionProperties>& extensions, const char* name) {
+    const std::string_view wanted(name);
+    for (const VkExtensionProperties& extension : extensions) {
+        // std::string_view's own == and not strncmp: whole-string equality, so a name that is
+        // a prefix of an available one does not match. See Translate.h.
+        if (std::string_view(extension.extensionName) == wanted) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ContainsLayer(const Array<VkLayerProperties>& layers, const char* name) {
+    const std::string_view wanted(name);
+    for (const VkLayerProperties& layer : layers) {
+        if (std::string_view(layer.layerName) == wanted) {
+            return true;
+        }
+    }
+    return false;
+}
+
+LogLevel SeverityToLogLevel(VkDebugUtilsMessageSeverityFlagBitsEXT severity) {
+    // Descending, so a caller passing several bits at once gets the loudest of them. Vulkan
+    // documents the callback's severity as a single bit; taking the maximum rather than the
+    // first match is what keeps that an assumption this function does not depend on.
+    if ((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0) {
+        return LogLevel::Error;
+    }
+    if ((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) != 0) {
+        return LogLevel::Warning;
+    }
+    if ((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) != 0) {
+        return LogLevel::Info;
+    }
+    return LogLevel::Trace;
 }
 
 }  // namespace Monarc::RHI::Detail

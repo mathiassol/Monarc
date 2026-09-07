@@ -32,16 +32,14 @@ constexpr AdapterUuid kIntelUuid{
 /// Builds an adapter with a distinguishable name, so "keeps the first" is observable rather
 /// than merely plausible: four entries sharing one UUID are otherwise indistinguishable, and
 /// a test that could not tell which survived would pass whichever one did.
+///
+/// Through `CopyAdapterName` rather than reimplementing the truncation, which is what this
+/// helper used to do: two copies of one bound is one more than can be kept in step, and
+/// neither copy tested the other.
 [[nodiscard]] AdapterInfo Adapter(const char* name, const AdapterUuid& uuid) {
     AdapterInfo info{};
-    const std::string_view text(name);
-    const Monarc::usize    length =
-        text.size() < Monarc::RHI::kMaxAdapterNameLength - 1
-            ? text.size()
-            : Monarc::RHI::kMaxAdapterNameLength - 1;
-    std::memcpy(info.name, text.data(), length);
-    info.name[length] = '\0';
-    info.uuid         = uuid;
+    Monarc::RHI::CopyAdapterName(info.name, name);
+    info.uuid = uuid;
     return info;
 }
 
@@ -198,6 +196,71 @@ TEST_CASE("a formatted UUID is always the documented length and null-terminated"
     CHECK(std::string_view(text.text).size() == Monarc::RHI::kAdapterUuidStringLength - 1);
     CHECK(text.text[Monarc::RHI::kAdapterUuidStringLength - 1] == '\0');
     CHECK(std::string_view(text.text) == "f0f1f2f3-f4f5-f6f7-f8f9-fafbfcfdfeff");
+}
+
+TEST_CASE("a name that fits is copied whole, and a shorter one leaves the rest alone") {
+    char name[Monarc::RHI::kMaxAdapterNameLength];
+    std::memset(name, 'Z', sizeof name);
+
+    Monarc::RHI::CopyAdapterName(name, "Intel(R) UHD Graphics 730");
+    CHECK(std::string_view(name) == "Intel(R) UHD Graphics 730");
+
+    // A second, shorter copy over the first. The terminator has to move back with it, or the
+    // tail of the longer name reads as part of the shorter one.
+    Monarc::RHI::CopyAdapterName(name, "ab");
+    CHECK(std::string_view(name) == "ab");
+
+    // And nullptr is an empty name rather than a crash: pMessageIdName-style optional strings
+    // are a fact of the Vulkan structures this is fed from.
+    Monarc::RHI::CopyAdapterName(name, nullptr);
+    CHECK(std::string_view(name).empty());
+}
+
+TEST_CASE("a name longer than the field is truncated to fit, terminator included") {
+    // **The bound is the assertion.** `kMaxAdapterNameLength - 1` is what leaves room for the
+    // terminator, and changing it to `kMaxAdapterNameLength` -- a one-byte overrun of a fixed
+    // array -- used to pass both suites, because the only caller was in Monarc.RHI.Vulkan's
+    // anonymous namespace where no test could reach it.
+    //
+    // The destination sits in a struct with a run of guard bytes behind it, rather than being
+    // a bare local. That is not decoration: with the bound wrong, a bare local turns this into
+    // stack corruption, which under MSVC Debug stops at a runtime-check dialog *before doctest
+    // reports anything* -- a hang, not a red assertion. Behind a guard the stray byte lands in
+    // memory this test owns and both assertions below simply fail, which is the outcome a
+    // mutation experiment needs. Measured: with the bound at `kMaxAdapterNameLength`, a bare
+    // local hung and this shape reports `256 == 255` and a clobbered guard.
+    struct Guarded {
+        char name[Monarc::RHI::kMaxAdapterNameLength];
+        char guard[8];
+    };
+
+    constexpr Monarc::usize kOversized = Monarc::RHI::kMaxAdapterNameLength + 64;
+    char                    source[kOversized];
+    std::memset(source, 'a', sizeof source - 1);
+    source[sizeof source - 1] = '\0';
+
+    Guarded buffer{};
+    std::memset(buffer.name, 'Z', sizeof buffer.name);
+    std::memset(buffer.guard, '#', sizeof buffer.guard);
+    Monarc::RHI::CopyAdapterName(buffer.name, source);
+
+    // 255 characters and a terminator at index 255, which is the last writable byte. One more
+    // and there is nowhere to put it.
+    CHECK(std::string_view(buffer.name).size() == Monarc::RHI::kMaxAdapterNameLength - 1);
+    CHECK(buffer.name[Monarc::RHI::kMaxAdapterNameLength - 1] == '\0');
+
+    // Nothing was written past the field, said directly rather than inferred from the length.
+    CHECK(std::string_view(buffer.guard, sizeof buffer.guard) == "########");
+
+    // Exactly at the boundary: a source of 255 characters must survive whole, so the
+    // truncation cannot be paid for by dropping a byte from a name that already fits.
+    char exact[Monarc::RHI::kMaxAdapterNameLength];
+    std::memset(exact, 'b', sizeof exact - 1);
+    exact[sizeof exact - 1] = '\0';
+    Monarc::RHI::CopyAdapterName(buffer.name, exact);
+    CHECK(std::string_view(buffer.name) == std::string_view(exact));
+    CHECK(std::string_view(buffer.name).size() == Monarc::RHI::kMaxAdapterNameLength - 1);
+    CHECK(std::string_view(buffer.guard, sizeof buffer.guard) == "########");
 }
 
 TEST_CASE("deduplication ignores everything except the UUID") {

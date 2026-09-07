@@ -1,6 +1,8 @@
 #pragma once
 
+#include <Monarc/Core/Containers/Array.h>
 #include <Monarc/Core/Error.h>
+#include <Monarc/Core/Log.h>
 #include <Monarc/Core/Types.h>
 #include <Monarc/RHI/Capabilities.h>
 #include <Monarc/RHI/Types.h>
@@ -9,12 +11,19 @@
 
 namespace Monarc::RHI::Detail {
 
-/// RHI enum to Vulkan enum and back, as pure functions.
+/// Pure functions over Vulkan values: RHI enum to Vulkan enum and back, and the few
+/// predicates the backend asks of what Vulkan handed it.
 ///
-/// Every function here is total, allocates nothing, and touches no Vulkan state, which is
-/// what lets CI test the whole file with no device and no loader. The `default`-less switches
-/// are the point: adding an RHI enumerator becomes a compile error in Translate.cpp rather
-/// than a silent fall-through to whatever the trailing return says.
+/// **The membership rule is the property, not the subject matter.** Every function here is
+/// total, allocates nothing, and touches no Vulkan *state* -- no instance, no device, no
+/// entry-point table -- which is what lets CI test the whole file with no Vulkan present at
+/// all. That is why `ContainsExtension` and `SeverityToLogLevel` live here rather than in
+/// VulkanBackend.cpp's anonymous namespace, where they were unreachable by any test and
+/// mutations to them passed both suites.
+///
+/// The `default`-less switches are the other point: adding an RHI enumerator becomes a
+/// compile error in Translate.cpp rather than a silent fall-through to whatever the trailing
+/// return says.
 
 /// The Vulkan format `format` names. `VK_FORMAT_UNDEFINED` for `Format::Unknown`, and for any
 /// value outside the enumerator set.
@@ -83,5 +92,34 @@ namespace Monarc::RHI::Detail {
 /// over a hundred enumerators and three hundred cases would be a claim of completeness
 /// nothing verifies.
 [[nodiscard]] ErrorCode ToErrorCode(VkResult result);
+
+/// Whether `extensions` contains one named exactly `name`.
+///
+/// **Exactly, and that is the whole of it.** Vulkan's extension names nest -- `VK_KHR_surface`
+/// is a prefix of `VK_KHR_surface_maintenance1`, and `VK_EXT_mesh_shader` differs from
+/// `VK_NV_mesh_shader` by two letters -- so a prefix or substring match would report a
+/// capability the implementation does not have. Tasks 3 and 4 bring many more of these
+/// queries, which is why this is a tested function rather than a loop at each call site.
+[[nodiscard]] bool ContainsExtension(const Array<VkExtensionProperties>& extensions,
+                                     const char*                        name);
+
+/// Whether `layers` contains one named exactly `name`. `ContainsExtension`'s reasoning,
+/// applied to `VkLayerProperties::layerName`.
+[[nodiscard]] bool ContainsLayer(const Array<VkLayerProperties>& layers, const char* name);
+
+/// The `LogLevel` a debug-utils message of `severity` is logged at.
+///
+/// **This threshold decides whether a validation error is printed at all.** The
+/// `VulkanValidation` category's own minimum is Warning, so a severity that mapped one level
+/// too low would be filtered out at the sink -- an ERROR reported as Info disappears, which is
+/// the silent version of the failure the fatal messenger exists to prevent. The tests pin the
+/// mapping and pin its *range*: the switch in `DebugMessengerCallback` is `default`-less so
+/// that a level added to `LogLevel` is a compile error there, and the range is what says which
+/// of its cases are reachable.
+///
+/// Ordered bit tests rather than a switch: `VkDebugUtilsMessageSeverityFlagBitsEXT` is a
+/// flag-bits enum whose enumerators are individual bits, a caller may pass more than one, and
+/// a severity Vulkan adds later is a new bit that no switch would have covered either.
+[[nodiscard]] LogLevel SeverityToLogLevel(VkDebugUtilsMessageSeverityFlagBitsEXT severity);
 
 }  // namespace Monarc::RHI::Detail

@@ -1,5 +1,7 @@
 #include <Monarc/RHI/Adapter.h>
 
+#include <cstring>
+#include <string_view>
 #include <type_traits>
 
 namespace Monarc::RHI {
@@ -46,6 +48,19 @@ AdapterUuidString ToString(const AdapterUuid& uuid) {
     // initialiser in a different file staying as it is.
     result.text[out] = '\0';
     return result;
+}
+
+void CopyAdapterName(char (&destination)[kMaxAdapterNameLength], const char* source) {
+    const std::string_view text(source != nullptr ? source : "");
+
+    // `kMaxAdapterNameLength - 1`, because the byte after the copy is the terminator. The
+    // whole array is writable, so `- 1` is the only thing standing between a long driver name
+    // and a one-byte overrun -- and it is not visible at the call site, which is why this
+    // lives in one place with its own test rather than being written out per caller.
+    const usize length =
+        text.size() < kMaxAdapterNameLength - 1 ? text.size() : kMaxAdapterNameLength - 1;
+    std::memcpy(destination, text.data(), length);
+    destination[length] = '\0';
 }
 
 usize DeduplicateAdapters(std::span<AdapterInfo> adapters) {

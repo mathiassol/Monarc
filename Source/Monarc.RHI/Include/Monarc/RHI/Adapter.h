@@ -64,6 +64,20 @@ struct AdapterUuidString {
 /// Monarc.RHI.Vulkan static_asserts that this is no smaller.
 inline constexpr usize kMaxAdapterNameLength = 256;
 
+/// Copies `source` into `destination`, truncating to fit and always null-terminating.
+/// `nullptr` produces an empty string.
+///
+/// **This is the truncation `AdapterInfo::name` promises, as a function rather than as an
+/// idiom.** It was open-coded in two places -- Monarc.RHI.Vulkan's enumeration and
+/// Tests/TestAdapter.cpp's own adapter builder -- so the logic existed twice and neither copy
+/// tested the other. Changing the bound from `kMaxAdapterNameLength - 1` to
+/// `kMaxAdapterNameLength`, a one-byte overrun of a fixed array, passed both suites.
+///
+/// A reference to an array of exactly `kMaxAdapterNameLength` and not a `char*` with a size:
+/// there is then no length for a caller to pass wrongly, and a shorter buffer does not
+/// compile.
+void CopyAdapterName(char (&destination)[kMaxAdapterNameLength], const char* source);
+
 /// One physical device, as the RHI describes it. No backend type appears here.
 ///
 /// The name is an owned fixed-size array rather than a pointer or a `String`, for the same
