@@ -118,6 +118,11 @@ private:
     /// The wrapped list. **Reachable only by `RenderGraph`** -- this is the single seam, and
     /// if it were public the class would forbid nothing. Task 4's `Execute` is its first
     /// caller.
+    ///
+    /// Its privacy, and the pointer's below, are each pinned by their own `static_assert` --
+    /// `kCanGetCommandList` and `kCanReachCommandListPointer` in
+    /// Tests/TestPassDeclaration.cpp. Opening either one alone is a mutation the rest of that
+    /// file does not notice, which is how it went unguarded to begin with.
     [[nodiscard]] RHI::ICommandList& Commands() const { return *m_commands; }
 
     RHI::ICommandList* m_commands;

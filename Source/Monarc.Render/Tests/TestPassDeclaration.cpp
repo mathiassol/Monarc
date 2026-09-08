@@ -892,9 +892,27 @@ TEST_CASE("a pass with no declarations at all is not an error") {
 // belongs to somebody else. What these assertions pin is that `Barrier` is not among the ones
 // it will ever gain, and that there is no way through the wrapper to the list underneath.
 //
+// **Every member of the class is covered, and that is not what this block asserted first
+// time.** The `is_constructible_v` assertion below fires when the private section is opened
+// wholesale, and that was taken for coverage of the members inside it -- wrongly. Opening
+// *only* `Commands()` left the whole suite green while the single escape hatch to the raw
+// `RHI::ICommandList&` stood open, and opening only `m_commands` did the same. Both are now
+// detected on their own; see `kCanGetCommandList`.
+//
+// **The audit that produced those two turned up nothing else, and the class is small enough to
+// enumerate.** Its declared members are the four deleted copy and move operations, the private
+// constructor, `Commands()` and `m_commands`, plus an implicit destructor. Only the last three
+// can yield an `RHI::ICommandList&`, and all three are now pinned -- the constructor by
+// `is_constructible_v`, the other two by the requirements below. The four deleted operations
+// yield nothing whatever their access: a deleted function is a diagnostic wherever it is named,
+// and even undeleted, assignment needs a `PassCommandList` on both sides and so hands a pass no
+// list it did not already have. The destructor produces no reference at all. There is no
+// `operator RHI::ICommandList&`, which `is_convertible_v` covers, and no base class, which
+// `is_base_of_v` covers.
+//
 // **The diagnostics, measured on both compilers, because a `static_assert` says the property
 // holds and not what a caller who breaks it is told.** Each was compiled as its own
-// translation unit under the module's own flags:
+// translation unit under the module's own flags, on MSVC 19.51 and clang-cl 22.1:
 //
 // - `commands.Barrier(RHI::GlobalBarrier{});` -- MSVC `error C2039: 'Barrier': is not a member
 //   of 'Monarc::Render::PassCommandList'`; clang-cl `error: no member named 'Barrier' in
@@ -906,6 +924,18 @@ TEST_CASE("a pass with no declarations at all is not an error") {
 // - `PassCommandList copy = commands;` -- MSVC `error C2280: ... attempting to reference a
 //   deleted function`; clang-cl `error: call to deleted constructor of 'PassCommandList'`.
 //   Without this a pass could keep a copy past its own callback.
+//
+// **And the two assertions' own failures, measured the way every guard in this tree is: by
+// breaking the thing they guard.** With `Commands()` alone made public, MSVC gives `error
+// C2338: static assertion failed: 'PassCommandList::Commands() is reachable -- ...'` and
+// clang-cl `error: static assertion failed due to requirement
+// '!kCanGetCommandList<Monarc::Render::PassCommandList>': ...`. With `m_commands` alone made
+// public, the same two forms name `kCanReachCommandListPointer`. And with the requirement
+// itself misspelled to `list.Command()`, the *positive* assertion on
+// `ReachableCommandList` is what fails -- MSVC `error C2607`, clang-cl `error: static
+// assertion failed due to requirement
+// 'kCanGetCommandList<(anonymous namespace)::ReachableCommandList>'` -- which is the
+// vacuity check, and the reason the probe type exists.
 // ---------------------------------------------------------------------------------------
 
 namespace {
@@ -925,6 +955,38 @@ constexpr bool kCanBufferBarrier =
 
 template <typename T>
 constexpr bool kCanEndRendering = requires(T& list) { list.EndRendering(); };
+
+/// Detects the accessor that hands back the wrapped list, and the wrapped pointer itself.
+///
+/// **These are the two members whose exposure defeats the whole class, and each is detected on
+/// its own because `is_constructible_v` below only notices the whole private section
+/// opening.** A review made *only* `Commands()` public and every assertion in this file stayed
+/// green: the constructor was still private, so `is_constructible_v` was still false, and the
+/// single escape hatch to the raw `RHI::ICommandList&` was open with nothing saying so. The
+/// pointer has the same hole -- `commands.m_commands->Barrier(...)` needs no accessor at all.
+///
+/// Access checking happens during a requirement's substitution, so each of these is false
+/// while its member is private and true the moment it is not. That is the property being
+/// relied on, and `ReachableCommandList` below is what proves the requirement can say `true`.
+/// @{
+template <typename T>
+constexpr bool kCanGetCommandList = requires(T& list) { list.Commands(); };
+
+template <typename T>
+constexpr bool kCanReachCommandListPointer = requires(T& list) { list.m_commands; };
+/// @}
+
+/// The positive probe those two need: the same two members, public.
+///
+/// `RHI::ICommandList` cannot serve as the probe the way it does for `Barrier` and
+/// `EndRendering` -- it has neither member -- so without a type that does have them, a
+/// misspelled requirement (`list.Command()`, say) would report false for `PassCommandList`
+/// too and forbid nothing. Declared and never defined: a requirement needs the declaration
+/// and nothing ever calls it.
+struct ReachableCommandList {
+    Monarc::RHI::ICommandList& Commands() const;
+    Monarc::RHI::ICommandList* m_commands;
+};
 
 }  // namespace
 
@@ -947,6 +1009,18 @@ static_assert(!std::is_convertible_v<PassCommandList&, Monarc::RHI::ICommandList
 static_assert(!std::is_copy_constructible_v<PassCommandList>);
 static_assert(!std::is_move_constructible_v<PassCommandList>);
 static_assert(!std::is_constructible_v<PassCommandList, Monarc::RHI::ICommandList&>);
+
+// And the two seams the four above do not cover, each with its positive probe beside it. See
+// `kCanGetCommandList`: these are the assertions that fire when one member of the private
+// section is opened rather than all of it.
+static_assert(kCanGetCommandList<ReachableCommandList>);
+static_assert(kCanReachCommandListPointer<ReachableCommandList>);
+static_assert(!kCanGetCommandList<PassCommandList>,
+              "PassCommandList::Commands() is reachable -- the single escape hatch to the raw "
+              "RHI::ICommandList is open, and ADR-0006's central promise is gone");
+static_assert(!kCanReachCommandListPointer<PassCommandList>,
+              "PassCommandList::m_commands is reachable -- a pass can barrier through the "
+              "wrapped pointer without needing an accessor at all");
 
 // ---------------------------------------------------------------------------------------
 // `TextureImport` requires every field, which is the property `RHI::TextureBarrier` argues for
