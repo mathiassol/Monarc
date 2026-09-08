@@ -168,6 +168,18 @@ confirming it:
   rejects. This is precisely the divergence
   [ADR-0003](Architecture/Decisions/ADR-0003-cpp23-baseline.md) makes the Clang build
   conditional on catching, and it means that build is load-bearing rather than belt-and-braces.
+- **`cmake --build` outside a developer environment reports success by saying nothing.** With
+  no `vcvars64.bat` in the shell, an already-current build tree prints `ninja: no work to do`
+  and exits zero — indistinguishable from a real verification. The failure only surfaces once
+  a file actually changes, and then it is `fatal error C1083: Cannot open include file:
+  'cstddef'`, which reads like a broken toolchain rather than a missing environment. Anything
+  claiming to have built or tested must go through
+  `cmd /c "call vcvars64.bat >nul && cmake --build --preset <p>"`; the harmless
+  `'vswhere.exe' is not recognized` line vcvars prints on this machine is not the problem.
+
+  Found in A3 Task 4 by an agent that noticed its own "green" run had compiled nothing. The
+  general shape is worth keeping in mind beyond this one case: a verification step that can
+  pass by doing nothing is not a verification step.
 - `/MP` is inert under Ninja and is deliberately absent from the compiler flags. It
   parallelises multiple sources within a single `cl.exe` invocation, and Ninja invokes
   `cl.exe` once per file. Build parallelism comes from Ninja's scheduler.
