@@ -30,8 +30,11 @@ namespace Monarc::Render {
 
 Status RenderGraph::Compile() {
     if (m_phase != GraphPhase::Declaring) {
+        // Not "this build is already compiled": the same branch fires in `CompileFailed`, where
+        // nothing was compiled at all. `AddPass`'s sibling refusal carries the argument.
         return std::unexpected(Refuse(DiagnosticKind::AlreadyCompiled, ErrorCode::InvalidArgument,
-                                      "RenderGraph::Compile: this build is already compiled",
+                                      "RenderGraph::Compile: this build is no longer accepting "
+                                      "declarations",
                                       kNoPass, TextureId{}));
     }
 

@@ -56,6 +56,12 @@ void RenderGraph::Reset() {
     m_barriers.Clear();
     m_diagnostics.Clear();
 
+    // **The dropped count is part of the build, and clearing it is what stops one overflowed
+    // frame from poisoning every frame after it.** `Compile` reads `m_diagnosticsDropped != 0`
+    // as "a declaration was refused" -- see Private/Compile.cpp -- so a graph that filled its
+    // diagnostics pool once and kept the count would refuse to compile for the rest of its
+    // life, returning `ErrorCode::Unknown` with an empty diagnostics list. That is the least
+    // debuggable failure this design can produce, and it is one deleted line away.
     m_diagnosticsDropped = 0;
     m_phase              = GraphPhase::Declaring;
     ++m_buildGeneration;
@@ -63,16 +69,26 @@ void RenderGraph::Reset() {
 
 Result<PassBuilder> RenderGraph::AddPass(std::string_view name) {
     if (m_phase != GraphPhase::Declaring) {
+        // **"no longer accepting declarations" rather than "is compiled", because this fires in
+        // `CompileFailed` too.** A build whose compilation was *refused* is not compiled, and a
+        // literal saying it was would send a reader looking for a frame that was never
+        // produced. `DiagnosticKind::AlreadyCompiled`'s own doc has it right -- "called on a
+        // graph that was not accepting declarations" -- and this is the wording that agrees
+        // with it.
         return std::unexpected(Refuse(DiagnosticKind::AlreadyCompiled,
                                       ErrorCode::InvalidArgument,
-                                      "RenderGraph::AddPass: this build is compiled and is no "
-                                      "longer accepting declarations",
+                                      "RenderGraph::AddPass: this build is no longer accepting "
+                                      "declarations",
                                       kNoPass, TextureId{}));
     }
     if (m_passes.Size() >= m_config.maxPasses) {
+        // `kNoPass`, not `m_passes.Size()`: no pass was created, and `GraphDiagnostic::pass` is
+        // "the pass involved ... or `kNoPass` where none is". The index this refusal *would*
+        // have handed out names nothing, and a reader who looked it up would find the last pass
+        // that did get created. The refusal ten lines above answers the same way.
         return std::unexpected(Refuse(DiagnosticKind::PassPoolExhausted, ErrorCode::OutOfMemory,
-                                      "RenderGraph::AddPass: pass pool exhausted",
-                                      static_cast<u32>(m_passes.Size()), TextureId{}));
+                                      "RenderGraph::AddPass: pass pool exhausted", kNoPass,
+                                      TextureId{}));
     }
 
     const u32      index = static_cast<u32>(m_passes.Size());
@@ -156,6 +172,12 @@ Result<void*> RenderGraph::ClaimRecordStorage(u32 pass, u32 generation) {
                                       "callback",
                                       pass, TextureId{}));
     }
+    // **`m_records[pass]`, and the index is the whole of the correctness here.** Handing back
+    // another pass's storage would placement-construct this callable over one that is already
+    // live -- without destroying it, since the occupancy check above looked at a different slot
+    // -- and `DestroyRecords` would then destroy the survivor twice, once through each slot's
+    // pointer. `CommitRecord` below writes `m_records[pass].record` and `m_passes[pass]`, so the
+    // two halves of one operation have to agree on which pass they are about.
     return static_cast<void*>(m_records[pass].storage);
 }
 

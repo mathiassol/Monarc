@@ -75,6 +75,25 @@ const TextureHandle kSwapchainImage = TextureHandle::ForTesting(4, 1);
     return TextureImport(image, kSwapchainDescription, kSwapchainIncoming, kSwapchainOutgoing);
 }
 
+/// A recording callback that counts its own destructions through a caller's counter.
+///
+/// **Nothing else in the suite would notice a leaked or a doubly-destroyed callback**: the
+/// storage is inline in the pass slot, so a callable whose destructor never ran leaves no
+/// allocation for the sanitizer presets to find, and one destroyed twice frees nothing either.
+/// A counter in the destructor is the only witness, and *one counter per pass* is what makes
+/// the two cases below able to say which slot held what -- a single shared counter reaches the
+/// same total whether two objects were destroyed once each or one object twice.
+struct Witness {
+    int* destructions;
+
+    explicit Witness(int* counter) : destructions(counter) {}
+    Witness(const Witness& other) : destructions(other.destructions) {}
+    Witness& operator=(const Witness&) = delete;
+    ~Witness() { ++*destructions; }
+
+    void operator()(PassCommandList&) const {}
+};
+
 /// The accesses of `inspection` that name `pass`, counted.
 [[nodiscard]] int AccessesOfPass(const GraphInspection& inspection, Monarc::u32 pass) {
     int count = 0;
@@ -556,6 +575,12 @@ TEST_CASE("a full pass pool refuses rather than growing") {
     CHECK(inspection.passes.size() == 1u);
     REQUIRE(inspection.diagnostics.size() == 1u);
     CHECK(inspection.diagnostics[0].kind == DiagnosticKind::PassPoolExhausted);
+    // **`kNoPass`, because no pass was created.** The index this refusal would have handed out
+    // is `maxPasses`, which names nothing, and a reader who looked it up in `passes` would find
+    // either nothing or -- with a larger pool -- somebody else's pass. `GraphDiagnostic::pass`
+    // is documented as "the pass involved ... or `kNoPass` where none is", and the sibling
+    // refusal in `AddPass` already answered that way.
+    CHECK(inspection.diagnostics[0].pass == kNoPass);
 }
 
 TEST_CASE("a full resource pool refuses rather than growing") {
@@ -607,6 +632,66 @@ TEST_CASE("a full access pool refuses rather than growing") {
     CHECK(inspection.diagnostics[0].kind == DiagnosticKind::AccessPoolExhausted);
 }
 
+TEST_CASE("a duplicate access is reported as the duplicate even with the access pool full") {
+    // **`DeclareAccess` runs the duplicate scan before the capacity check, and this is the only
+    // shape of case that can tell the two orderings apart: both conditions in force at once.**
+    // The case above has a full pool and no duplicate; the duplicate case has a duplicate and
+    // room to spare. Each passes whichever way the two checks are ordered, so the ordering was
+    // a documented decision with nothing holding it -- swapping the two blocks left the whole
+    // suite green.
+    //
+    // The duplicate is the mistake and the full pool is a consequence of it, so the duplicate is
+    // the report worth having. `maxAccesses = 1` makes the single legal access fill the pool, so
+    // declaring it a second time is both things at the same time.
+    SystemAllocator     allocator;
+    RenderGraph::Config config{};
+    config.maxAccesses = 1;
+    RenderGraph graph(allocator, config);
+
+    Result<PassBuilder> pass = graph.AddPass("Pass");
+    REQUIRE(pass.has_value());
+    const Result<TextureId> target = pass->CreateTexture("Target", kSwapchainDescription);
+    REQUIRE(target.has_value());
+    REQUIRE(pass->Write(*target, ResourceAccess::ColorAttachmentWrite));
+
+    const Status again = pass->Write(*target, ResourceAccess::ColorAttachmentWrite);
+    REQUIRE_FALSE(again.has_value());
+    CHECK(again.error().code == ErrorCode::AlreadyExists);
+
+    const GraphInspection inspection = graph.Inspect();
+    REQUIRE(inspection.diagnostics.size() == 1u);
+    CHECK(inspection.diagnostics[0].kind == DiagnosticKind::DuplicateAccess);
+}
+
+TEST_CASE("a duplicate import is reported as the duplicate even with the resource pool full") {
+    // `DeclareImport`'s half of the case above, and its ordering is the same decision: the
+    // duplicate scan runs first, so a build that both re-imports a handle and has no room left
+    // hears about the re-import. `maxResources = 1` puts the pool at capacity with the one legal
+    // import in it.
+    SystemAllocator     allocator;
+    RenderGraph::Config config{};
+    config.maxResources = 1;
+    RenderGraph graph(allocator, config);
+
+    Result<PassBuilder> first = graph.AddPass("First");
+    REQUIRE(first.has_value());
+    const Result<TextureId> once = first->ImportTexture("Swapchain", SwapchainImport());
+    REQUIRE(once.has_value());
+
+    const Result<TextureId> twice = first->ImportTexture("Swapchain", SwapchainImport());
+    REQUIRE_FALSE(twice.has_value());
+    CHECK(twice.error().code == ErrorCode::AlreadyExists);
+
+    const GraphInspection inspection = graph.Inspect();
+    CHECK(inspection.resources.size() == 1u);
+    REQUIRE(inspection.diagnostics.size() == 1u);
+    CHECK(inspection.diagnostics[0].kind == DiagnosticKind::DuplicateImport);
+    // And it still names the resource the first import produced, which is the half of the
+    // report a `ResourcePoolExhausted` could not have carried at all -- that refusal passes
+    // `TextureId{}`.
+    CHECK(inspection.diagnostics[0].resource == *once);
+}
+
 TEST_CASE("a full diagnostic pool counts what it dropped") {
     // A truncated diagnostics list that read as a complete one would hide the very refusal it
     // was recording. The counter is what makes "these are all of them" a checkable claim.
@@ -650,20 +735,8 @@ TEST_CASE("a pass sets at most one recording callback") {
 }
 
 TEST_CASE("a recording callback is destroyed by Reset and by the destructor") {
-    // Nothing else in the suite would notice a leaked callback: the storage is inline in the
-    // pass slot, so a callable whose destructor never ran leaves no allocation for the
-    // sanitizer presets to find. A counter in the callable's destructor is the only witness.
-    struct Witness {
-        int* destructions;
-
-        explicit Witness(int* counter) : destructions(counter) {}
-        Witness(const Witness& other) : destructions(other.destructions) {}
-        Witness& operator=(const Witness&) = delete;
-        ~Witness() { ++*destructions; }
-
-        void operator()(PassCommandList&) const {}
-    };
-
+    // See `Witness`: a counter in the callable's destructor is the only thing that would notice
+    // a leaked one.
     int destructions = 0;
     {
         SystemAllocator allocator;
@@ -686,6 +759,106 @@ TEST_CASE("a recording callback is destroyed by Reset and by the destructor") {
     // The graph is gone; the second callback went with it. Two stored copies destroyed, plus
     // the two temporaries at the call sites.
     CHECK(destructions == 4);
+}
+
+TEST_CASE("two live passes each hold their own recording callback") {
+    // **The case with two of something, and the reason it exists is that every other recording
+    // case has one pass holding a callback at a time.** The case above declares two, but a
+    // `Reset` stands between them, so only one slot is ever occupied -- and both are pass index
+    // 0 in any event. With that gap, `ClaimRecordStorage` could ignore its `pass` argument and
+    // hand back slot 0 every time, and the whole suite stayed green.
+    //
+    // What that costs: the second pass's callable is placement-constructed *over* the first's,
+    // which is not destroyed -- the occupancy check looked at a different slot and found it
+    // empty -- and `DestroyRecords` then destroys the survivor twice, once through each slot's
+    // pointer. Two counters are what makes that visible: the first pass's stored copy is never
+    // destroyed and the second pass's is destroyed twice, and a single shared counter reaches
+    // four either way.
+    //
+    // `CommitRecord`'s pass index was already pinned -- `hasRecord` on both passes below says
+    // so -- which is what made the asymmetry worth closing: one half of the operation was
+    // guarded and the other was not.
+    int first  = 0;
+    int second = 0;
+    {
+        SystemAllocator allocator;
+        RenderGraph     graph(allocator, RenderGraph::Config{});
+
+        Result<PassBuilder> depth = graph.AddPass("Depth");
+        REQUIRE(depth.has_value());
+        Result<PassBuilder> colour = graph.AddPass("Colour");
+        REQUIRE(colour.has_value());
+        REQUIRE(depth->Index() != colour->Index());
+
+        REQUIRE(depth->Record(Witness{&first}));
+        REQUIRE(colour->Record(Witness{&second}));
+
+        // Each temporary was copied into its own slot and then destroyed, so each counter is at
+        // one with a live stored copy still to come.
+        CHECK(first == 1);
+        CHECK(second == 1);
+
+        const GraphInspection inspection = graph.Inspect();
+        REQUIRE(inspection.passes.size() == 2u);
+        CHECK(inspection.passes[0].hasRecord);
+        CHECK(inspection.passes[1].hasRecord);
+        CHECK(inspection.diagnostics.empty());
+
+        // `Reset` destroys each stored copy exactly once. Under a shared slot the first
+        // pass's copy is never reached and the second's is reached twice.
+        graph.Reset();
+        CHECK(first == 2);
+        CHECK(second == 2);
+    }
+    // And nothing was destroyed a second time when the graph went away.
+    CHECK(first == 2);
+    CHECK(second == 2);
+}
+
+TEST_CASE("Reset clears the dropped-diagnostic count, so the next build can compile") {
+    // **The other case with two of something: an overflow and a `Reset`, which no case put
+    // together.** The one case that drives `diagnosticsDropped` above zero never resets, and
+    // the one case that resets never overflows -- so `Reset`'s `m_diagnosticsDropped = 0` could
+    // be deleted with the whole suite still green.
+    //
+    // What that costs is out of all proportion to the line: `Compile` reads
+    // `m_diagnosticsDropped != 0` as "a declaration in this build was refused", so a graph that
+    // filled its diagnostics pool in one frame would refuse to compile in **every frame after
+    // it, permanently**, returning `ErrorCode::Unknown` with an empty diagnostics list. A
+    // failure that names nothing and never clears is the least debuggable thing this design can
+    // produce.
+    //
+    // `maxDiagnostics = 0` is the shortest way to a non-zero dropped count, and it is a value a
+    // caller can legitimately choose -- see the case that found it.
+    SystemAllocator     allocator;
+    RenderGraph::Config config{};
+    config.maxDiagnostics = 0;
+    RenderGraph graph(allocator, config);
+
+    Result<PassBuilder> pass = graph.AddPass("Consumer");
+    REQUIRE(pass.has_value());
+    static_cast<void>(pass->Read(TextureId::ForTesting(3, graph.BuildGeneration()),
+                                 ResourceAccess::SampledRead));
+    REQUIRE(graph.Inspect().diagnostics.empty());
+    REQUIRE(graph.Inspect().diagnosticsDropped == 1u);
+    REQUIRE_FALSE(graph.Compile().has_value());
+
+    graph.Reset();
+    CHECK(graph.Inspect().diagnosticsDropped == 0u);
+
+    // **And the assertion that says what the line is worth**: the next build compiles. A graph
+    // is declared and thrown away every frame, so "the frame after a bad one" is the ordinary
+    // case rather than an edge one.
+    Result<PassBuilder> next = graph.AddPass("Clean");
+    REQUIRE(next.has_value());
+    const Result<TextureId> target = next->CreateTexture("Target", kSwapchainDescription);
+    REQUIRE(target.has_value());
+    REQUIRE(next->Write(*target, ResourceAccess::ColorAttachmentWrite));
+
+    CHECK(graph.Compile());
+    CHECK(graph.Inspect().phase == GraphPhase::Compiled);
+    CHECK(graph.Inspect().diagnostics.empty());
+    CHECK(graph.Inspect().diagnosticsDropped == 0u);
 }
 
 TEST_CASE("Compile settles execution order and culls nothing") {
@@ -819,6 +992,86 @@ TEST_CASE("a refused declaration still blocks Compile when no diagnostic could b
     // dropped. Reporting the dropped count is what is left to report.
     CHECK(compiled.error().code == ErrorCode::Unknown);
     CHECK(graph.Inspect().phase == GraphPhase::CompileFailed);
+}
+
+TEST_CASE("Compile reports the first refusal's code, not the last") {
+    // **Two refusals with *different* codes, which is the only way first and last are
+    // distinguishable.** The suite already had a graph with two diagnostics -- *"Read refuses a
+    // write access, and Write refuses a read access"* -- but both of them are
+    // `InvalidArgument`, so reporting either end gave the same answer and the documented choice
+    // had nothing holding it.
+    //
+    // The first refusal is the one that came first, which is the one worth reporting: a caller
+    // that ignored a `[[nodiscard]]` and then got a code from `Compile` is being told about the
+    // earliest thing that went wrong, not the latest.
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    Result<PassBuilder> pass = graph.AddPass("Pass");
+    REQUIRE(pass.has_value());
+    const Result<TextureId> target = pass->CreateTexture("Target", kSwapchainDescription);
+    REQUIRE(target.has_value());
+
+    // An id that names nothing -- `NotFound`.
+    static_cast<void>(pass->Read(TextureId::ForTesting(9, graph.BuildGeneration()),
+                                 ResourceAccess::SampledRead));
+    // Then a write access declared through `Read` -- `InvalidArgument`.
+    static_cast<void>(pass->Read(*target, ResourceAccess::ColorAttachmentWrite));
+
+    const GraphInspection refused = graph.Inspect();
+    REQUIRE(refused.diagnostics.size() == 2u);
+    REQUIRE(refused.diagnostics[0].code == ErrorCode::NotFound);
+    REQUIRE(refused.diagnostics[1].code == ErrorCode::InvalidArgument);
+
+    const Status compiled = graph.Compile();
+    REQUIRE_FALSE(compiled.has_value());
+    CHECK(compiled.error().code == ErrorCode::NotFound);
+    CHECK(graph.Inspect().phase == GraphPhase::CompileFailed);
+}
+
+TEST_CASE("a failed build refuses further declarations without claiming it compiled") {
+    // **`DiagnosticKind::AlreadyCompiled` fires in `CompileFailed` as well as in `Compiled`,
+    // and that state was reachable and untested.** It is also why neither refusal's literal
+    // says "is compiled" any more: in this graph nothing was, and a message telling a reader
+    // the build is compiled would send them looking for a frame that does not exist. The
+    // enumerator's own doc had it right -- "called on a graph that was not accepting
+    // declarations" -- and the two literals now agree with it.
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    Result<PassBuilder> pass = graph.AddPass("Pass");
+    REQUIRE(pass.has_value());
+    static_cast<void>(pass->Read(TextureId::ForTesting(3, graph.BuildGeneration()),
+                                 ResourceAccess::SampledRead));
+    REQUIRE_FALSE(graph.Compile().has_value());
+    REQUIRE(graph.Inspect().phase == GraphPhase::CompileFailed);
+
+    const Result<PassBuilder> late = graph.AddPass("Late");
+    REQUIRE_FALSE(late.has_value());
+    CHECK(late.error().code == ErrorCode::InvalidArgument);
+
+    const Status again = graph.Compile();
+    REQUIRE_FALSE(again.has_value());
+    CHECK(again.error().code == ErrorCode::InvalidArgument);
+
+    const GraphInspection inspection = graph.Inspect();
+    // The phase does not move: refusing to accept a declaration is not a second failure to
+    // compile, and the inspection stays readable either way.
+    CHECK(inspection.phase == GraphPhase::CompileFailed);
+    REQUIRE(inspection.diagnostics.size() == 3u);
+    CHECK(inspection.diagnostics[0].kind == DiagnosticKind::UnknownResource);
+    CHECK(inspection.diagnostics[1].kind == DiagnosticKind::AlreadyCompiled);
+    CHECK(inspection.diagnostics[2].kind == DiagnosticKind::AlreadyCompiled);
+    // Neither names a pass: no pass was claimed and none is at fault.
+    CHECK(inspection.diagnostics[1].pass == kNoPass);
+    CHECK(inspection.diagnostics[2].pass == kNoPass);
+
+    // And a failed compile is recoverable rather than terminal, which is what makes it worth
+    // keeping the graph rather than reconstructing one.
+    graph.Reset();
+    CHECK(graph.Inspect().phase == GraphPhase::Declaring);
+    REQUIRE(graph.AddPass("Fresh").has_value());
+    CHECK(graph.Compile());
 }
 
 TEST_CASE("Reset clears the build, keeps the pools, and bumps the generation") {

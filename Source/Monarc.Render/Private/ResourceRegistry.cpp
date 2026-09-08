@@ -71,6 +71,12 @@ Result<TextureId> RenderGraph::DeclareImport(u32 pass, u32 generation, std::stri
         }
     }
 
+    // Checked after the duplicate scan, the same way `DeclareAccess` orders its two: a full
+    // pool and a duplicate at once is better reported as the duplicate, because the duplicate
+    // is the mistake and the full pool is a consequence of it. Pinned by *"a duplicate import
+    // is reported as the duplicate even with the resource pool full"* in
+    // Tests/TestPassDeclaration.cpp -- an ordering nothing asserts is an ordering that reverses
+    // on the next edit.
     if (m_resources.Size() >= m_config.maxResources) {
         return std::unexpected(Refuse(DiagnosticKind::ResourcePoolExhausted,
                                       ErrorCode::OutOfMemory,
@@ -148,7 +154,10 @@ Status RenderGraph::DeclareAccess(u32 pass, u32 generation, TextureId texture,
     }
 
     // Checked after the duplicate scan on purpose: a full pool and a duplicate at once is
-    // better reported as the duplicate, which is the mistake.
+    // better reported as the duplicate, which is the mistake. Pinned by *"a duplicate access is
+    // reported as the duplicate even with the access pool full"* in
+    // Tests/TestPassDeclaration.cpp, which is the only shape of case that can tell the two
+    // orderings apart -- both conditions in force at once.
     if (m_accesses.Size() >= m_config.maxAccesses) {
         return std::unexpected(Refuse(DiagnosticKind::AccessPoolExhausted, ErrorCode::OutOfMemory,
                                       "PassBuilder::Read/Write: access pool exhausted", pass,
