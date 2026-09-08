@@ -59,6 +59,29 @@ public:
     /// will matter are Phase B's, once there is a renderer to size them from. A build that
     /// exceeds one of these is refused with `ErrorCode::OutOfMemory` at the declaration that
     /// exceeded it, and the refusal is recorded in `GraphInspection::diagnostics`.
+    ///
+    /// **Every field here is defaulted, where `JobSystem::Config` deliberately leaves
+    /// `workerCount` and `maxJobs` undefaulted so that a caller has to choose. The divergence
+    /// is deliberate, and it is about what a wrong number costs.** `JobSystem::workerCount`
+    /// has no defensible default at all -- the right value is a property of the host machine,
+    /// and zero does not refuse, it silently never runs a job. `maxJobs` bounds *concurrently
+    /// outstanding* work, so whether it is exceeded depends on submission rate and dependency
+    /// depth under load: an intermittent `OutOfMemory` on a hot path, found in production
+    /// rather than by whoever picked the number. A graph capacity fails the other way round. A
+    /// frame's declarations are written in source and are the same every frame, so a capacity
+    /// that is too small is exceeded on the *first* frame, deterministically, at the
+    /// declaration that exceeded it -- with the code returned to that call and a
+    /// `GraphDiagnostic` naming the pass. It cannot lurk, and the person who accepted the
+    /// default is the person who finds it.
+    ///
+    /// Two of the five are not the caller's to choose in any case: `maxBarriers` and
+    /// `maxDiagnostics` size pools the *graph* fills, so a caller asked to pick one would be
+    /// predicting the derivation's own output. And the nearer precedent in this tree already
+    /// defaults everything -- `RHI::DeviceConfig`'s `maxTextures` and `maxBuffers`, which is
+    /// the same shape: a fixed-capacity pool sized at construction that refuses with
+    /// `OutOfMemory`. What this class takes from `JobSystem::Config` is the discipline the
+    /// class comment names -- never grown, refusing rather than reallocating -- and that part
+    /// is unchanged.
     struct Config {
         u32 maxPasses    = 64;
         u32 maxResources = 128;
