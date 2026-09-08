@@ -21,6 +21,14 @@ namespace Detail {
 /// header, and no Vulkan type may appear here (Docs/Rendering/RHI.md; ADR-0014 rule 1).
 struct VulkanDeviceFactory;
 
+/// Brings up a `VulkanSwapchain`, and is befriended below for one reason: a swapchain needs
+/// this device's `VulkanDeviceState` -- its entry-point table, its queue, and its texture pool,
+/// which is where the swapchain's images are registered. `m_state` is private, and the house
+/// answer to "who may reach into it" is a named friend rather than an accessor the world can
+/// call. Declared in Monarc/RHI/Vulkan/VulkanSwapchain.h and defined in
+/// Private/VulkanSwapchain.cpp.
+struct VulkanSwapchainFactory;
+
 /// Everything a `VulkanDevice` owns, behind one pointer, because it names Vulkan types and
 /// this header may not.
 ///
@@ -101,6 +109,7 @@ public:
 
 private:
     friend struct Detail::VulkanDeviceFactory;
+    friend struct Detail::VulkanSwapchainFactory;
 
     /// Adopts a state the factory has already brought up. Private, so the only way to come by
     /// a device is a `CreateDevice` that succeeded.

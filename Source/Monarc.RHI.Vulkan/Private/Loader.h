@@ -27,10 +27,16 @@ namespace Monarc::RHI::Detail {
 /// belongs to the entry point.
 ///
 /// So it is declared beside the name, in the lists below, and the resolver reads it. Task 3's
-/// device table is entirely Required and the only Optional entries are the two debug-utils
-/// ones that were already optional -- no machinery is added for extensions that do not exist
-/// yet. What is added is the *shape* that will hold when they do: a new Optional entry is one
-/// word in one list.
+/// device table was entirely Required and the only Optional entries were the two debug-utils
+/// ones that had been optional all along -- no machinery for extensions that did not exist
+/// yet, only the shape that would hold when they did: a new Optional entry is one word in one
+/// list.
+///
+/// **Task 4 spent that shape and it cost the one word it was promised to.**
+/// `VK_KHR_swapchain`'s five device entry points are Optional, because that extension is
+/// per-adapter in exactly the way this note anticipated -- `BringUpDevice` enables it only on
+/// a device that offers it, and `VulkanSwapchainFactory::Create` is what refuses when it was
+/// not there. Nothing else about the resolver changed.
 enum class Requirement : u8 { Required, Optional };
 
 // The entry-point lists, as X-macros. Each list is expanded twice -- once to declare a table
@@ -64,6 +70,19 @@ enum class Requirement : u8 { Required, Optional };
 
 /// Resolved against a created VkInstance. Every one of these has a caller; a function with no
 /// caller does not belong in a table at all.
+///
+/// The last five are `VK_KHR_surface`'s, and they are Required rather than Optional because
+/// `BringUp` already refuses an implementation that does not offer that extension -- so by
+/// the time this table is resolved the extension is enabled, and a null here would mean a
+/// loader that enabled an extension and did not export it.
+///
+/// **`vkCreateWin32SurfaceKHR` is deliberately not in this list, and it cannot be.** Its
+/// declaration and `VkWin32SurfaceCreateInfoKHR` exist only where `VK_USE_PLATFORM_WIN32_KHR`
+/// is defined, which is exactly one translation unit --
+/// Private/Platform/Windows/VulkanSurface.cpp -- and never the target (ADR-0016). A table
+/// member naming `PFN_vkCreateWin32SurfaceKHR` would put that type in this header, which
+/// every neutral source in the module includes. So the platform file resolves its own surface
+/// constructor through `GetInstanceProcAddr()` below; nothing else needs it.
 #define MONARC_VK_INSTANCE_FUNCTIONS(X)                                                    \
     X(vkDestroyInstance, Required)                                                         \
     X(vkEnumeratePhysicalDevices, Required)                                                \
@@ -73,7 +92,12 @@ enum class Requirement : u8 { Required, Optional };
     X(vkGetPhysicalDeviceMemoryProperties, Required)                                       \
     X(vkEnumerateDeviceExtensionProperties, Required)                                      \
     X(vkCreateDevice, Required)                                                            \
-    X(vkGetDeviceProcAddr, Required)
+    X(vkGetDeviceProcAddr, Required)                                                       \
+    X(vkDestroySurfaceKHR, Required)                                                       \
+    X(vkGetPhysicalDeviceSurfaceSupportKHR, Required)                                      \
+    X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR, Required)                                 \
+    X(vkGetPhysicalDeviceSurfaceFormatsKHR, Required)                                      \
+    X(vkGetPhysicalDeviceSurfacePresentModesKHR, Required)
 
 /// VK_EXT_debug_utils. Resolved only when the extension was enabled, and Optional even then:
 /// a machine with no Vulkan SDK has no validation layer and no debug-utils extension, and the
@@ -82,9 +106,24 @@ enum class Requirement : u8 { Required, Optional };
     X(vkCreateDebugUtilsMessengerEXT, Optional)                                            \
     X(vkDestroyDebugUtilsMessengerEXT, Optional)
 
-/// Resolved against a created VkDevice through vkGetDeviceProcAddr. All Vulkan 1.3 core --
-/// dynamic rendering, synchronization2, timeline semaphores and copy_commands2 are all
-/// promoted, so Monarc enables no device extension at all and every name here is Required.
+/// Resolved against a created VkDevice through vkGetDeviceProcAddr.
+///
+/// Everything Required here is Vulkan 1.3 core -- dynamic rendering, synchronization2,
+/// timeline semaphores and copy_commands2 are all promoted -- so a device that reported 1.3
+/// has every one of them.
+///
+/// **The five Optional entries at the foot are `VK_KHR_swapchain`'s, and they are the first
+/// entries in this codebase where `Requirement::Optional` earns the shape it was given in
+/// Task 3.** That extension is not core in any Vulkan version and its availability is a fact
+/// about the *adapter*: `BringUpDevice` enables it only when the physical device offers it, so
+/// on a machine with a render-only device the same `DeviceFunctions` type is fully populated
+/// for one adapter and partly populated for another. That is precisely the case a table whose
+/// identity was "everything in me was found" could not describe, and why optionality lives on
+/// the entry rather than on the table.
+///
+/// Both local adapters offer it, measured -- so the Optional branch is not exercised on this
+/// machine. `VulkanSwapchainFactory::Create` is what reports `ErrorCode::Unsupported` when it
+/// was not, naming the extension.
 #define MONARC_VK_DEVICE_FUNCTIONS(X)                                                      \
     X(vkDestroyDevice, Required)                                                           \
     X(vkGetDeviceQueue, Required)                                                          \
@@ -117,7 +156,12 @@ enum class Requirement : u8 { Required, Optional };
     X(vkAllocateMemory, Required)                                                          \
     X(vkFreeMemory, Required)                                                              \
     X(vkMapMemory, Required)                                                               \
-    X(vkUnmapMemory, Required)
+    X(vkUnmapMemory, Required)                                                             \
+    X(vkCreateSwapchainKHR, Optional)                                                      \
+    X(vkDestroySwapchainKHR, Optional)                                                     \
+    X(vkGetSwapchainImagesKHR, Optional)                                                   \
+    X(vkAcquireNextImageKHR, Optional)                                                     \
+    X(vkQueuePresentKHR, Optional)
 
 #define MONARC_VK_DECLARE_TABLE_MEMBER(name, requirement) PFN_##name name = nullptr;
 
@@ -258,6 +302,32 @@ public:
     /// existed. See the note above the entry-point lists on `vkDestroyDevice` being resolvable
     /// either way.
     [[nodiscard]] PFN_vkDestroyDevice ResolveDeviceDestroyer(VkDevice device) const;
+
+    /// `vkGetInstanceProcAddr` itself, as resolved from the module. Null on a closed or
+    /// moved-from Loader.
+    ///
+    /// **One caller, and it is the platform surface file.** `vkCreateWin32SurfaceKHR` cannot
+    /// go in the instance table -- its declaration only exists where
+    /// `VK_USE_PLATFORM_WIN32_KHR` is defined, and that is one .cpp and never this header --
+    /// so `Private/Platform/Windows/VulkanSurface.cpp` resolves it here instead. Exposing the
+    /// resolver rather than widening the table is what keeps every Win32 Vulkan declaration
+    /// inside that one file.
+    [[nodiscard]] PFN_vkGetInstanceProcAddr GetInstanceProcAddr() const {
+        return m_getInstanceProcAddr;
+    }
+
+    /// True when all five `VK_KHR_swapchain` device entry points resolved into `functions`.
+    ///
+    /// All five or none: a swapchain that could be created and not destroyed, or acquired from
+    /// and not presented, is worse than one that was refused. `HasDebugUtilsFunctions`'s rule
+    /// on the messenger pair, applied to a bigger set.
+    [[nodiscard]] static bool HasSwapchainFunctions(const DeviceFunctions& functions) {
+        return functions.vkCreateSwapchainKHR != nullptr &&
+               functions.vkDestroySwapchainKHR != nullptr &&
+               functions.vkGetSwapchainImagesKHR != nullptr &&
+               functions.vkAcquireNextImageKHR != nullptr &&
+               functions.vkQueuePresentKHR != nullptr;
+    }
 
     [[nodiscard]] const GlobalFunctions&     Global() const { return m_global; }
     [[nodiscard]] const InstanceFunctions&   Instance() const { return m_instance; }

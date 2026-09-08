@@ -7,7 +7,9 @@
 #include <Monarc/RHI/Adapter.h>
 #include <Monarc/RHI/Capabilities.h>
 #include <Monarc/RHI/Device.h>
+#include <Monarc/RHI/Swapchain.h>
 #include <Monarc/RHI/Vulkan/VulkanDevice.h>
+#include <Monarc/RHI/Vulkan/VulkanSwapchain.h>
 
 // namespace Monarc::RHI rather than Monarc::RHI::Vulkan, deliberately. What this module
 // exports is an RHI backend; its Vulkan-ness belongs in the name of the thing, not in the
@@ -208,6 +210,61 @@ public:
     [[nodiscard]] Result<VulkanDevice> CreateDevice(IAllocator& allocator,
                                                     const AdapterInfo&  adapter,
                                                     const DeviceConfig& config);
+
+    /// Whether the adapter `adapter.uuid` names can present to `surface`, on the graphics
+    /// queue family a device created on it would use.
+    ///
+    /// **A query a caller makes before choosing a device, which is why it is on the backend
+    /// rather than on a device or a swapchain.** "Which of my GPUs can drive this monitor" is a
+    /// real question on a machine with more than one, and it has to be answerable before a
+    /// logical device exists -- otherwise the only way to find out is to create a device, try
+    /// to make a swapchain, and throw the device away.
+    ///
+    /// It creates its own `VkSurfaceKHR` from `surface`, asks
+    /// `vkGetPhysicalDeviceSurfaceSupportKHR`, and destroys it again. Creating a second surface
+    /// for the same window is legal -- what is not legal is destroying one a swapchain still
+    /// names, and this one never has a swapchain. The cost is one surface creation per call,
+    /// which is not a path that matters.
+    ///
+    /// **The queue family is the one `VulkanDeviceFactory` would pick**, not family zero: the
+    /// two share `Detail::FindGraphicsQueueFamily` so that they cannot disagree. An answer
+    /// about a family the device would not have used would be worse than no answer.
+    ///
+    /// Measured on this machine: **both** local adapters report presentation support for a
+    /// window on either monitor, including the Intel UHD 730 for a window on the display the
+    /// NVIDIA card drives. That is a finding rather than an assumption, and Docs/Status.md
+    /// records it.
+    ///
+    /// Failures are `ErrorCode::InvalidArgument` (this backend is shut down or moved from, or
+    /// `surface` names no window), `ErrorCode::NotFound` (no physical device reports that UUID,
+    /// or the platform's surface entry point did not resolve), `ErrorCode::Unsupported` (the
+    /// adapter reports no graphics queue family) or `ErrorCode::BackendFailure`. A backend that
+    /// answers `false` has *not* failed: that is the finding.
+    [[nodiscard]] Result<bool> AdapterCanPresent(const AdapterInfo&        adapter,
+                                                 const SurfaceDescription& surface);
+
+    /// Creates a surface for `description.surface` and a swapchain on `device`.
+    ///
+    /// **The surface is created here and owned by the swapchain, which is the only arrangement
+    /// the module boundaries allow.** A surface belongs to the `VkInstance`, which this class
+    /// owns; a swapchain belongs to a `VkDevice`, which it does not. So the call that needs
+    /// both is a member of the thing that has the instance, and what it returns owns the pair.
+    /// The alternative -- a separate `VulkanSurface` type a caller passes around -- would be a
+    /// third public class whose only content is one handle.
+    ///
+    /// **Nothing in this module knows what a window is.** `description.surface` is two opaque
+    /// `void*` (`RHI::SurfaceDescription`), and gate 3 in Tools/check_architecture.py is what
+    /// makes that structural rather than stylistic: a tier-2 translation unit may not include
+    /// `Monarc/Host/`, so a `Window&` could not be passed here even if someone wanted to.
+    ///
+    /// `allocator` is used for the swapchain's state and must outlive it. **The swapchain must
+    /// be destroyed before `device`, and both before this backend** -- see `VulkanSwapchain`'s
+    /// class comment for what happens otherwise.
+    ///
+    /// Failures are `Detail::VulkanSwapchainFactory::Create`'s, plus
+    /// `ErrorCode::InvalidArgument` for a backend that has been shut down or moved from.
+    [[nodiscard]] Result<VulkanSwapchain> CreateSwapchain(
+        IAllocator& allocator, VulkanDevice& device, const SwapchainDescription& description);
 
 private:
     /// Everything this class owns lives behind one pointer, allocated from the caller's

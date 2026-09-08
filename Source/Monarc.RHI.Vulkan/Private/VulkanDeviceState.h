@@ -58,6 +58,33 @@ MONARC_LOG_CATEGORY(VulkanDevice, Info);
 /// and a repeated declaration of an incomplete type is exactly that and nothing more.
 struct VulkanDeviceState;
 
+/// No queue family ever has this index. Returned by `FindGraphicsQueueFamily` when a physical
+/// device reports no family that can do graphics.
+///
+/// **Not `kNoSlot`, which VulkanDevice.cpp keeps to itself for pool slots.** A queue family
+/// index is a different domain, and one constant standing for "not a slot" and "not a family"
+/// at once would compare equal across the two by coincidence rather than by meaning.
+inline constexpr u32 kNoQueueFamily = static_cast<u32>(-1);
+
+/// Index of the first queue family on `physicalDevice` that can do graphics, or
+/// `kNoQueueFamily`.
+///
+/// First and not best: A3 has one queue and submits everything to it, so there is nothing to
+/// optimise between families. A transfer-only or async-compute family is a later phase's
+/// choice, and it will want this to become a query over all families rather than a first hit.
+///
+/// **Declared here rather than kept in VulkanDevice.cpp's anonymous namespace, because Task 4
+/// gave it a second caller in another translation unit.** `VulkanBackend::AdapterCanPresent`
+/// asks `vkGetPhysicalDeviceSurfaceSupportKHR` about a family, and the family it has to ask
+/// about is the one device creation would actually pick -- so the two must agree by
+/// construction rather than by two copies of "the first graphics family". A second copy would
+/// answer differently the day this becomes a query over all families.
+///
+/// `allocator` is used for one scratch array of queue-family properties and nothing survives
+/// the call.
+[[nodiscard]] u32 FindGraphicsQueueFamily(const Loader& loader, IAllocator& allocator,
+                                          VkPhysicalDevice physicalDevice);
+
 /// One texture's pool slot. Generation-checked, per ADR-0002: a slot is reused after its
 /// texture is destroyed, so the index alone cannot tell one occupant from the next.
 struct TextureSlot {
@@ -106,6 +133,25 @@ struct TextureSlot {
     /// scan for and what `Shutdown` releases by. `Resolve` consults it too, but only for the
     /// forged-handle case the generation cannot answer -- see `Resolve(TextureHandle)`.
     bool live = false;
+
+    /// Whether releasing this slot destroys its `VkImage`.
+    ///
+    /// **False for exactly one thing: a swapchain image.** `vkGetSwapchainImagesKHR` hands
+    /// back images the presentation engine owns; `vkDestroyImage` on one is
+    /// `VUID-vkDestroyImage-image-04882`, and destroying the swapchain is what frees them. So
+    /// a swapchain registers its images in this pool through `AdoptImage` with this false, and
+    /// `ReleaseTextureSlot` skips the image while still destroying the *view* -- the view is
+    /// Monarc's, created because dynamic rendering names a view rather than an image.
+    ///
+    /// `memory` needs no such flag: a swapchain image is not bound to a `VkDeviceMemory` this
+    /// device allocated, so the field is null and the existing null test already skips it.
+    ///
+    /// **Why an adopted image is a pool slot at all**, rather than a swapchain-private array:
+    /// it makes an acquired image a `TextureHandle`, so `Barrier`, `BeginRendering` and
+    /// `CopyTextureToBuffer` work on it with no new entry point and with ADR-0002's generation
+    /// checking intact -- which is what lets the swapchain readback reuse Task 3's copy path
+    /// exactly. See `RHI::AcquiredImage`.
+    bool ownsImage = true;
 };
 
 /// One buffer's pool slot. `TextureSlot`'s two-bump generation rule applies unchanged.
@@ -145,64 +191,88 @@ struct FrameSlot {
 /// `ICommandList` for one frame slot, and the state machine that decides which of its calls are
 /// legal now.
 ///
-/// **The transition table, written down after a second patch closed the same shape of hole as
-/// the first.** A list is in exactly one of four states, and three of the flags below name it;
-/// `m_rendering` is a sub-state of `Recording`, and detachment is orthogonal to all four. The
-/// right-hand column is the state the `VkCommandBuffer` is in, which is what the validation
-/// layer's VUIDs are phrased in terms of.
+/// **The state machine is one `enum class State` and no booleans, which is Task 4's refactor
+/// and the whole reason it was deferred to here.** Task 3 wrote the table out and tracked it
+/// with `m_recording`, `m_recorded`, `m_submitted` and `m_rendering`; closing the table found
+/// three reachable holes, each a named VUID in Debug and **silent undefined behaviour in
+/// Release**. Four bools cannot make an unaudited method a compile error. An exhaustive
+/// `switch` over `State` can, because `/w44062` is on (CMake/MonarcTargetOptions.cmake) and
+/// every switch below is `default`-less: a state added to the enum fails to compile in each
+/// method that has to decide about it. That is the same class of guarantee as
+/// `TextureBarrier`'s required layout pair -- not testable by assertion, demonstrable by
+/// writing the bad code and watching it fail to build.
 ///
-/// | state       | `m_recording` | `m_recorded` | `m_submitted` | command buffer      |
-/// |-------------|---------------|--------------|---------------|---------------------|
-/// | `Reset`     | false         | false        | false         | initial             |
-/// | `Recording` | true          | false        | false         | recording           |
-/// | `Recorded`  | false         | true         | false         | executable          |
-/// | `Submitted` | false         | true         | true          | pending, then invalid |
+/// **There are five states and not four, and the fifth is not the one the plan predicted.**
+/// The A3 plan deferred this refactor on the grounds that "the swapchain adds the fifth state
+/// -- a list holding an acquired image is a state the machine does not yet have". It does not.
+/// An acquired swapchain image is a `TextureHandle` in the device's own texture pool
+/// (`RHI::AcquiredImage`), so a list rendering into one is in exactly the state it is in when
+/// rendering into any other texture, and the swapchain adds no list state at all. The fifth
+/// state was already here: `Rendering`, which Task 3 tracked as a *sub-state* of `Recording`
+/// in a fourth bool. Folding it in is what makes the "+ pass" column of Task 3's table a row
+/// of the enum -- and that column is where one of the three holes was.
 ///
-/// The transitions, and there are only five:
+/// | state       | command buffer        | inside `vkCmdBeginRendering` |
+/// |-------------|-----------------------|------------------------------|
+/// | `Reset`     | initial               | no                           |
+/// | `Recording` | recording             | no                           |
+/// | `Rendering` | recording             | yes                          |
+/// | `Recorded`  | executable            | no                           |
+/// | `Submitted` | pending, then invalid | no                           |
+///
+/// The middle column is the state the `VkCommandBuffer` is in, which is what the validation
+/// layer's VUIDs are phrased in terms of. `Recording` and `Rendering` share it, which is
+/// exactly why they were one state and a flag: Vulkan does not distinguish them, and Monarc
+/// must, because `vkCmdPipelineBarrier2` is legal in one and not the other.
+///
+/// The transitions, and there are seven:
 ///
 /// - `Attach` and `Reset` -> `Reset`, from any state. `IDevice::BeginFrame` is what calls
 ///   `Reset`, and it does so *after* waiting on the slot's timeline value and resetting the
 ///   pool -- which is the step that actually returns the command buffer to `initial`.
 /// - `Reset` --`Begin`--> `Recording`.
-/// - `Recording` --`End`--> `Recorded`, refused while `m_rendering`.
+/// - `Recording` --`BeginRendering`--> `Rendering`.
+/// - `Rendering` --`EndRendering`--> `Recording`.
+/// - `Recording` --`End`--> `Recorded`. Refused in `Rendering`.
 /// - `Recorded` --`IQueue::Submit`--> `Submitted`.
-/// - `Submitted` --`IDevice::BeginFrame`--> `Reset`. **The only way out**, and the reason both
-///   flags outlive the submission: nothing else waits on the timeline, so nothing else may
+/// - `Submitted` --`IDevice::BeginFrame`--> `Reset`. **The only way out**, and the reason the
+///   state outlives the submission: nothing else waits on the timeline, so nothing else may
 ///   reset the pool.
 ///
+/// **Three combinations of Task 3's four bools were unreachable, and the enum makes that
+/// structural rather than argued.** `m_recording && m_recorded` could not occur, nor
+/// `m_submitted` without `m_recorded`, nor `m_rendering` outside `m_recording` -- each held
+/// because of which writer set what, and each had to be re-checked by hand whenever a writer
+/// changed. Five enumerators have no such combinations to reason about: sixteen bool states
+/// collapse to the five that were ever real.
+///
 /// `Detach` is `Reset` plus forgetting the buffer, so a detached list reads as `Reset` with no
-/// `VkCommandBuffer`. It therefore needs no guards of its own: `Begin` refuses on the null
-/// buffer, and every other call refuses because `Reset` cleared `m_recording`. The detached
-/// column below is that, not a separate set of checks.
+/// `VkCommandBuffer`. It therefore needs no state of its own -- and it is genuinely orthogonal
+/// rather than a sixth enumerator: `Begin` refuses on the null buffer, and every other call is
+/// already refused by `Reset`. Giving it an enumerator would add a row in which every cell
+/// repeated `Reset`'s.
 ///
-/// **`m_recording && m_recorded` is unreachable**, which is what keeps the four rows above the
-/// whole table rather than a selection from eight. `End` is the only writer that sets
-/// `m_recorded` and it clears `m_recording` in the same breath; `Begin` is the only writer that
-/// sets `m_recording` and it refuses when `m_recorded`. Likewise `m_submitted` implies
-/// `m_recorded`: `Submit` refuses a list that is not recorded, and only `Reset` clears either.
+/// **What each method refuses, checked against every state because the compiler now requires
+/// it.** `ok` is a state a call is legal in; `Status` is a returned `ErrorCode::InvalidArgument`;
+/// `check` is `MONARC_CHECK` and a plain return, which is all a void function has; `fatal` is
+/// `MONARC_CHECK` and `std::abort()`.
 ///
-/// `m_rendering` belongs to `Recording` alone: `BeginRendering` is the only thing that sets it
-/// and it requires `m_recording`, `End` refuses while it is set, and `Attach`, `Reset`, `Begin`
-/// and `EndRendering` clear it. So no other state can carry a rendering pass.
+/// |                       | detached | `Reset`  | `Recording` | `Rendering` | `Recorded` | `Submitted` |
+/// |-----------------------|----------|----------|-------------|-------------|------------|-------------|
+/// | `Begin`               | `Status` | **ok**   | `Status`    | `Status`    | `Status`   | `Status`    |
+/// | `End`                 | `Status` | `Status` | **ok**      | `Status`    | `Status`   | `Status`    |
+/// | `Barrier` x3          | `check`  | `check`  | **ok**      | `fatal`     | `check`    | `check`     |
+/// | `BeginRendering`      | `Status` | `Status` | **ok**      | `Status`    | `Status`   | `Status`    |
+/// | `EndRendering`        | `check`  | `check`  | `check`     | **ok**      | `check`    | `check`     |
+/// | `CopyTextureToBuffer` | `Status` | `Status` | **ok**      | `Status`    | `Status`   | `Status`    |
+/// | `IQueue::Submit`      | `Status` | `Status` | `Status`    | `Status`    | **ok**     | `Status`    |
 ///
-/// **What each method refuses, checked against every state rather than against the one that
-/// prompted the guard.** `ok` is the only state a call is legal in; `Status` is a returned
-/// `ErrorCode::InvalidArgument`; `check` is `MONARC_CHECK` and a plain return, which is all a
-/// void function has; `fatal` is `MONARC_CHECK` and `std::abort()`.
-///
-/// |                       | detached | `Reset`  | `Recording` | + pass       | `Recorded` | `Submitted` |
-/// |-----------------------|----------|----------|-------------|--------------|------------|-------------|
-/// | `Begin`               | `Status` | **ok**   | `Status`    | `Status`     | `Status`   | `Status`    |
-/// | `End`                 | `Status` | `Status` | **ok**      | `Status`     | `Status`   | `Status`    |
-/// | `Barrier` x3          | `check`  | `check`  | **ok**      | `fatal`      | `check`    | `check`     |
-/// | `BeginRendering`      | `Status` | `Status` | **ok**      | `Status`     | `Status`   | `Status`    |
-/// | `EndRendering`        | `check`  | `check`  | `check`     | **ok**       | `check`    | `check`     |
-/// | `CopyTextureToBuffer` | `Status` | `Status` | **ok**      | `Status`     | `Status`   | `Status`    |
-/// | `IQueue::Submit`      | `Status` | `Status` | `Status`    | unreachable  | **ok**     | `Status`    |
-///
-/// `Submit`'s `+ pass` cell is unreachable rather than guarded, and that is a consequence of
-/// two other cells: `End` refuses inside a pass and `Submit` refuses a list that is not
-/// recorded, so there is no order of calls that presents a mid-pass list to the queue.
+/// `Submit`'s `Rendering` cell was written "unreachable" while the table was prose, on the
+/// grounds that `End` refuses inside a pass and `Submit` refuses a list that is not recorded,
+/// so no order of calls presents a mid-pass list to the queue. That reasoning still holds and
+/// the cell is now a real `Status` anyway, because the exhaustive switch has to say something
+/// and "unreachable" is not something a `switch` can say without a comment nobody re-checks.
+/// Refusing costs one case label.
 ///
 /// Three of those cells were holes when the table was first written out, each of them a caller
 /// ordering mistake that ended the process at a validation error instead of returning a
@@ -210,6 +280,43 @@ struct FrameSlot {
 /// three were measured on this machine before and after -- see each guard, and Docs/Status.md.
 class VulkanCommandList final : public ICommandList {
 public:
+    /// The five states of the machine above, as one value.
+    ///
+    /// Nested, so the name is `VulkanCommandList::State` at every use and there is no
+    /// `State` at namespace scope for a second state machine to collide with. Public,
+    /// because `VulkanQueue::Submit` switches over it -- and that method is the one this
+    /// enum exists for: it is where two of Task 3's three holes were, and an exhaustive
+    /// switch there is what makes a sixth state impossible to add without auditing it.
+    ///
+    /// `u8` rather than the default `int`: five enumerators, and this is a per-frame member
+    /// of a per-device array. The width is not what matters -- being explicit about it is,
+    /// because a fixed underlying type is what makes a value outside the enumerator set
+    /// representable, and every trailing `return`/`MONARC_CHECK` after a `default`-less
+    /// switch below exists for exactly that value.
+    enum class State : u8 {
+        /// Nothing recorded; the command buffer is in Vulkan's initial state. What
+        /// `Attach`, `Reset` and `Detach` leave behind.
+        Reset = 0,
+
+        /// `Begin` has run and `End` has not. Commands may be recorded.
+        Recording,
+
+        /// Recording, and inside the rendering instance `BeginRendering` began. Every
+        /// `vkCmd*` Monarc records is legal here **except** `vkCmdPipelineBarrier2`, which
+        /// is why this is a state and not a flag.
+        Rendering,
+
+        /// `End` has run: the command buffer is executable and a queue may take it.
+        Recorded,
+
+        /// A queue has taken this recording. Still recorded -- the recording in the buffer is
+        /// the one that was submitted -- but no longer submittable, because `Begin` recorded
+        /// it with `VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT` and the buffer therefore
+        /// becomes *invalid* rather than executable once the work finishes. A `WaitIdle`
+        /// does not make a second submission legal; only `IDevice::BeginFrame` does.
+        Submitted,
+    };
+
     VulkanCommandList() = default;
 
     /// Points this list at its device and frame slot. Called once, by the factory, after the
@@ -229,33 +336,25 @@ public:
 
     [[nodiscard]] VkCommandBuffer Buffer() const { return m_buffer; }
     [[nodiscard]] u32             FrameIndex() const { return m_frameIndex; }
-    [[nodiscard]] bool            IsRecording() const { return m_recording; }
-    [[nodiscard]] bool            IsRendering() const { return m_rendering; }
 
-    /// Whether `Begin` and then `End` have both run since this list was last reset, so its
-    /// command buffer holds a recording a queue may submit.
+    /// Which state this list is in.
     ///
-    /// **Separate from `!IsRecording()`, and that is the whole point.** A list straight out of
-    /// `BeginFrame` is not recording either, because `BeginFrame` reset the pool and returned
-    /// its command buffer to Vulkan's initial state -- submitting that is
-    /// `VUID-vkQueueSubmit2-commandBuffer-03874` and stops the process. Only this says the
-    /// difference between "finished recording" and "never started".
-    [[nodiscard]] bool IsRecorded() const { return m_recorded; }
-
-    /// Whether `IQueue::Submit` has already taken this list's recording since it was last
-    /// reset.
-    ///
-    /// **Separate from `IsRecorded()` for the same reason `IsRecorded()` is separate from
-    /// `!IsRecording()`**: `Submit` leaves the list recorded, because it is -- the recording it
-    /// took is still the one in the buffer. What changes is that the buffer is no longer
-    /// submittable. `VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT` is what makes that true even
-    /// after the work finishes, since the buffer moves from pending to *invalid* rather than
-    /// back to executable, so a `WaitIdle` between the two submissions does not help.
-    [[nodiscard]] bool IsSubmitted() const { return m_submitted; }
+    /// **This replaced four boolean accessors -- `IsRecording`, `IsRendering`, `IsRecorded`
+    /// and `IsSubmitted` -- and their loss is the point.** Each answered one question about
+    /// the state, so a caller deciding what to do had to ask several and get the combination
+    /// right; `VulkanQueue::Submit` asked three and, until Task 3's review, drew the wrong
+    /// conclusion from two of them. One value asked once cannot be combined wrongly, and a
+    /// `switch` over it is checked for completeness by the compiler where a chain of `if`s is
+    /// not.
+    [[nodiscard]] State CurrentState() const { return m_state; }
 
     /// Records that `IQueue::Submit` has taken this recording. Called by `VulkanQueue::Submit`
     /// once `vkQueueSubmit2` has succeeded, beside the stamp it puts on the frame slot.
-    void MarkSubmitted() { m_submitted = true; }
+    ///
+    /// Unconditional rather than guarded on the current state, because the guard is the
+    /// caller's: `Submit` refuses every state but `Recorded` before it reaches the API, and a
+    /// second check here would be a second place for that rule to live.
+    void MarkSubmitted() { m_state = State::Submitted; }
 
     [[nodiscard]] Status Begin() override;
     [[nodiscard]] Status End() override;
@@ -268,31 +367,47 @@ public:
                                              BufferHandle  destination) override;
 
 private:
-    /// Whether a `Cmd`-style call may be recorded now. Reports through MONARC_CHECK and
-    /// returns the answer; the three `Barrier` overloads and `EndRendering` return void, so
-    /// this is the only report available to them.
+    /// Refuses a barrier that cannot be recorded now, reporting through the assertion handler
+    /// and -- in the one state where there is nothing legal to record instead -- ending the
+    /// process. Returns true when the caller may go on and record.
     ///
-    /// Void rather than `Status` for those four is deliberate and mirrors the API: Vulkan's own
-    /// `vkCmd*` functions return nothing, because a command buffer defers every error it can
-    /// to `vkEndCommandBuffer` -- which is exactly what `End()` above surfaces. Recording on a
-    /// list that is not recording is not a deferred error, it is a caller bug, and the house
-    /// pattern for one is a check.
-    [[nodiscard]] bool CanRecord(const char* operation) const;
+    /// **One function for the whole `Barrier` row of the table, because all three overloads
+    /// have that row and no `Status` to refuse through.** Void rather than `Status` for the
+    /// three is deliberate and mirrors the API: Vulkan's own `vkCmd*` functions return
+    /// nothing, because a command buffer defers every error it can to `vkEndCommandBuffer` --
+    /// which is what `End()` above surfaces. Recording on a list that is not recording is not
+    /// a deferred error, it is a caller bug, and the house pattern for one is a check.
+    ///
+    /// This replaced `CanRecord` plus an `m_rendering` test written out three times, and the
+    /// exhaustive switch inside it is why: with the states enumerated, "which states may
+    /// record a barrier" is one question with one answer, and the compiler checks that the
+    /// answer covers them all.
+    [[nodiscard]] bool CanRecordBarrier(const char* operation) const;
 
-    /// Reports `operation` and ends the process. What the three `Barrier` overloads call when
-    /// they are asked to record inside a rendering pass, which is the one cell of the table
-    /// above where a void function has no legal call to make and no `Status` to refuse
-    /// through. See the definition for why it is fatal rather than a return.
+    /// Reports `operation` and ends the process. What `CanRecordBarrier` calls in `Rendering`,
+    /// which is the one cell of the table above where a void function has no legal call to
+    /// make and no `Status` to refuse through. See the definition for why it is fatal rather
+    /// than a return.
     [[noreturn]] static void FailInsideRenderingPass(const char* operation);
 
-    VulkanDeviceState* m_state      = nullptr;
-    VkCommandBuffer    m_buffer     = VK_NULL_HANDLE;
-    u32                m_frameIndex = 0;
-    bool               m_recording  = false;
-    bool               m_rendering  = false;
-    bool               m_recorded   = false;
-    bool               m_submitted  = false;
+    /// The device this list records into. **Named `m_deviceState` and not `m_state`, which is
+    /// what it was called through Task 3**: with a `State` member beside it, `m_state` would
+    /// have been the device in one line and the machine's state in the next.
+    VulkanDeviceState* m_deviceState = nullptr;
+    VkCommandBuffer    m_buffer      = VK_NULL_HANDLE;
+    u32                m_frameIndex  = 0;
+    State              m_state       = State::Reset;
 };
+
+/// The enumerator's own spelling, for logs and test failures. Never nullptr; a value outside
+/// the enumerator set gets a name of its own, for the reason `RHI::ToString(Format)` in
+/// Monarc/RHI/Types.h gives.
+///
+/// A free function in `Detail` rather than a static member, so it joins the `ToString`
+/// overload set `Translate.h` already has -- a static member of that name would *hide* those
+/// overloads inside every method of this class, and the first `ToString(result)` in one would
+/// stop compiling for a reason nowhere near its cause.
+[[nodiscard]] const char* ToString(VulkanCommandList::State state);
 
 class VulkanQueue final : public IQueue {
 public:
@@ -336,6 +451,21 @@ struct VulkanDeviceState {
 
     u32 graphicsQueueFamily = 0;
 
+    /// Whether `VK_KHR_swapchain` was enabled on this device, and its five entry points
+    /// therefore resolved.
+    ///
+    /// **Not a `Capabilities` field and not a tier requirement, deliberately.**
+    /// `Capabilities`' own rule is that every field in it is an input to the tier ladder, and
+    /// making presentation a `Baseline` requirement would declare a compute-only or headless
+    /// device unable to run Monarc's renderer -- which is a claim A3 has no business making,
+    /// with `Monarc.Host.Headless` on the roadmap and excluded from this phase by name. So the
+    /// extension is enabled where it exists, recorded here, and refused by
+    /// `VulkanSwapchainFactory::Create` where it does not: the only call that actually needs
+    /// it is the only one that reports about it.
+    ///
+    /// True on both local adapters, measured.
+    bool swapchainEnabled = false;
+
     /// Highest value any submission on this queue will signal. Monotonic, one per submission.
     u64 lastSubmittedValue = 0;
 
@@ -368,8 +498,47 @@ struct VulkanDeviceState {
     /// two devices, and a list from one submitted to the other's queue is refused here.
     [[nodiscard]] VulkanCommandList* FindOwnList(ICommandList* list);
 
+    /// The `VulkanCommandList` `list` names, if it is one of this device's and is in a state a
+    /// queue may take. Otherwise a `Status` saying which of the two it failed.
+    ///
+    /// **Shared by the two submitting calls, which is why it is here rather than inside
+    /// `VulkanQueue::Submit`.** `IQueue::Submit` and `ISwapchain::SubmitForPresent` refuse the
+    /// same four caller mistakes -- a foreign list, a list still recording, one that recorded
+    /// nothing, one already submitted -- and they are defined in different translation units,
+    /// so the alternative was two copies of a guard whose whole value is being the same in
+    /// both places. Task 3's review found the third of those four mistakes by writing the
+    /// state table out; a second copy of the table's `Submit` row is exactly what that review
+    /// was about.
+    [[nodiscard]] Result<VulkanCommandList*> ValidateForSubmit(const char*   operation,
+                                                               ICommandList& list);
+
+    /// Submits `list`'s recording on the graphics queue and returns the timeline value it will
+    /// signal, stamping the frame slot and marking the list submitted.
+    ///
+    /// `waitBinary` and `signalBinary` are presentation's two semaphores and are
+    /// `VK_NULL_HANDLE` for an ordinary submission. Both are per-submission rather than stored
+    /// because they belong to a swapchain, and a device may have none or several.
+    ///
+    /// `list` must already have been through `ValidateForSubmit`: this function records the
+    /// submission and does not police the caller's ordering.
+    [[nodiscard]] Result<u64> SubmitList(VulkanCommandList& list, VkSemaphore waitBinary,
+                                         VkSemaphore signalBinary);
+
     [[nodiscard]] u32 ClaimTextureSlot();
     [[nodiscard]] u32 ClaimBufferSlot();
+
+    /// Registers an image this device did not create in the texture pool, with a fresh view,
+    /// and returns a handle naming its slot.
+    ///
+    /// For swapchain images and nothing else -- see `TextureSlot::ownsImage`, which this sets
+    /// false. `description` is what `BeginRendering` and `CopyTextureToBuffer` read to decide
+    /// whether the image may be an attachment or a copy source, so it must be the usage the
+    /// *swapchain* was created with rather than a guess.
+    ///
+    /// Fails with `ErrorCode::OutOfMemory` when the texture pool is full, and with whatever
+    /// `vkCreateImageView` said. Nothing is left claimed on a failure.
+    [[nodiscard]] Result<TextureHandle> AdoptImage(VkImage                   image,
+                                                   const TextureDescription& description);
 
     [[nodiscard]] Result<VkDeviceMemory> AllocateFor(const VkMemoryRequirements& requirements,
                                                      MemoryLocation              location);

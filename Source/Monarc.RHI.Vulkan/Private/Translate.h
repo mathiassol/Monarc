@@ -318,4 +318,51 @@ inline constexpr u32 kNoMemoryType = static_cast<u32>(-1);
 [[nodiscard]] u32 FindMemoryType(const VkPhysicalDeviceMemoryProperties& properties,
                                  u32 allowedTypeBits, VkMemoryPropertyFlags required);
 
+// ---------------------------------------------------------------------------------------
+// Swapchain negotiation. Two decisions that are wholly determined by what a surface reports,
+// so they are functions of it rather than lines inside `vkCreateSwapchainKHR`'s caller.
+//
+// **They are here for the reason `FindMemoryType` is: this is the half of swapchain creation
+// that CI can run.** A swapchain needs a window, a surface, a device and a presenting queue
+// family, none of which a GitHub runner has -- but the arithmetic that turns
+// `VkSurfaceCapabilitiesKHR` into an image count and an extent needs none of them, and it is
+// the part with edge cases: an unbounded maximum, a maximum equal to the minimum, the
+// "surface has no preference" sentinel, and clamping a requested size into a range. Every one
+// of those is a driver behaviour this machine does not exhibit, so a device test could not
+// reach them even with a GPU present.
+// ---------------------------------------------------------------------------------------
+
+/// How many images to ask a swapchain for, given what the surface reports.
+///
+/// `minImageCount + 1`, so that the application can be working on one image while the
+/// presentation engine displays another -- the minimum alone leaves the CPU blocked in
+/// `vkAcquireNextImageKHR` for most of every frame. Clamped to `maxImageCount` when that is
+/// non-zero; zero is Vulkan's spelling of "no limit" and must not be clamped to.
+///
+/// **This is not `kFramesInFlight` and must never be derived from it.** Swapchain images
+/// belong to the surface and frames in flight belong to Monarc's own pacing; on this machine
+/// the surface reports a minimum of 2 and no maximum, so the two numbers happen to be 3 and 2.
+/// A driver reporting a minimum of 3 would make them 4 and 2, and code that had tied them
+/// together would be wrong only on that machine.
+[[nodiscard]] u32 ChooseSwapchainImageCount(u32 minImageCount, u32 maxImageCount);
+
+/// The extent to create a swapchain at.
+///
+/// `capabilities.currentExtent` when the surface reports one, and `requested` clamped into
+/// `[minImageExtent, maxImageExtent]` when it reports the "no preference" sentinel
+/// (`0xFFFFFFFF` in both dimensions).
+///
+/// **The surface's own answer wins where it gives one, and on Windows it always does**:
+/// `VkSurfaceCapabilitiesKHR::currentExtent` is the window's client rect, so a swapchain
+/// created at any other size is `VUID-VkSwapchainCreateInfoKHR-imageExtent-01274`. The
+/// sentinel branch is therefore unreachable on this platform and is written because it is
+/// reachable on others -- Wayland reports it -- and because a pure function that handled only
+/// the local case would be a trap for whoever ports this.
+///
+/// Returns an empty extent when the surface's own is empty, which is what a minimised window
+/// reports. The caller refuses that rather than this function inventing a size: see
+/// `ISwapchain::Recreate`.
+[[nodiscard]] Extent2D ChooseSwapchainExtent(const VkSurfaceCapabilitiesKHR& capabilities,
+                                             Extent2D                        requested);
+
 }  // namespace Monarc::RHI::Detail

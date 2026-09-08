@@ -60,15 +60,11 @@ constexpr u64 kTimelineWaitTimeoutNanoseconds = 5'000'000'000ULL;
 /// No pool slot ever has this index. Returned by the claim helpers when a pool is full, and
 /// the same convention `JobSystem::kNoSlot` uses.
 ///
-/// **Pool slots only.** `FindGraphicsQueueFamily` has `kNoQueueFamily` of its own rather than
-/// borrowing this: a queue family index is a different domain, and one constant standing for
-/// "not a slot" and "not a family" at once would compare equal across the two by coincidence
-/// rather than by meaning.
+/// **Pool slots only.** `FindGraphicsQueueFamily` has `Detail::kNoQueueFamily` in
+/// VulkanDeviceState.h rather than borrowing this: a queue family index is a different domain,
+/// and one constant standing for "not a slot" and "not a family" at once would compare equal
+/// across the two by coincidence rather than by meaning.
 constexpr u32 kNoSlot = static_cast<u32>(-1);
-
-/// No queue family ever has this index. Returned by `FindGraphicsQueueFamily` when a physical
-/// device reports no family that can do graphics.
-constexpr u32 kNoQueueFamily = static_cast<u32>(-1);
 
 }  // namespace
 
@@ -149,6 +145,52 @@ u32 VulkanDeviceState::ClaimBufferSlot() {
     return kNoSlot;
 }
 
+Result<TextureHandle> VulkanDeviceState::AdoptImage(VkImage                   image,
+                                                    const TextureDescription& description) {
+    const u32 slotIndex = ClaimTextureSlot();
+    if (slotIndex == kNoSlot) {
+        MONARC_LOG(LogCategories::VulkanDevice, Warning,
+                   "every one of the {} texture slots this device was configured with is in "
+                   "use, so a swapchain image cannot be registered",
+                   config.maxTextures);
+        return Err(ErrorCode::OutOfMemory, "this device's texture pool is full");
+    }
+    TextureSlot& slot = textures[slotIndex];
+    slot.description  = description;
+    slot.image        = image;
+    // Set before the view is created, so the release path below does not destroy an image this
+    // device does not own. Ordering that matters: `ReleaseTextureSlot` reads this flag.
+    slot.ownsImage = false;
+    // Left null deliberately. A swapchain image is not bound to memory this device allocated,
+    // and `ReleaseTextureSlot`'s existing null test is what skips freeing it.
+    slot.memory = VK_NULL_HANDLE;
+
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType                       = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image                       = image;
+    viewInfo.viewType                    = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format                      = ToVulkan(description.format);
+    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewInfo.subresourceRange.baseMipLevel   = 0;
+    viewInfo.subresourceRange.levelCount     = 1;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount     = 1;
+
+    // Unconditional here, where `CreateTexture` makes a view only for a
+    // `ColorAttachment` texture: a swapchain image always carries
+    // `VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT` -- `VulkanSwapchainFactory::Create` asks for it and
+    // a surface must offer it -- so the usage test `CreateTexture` needs cannot fail here.
+    if (const VkResult result =
+            functions.vkCreateImageView(device, &viewInfo, nullptr, &slot.view);
+        result != VK_SUCCESS) {
+        slot.view = VK_NULL_HANDLE;
+        ReleaseTextureSlot(slot);
+        return FailVk("vkCreateImageView", result);
+    }
+
+    return TextureHandle{slotIndex, slot.generation};
+}
+
 Result<VkDeviceMemory> VulkanDeviceState::AllocateFor(const VkMemoryRequirements& requirements,
                                                       MemoryLocation              location) {
     const VkMemoryPropertyFlags required = ToVulkan(location);
@@ -182,18 +224,34 @@ void VulkanDeviceState::ReleaseTextureSlot(TextureSlot& slot) {
     // Reverse creation order: the view addresses the image, and the image is bound to the
     // memory.
     if (slot.view != VK_NULL_HANDLE) {
+        // Destroyed whoever owns the image. A swapchain image's view is Monarc's -- created by
+        // `AdoptImage`, because dynamic rendering names a view rather than an image -- so this
+        // line is right for both kinds of occupant and needs no flag of its own.
         functions.vkDestroyImageView(device, slot.view, nullptr);
         slot.view = VK_NULL_HANDLE;
     }
-    if (slot.image != VK_NULL_HANDLE) {
+    if (slot.image != VK_NULL_HANDLE && slot.ownsImage) {
+        // **Guarded on ownership, and that is the whole of Task 4's change to this pool.** A
+        // swapchain image belongs to the presentation engine; `vkDestroyImage` on one is
+        // `VUID-vkDestroyImage-image-04882`, and `vkDestroySwapchainKHR` is what actually
+        // frees it. See `TextureSlot::ownsImage`.
         functions.vkDestroyImage(device, slot.image, nullptr);
-        slot.image = VK_NULL_HANDLE;
     }
+    // Cleared either way: the slot must not keep naming an image once it is free, whether or
+    // not this function was the thing that destroyed it. Outside the branch rather than inside
+    // it, because a slot left pointing at a swapchain image is exactly the stale pointer the
+    // generation counter cannot protect anything from.
+    slot.image = VK_NULL_HANDLE;
+
     if (slot.memory != VK_NULL_HANDLE) {
         functions.vkFreeMemory(device, slot.memory, nullptr);
         slot.memory = VK_NULL_HANDLE;
     }
     slot.description = TextureDescription{};
+    // Back to the default, so a slot reused by `CreateTexture` after a swapchain released it
+    // owns its image again. Nothing else resets this, and a slot that stayed non-owning would
+    // leak every image created into it for the rest of the device's life.
+    slot.ownsImage = true;
 
     // The release-side bump. Every handle this slot ever issued is now stale by generation
     // alone, with no wait for the next claim -- see `TextureSlot::generation`. Reached from
@@ -317,6 +375,188 @@ void VulkanDeviceState::Shutdown() {
 
     lastSubmittedValue = 0;
     frameIndex         = kFramesInFlight - 1;
+    // Cleared with the rest, so a shut-down device does not claim a capability it no longer
+    // has anything to exercise. `VulkanSwapchainFactory::Create` refuses on `device ==
+    // VK_NULL_HANDLE` before it reads this, so nothing depends on the order of the two -- but a
+    // field left true on an empty state is the kind of thing a later reader trusts.
+    swapchainEnabled = false;
+}
+
+Result<VulkanCommandList*> VulkanDeviceState::ValidateForSubmit(const char*   operation,
+                                                                ICommandList& list) {
+    // **The `IQueue::Submit` row of the state table, in one place because two calls have that
+    // row.** `IQueue::Submit` and `ISwapchain::SubmitForPresent` refuse the same mistakes and
+    // are compiled in different translation units; the alternative was two copies of a guard
+    // whose entire value is being identical in both.
+    //
+    // `operation` names the caller in each message, which is the only thing that differs
+    // between them, and it must be a literal -- `Error::message` is a non-owning view.
+    if (device == VK_NULL_HANDLE) {
+        MONARC_LOG(LogCategories::VulkanDevice, Warning,
+                   "{} was called on a device that has been shut down", operation);
+        return Err(ErrorCode::InvalidArgument,
+                   "a command list cannot be submitted on a device that has been shut down");
+    }
+
+    VulkanCommandList* own = FindOwnList(&list);
+    if (own == nullptr) {
+        MONARC_LOG(LogCategories::VulkanDevice, Warning,
+                   "{} was given a command list belonging to another device", operation);
+        return Err(ErrorCode::InvalidArgument,
+                   "the command list does not belong to this queue's device");
+    }
+
+    // **Exhaustive, so a sixth state cannot reach `vkQueueSubmit2` unaudited.** This is the
+    // method Task 3's review found two of its three holes in, and the one the enum exists for:
+    // with four bools the question "may this list be submitted" was three separate tests whose
+    // combination had to be got right, and it was not.
+    switch (own->CurrentState()) {
+        case VulkanCommandList::State::Recorded:
+            return own;
+
+        case VulkanCommandList::State::Recording:
+            return Err(ErrorCode::InvalidArgument,
+                       "the command list is still recording; call End first");
+
+        case VulkanCommandList::State::Rendering:
+            // Not reachable through the public interface -- `End` refuses inside a pass and a
+            // list that never ended is not `Recorded` -- and refused anyway, because the switch
+            // has to say something and "unreachable" is not something a `switch` can say
+            // without a comment nobody re-checks. One case label is cheaper than that comment.
+            return Err(ErrorCode::InvalidArgument,
+                       "the command list is inside a rendering pass; call EndRendering and End "
+                       "first");
+
+        case VulkanCommandList::State::Reset:
+            // **The list straight out of `BeginFrame`, with nothing recorded into it.**
+            // `BeginFrame` resets the whole pool, which returns the command buffer to Vulkan's
+            // initial state; submitting one is `VUID-vkQueueSubmit2-commandBuffer-03874` ("is
+            // unrecorded and contains no commands") and, with the fatal messenger installed,
+            // stops the process. This is the refusal that keeps a frame loop with an early-out
+            // between `BeginFrame` and recording a returned Status instead -- and Task 4's loop
+            // has exactly such an early-out, for an out-of-date swapchain.
+            return Err(ErrorCode::InvalidArgument,
+                       "the command list has recorded nothing since BeginFrame; call Begin and "
+                       "End first");
+
+        case VulkanCommandList::State::Submitted:
+            // **The condition three booleans could not express, which is why Task 3 added a
+            // fourth.** A submitted list is still recorded -- the recording in its buffer is
+            // the one that was taken -- so it looked exactly like one ready to go. What has
+            // changed is the command buffer: it is *pending*, and `Begin` records with
+            // `VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT`, so once the work finishes it
+            // becomes *invalid* rather than executable again. Only `BeginFrame` -- which waits
+            // on the slot's timeline value and resets its pool -- puts the buffer back to
+            // initial.
+            //
+            // Measured, on this machine, before the guard: `BeginFrame -> Begin -> End ->
+            // Submit -> Submit` stopped at `VUID-vkQueueSubmit2-commandBuffer-03875` ("is
+            // already in use and is not marked for simultaneous use") and exit 3221226505, and
+            // the same sequence with a `WaitIdle` between the two submissions stopped at
+            // `UNASSIGNED-DrawState-CommandBufferSingleSubmitViolation`. **The second of those
+            // is why this is a state on the list and not a test of the slot's
+            // `timelineValue`**: after a wait nothing is outstanding, so a guard phrased as
+            // "this slot has work in flight" would have let it through. In a build with no
+            // validation layer both exited zero and said nothing.
+            return Err(ErrorCode::InvalidArgument,
+                       "the command list has already been submitted; call IDevice::BeginFrame "
+                       "for a fresh one");
+    }
+    // `CanRecordBarrier`'s trailing-return reasoning: `m_state` is private and every writer
+    // assigns an enumerator, so nothing arrives here. Refusing is the conservative answer.
+    return Err(ErrorCode::InvalidArgument, "the command list is in no recognised state");
+}
+
+Result<u64> VulkanDeviceState::SubmitList(VulkanCommandList& list, VkSemaphore waitBinary,
+                                          VkSemaphore signalBinary) {
+    const u64 signalValue = lastSubmittedValue + 1;
+
+    VkCommandBufferSubmitInfo bufferInfo{};
+    bufferInfo.sType         = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+    bufferInfo.commandBuffer = list.Buffer();
+
+    // **Two signals at most, and they are different kinds of semaphore doing different jobs.**
+    // Slot 0 is the timeline, whose value says "everything in this submission finished" and is
+    // what `BeginFrame` waits on before resetting a pool. Slot 1, present only for a
+    // presenting submission, is the swapchain's binary render-finished semaphore, which
+    // `vkQueuePresentKHR` waits on -- and it has to be binary, because present accepts nothing
+    // else. Using each where it belongs is the phase plan's decision; making the timeline cover
+    // presentation is not available.
+    VkSemaphoreSubmitInfo signalInfos[2]{};
+    signalInfos[0].sType     = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+    signalInfos[0].semaphore = timeline;
+    signalInfos[0].value     = signalValue;
+    // ALL_COMMANDS, because the value means "everything in this submission finished". A
+    // narrower stage would signal earlier than the promise `Submit` documents.
+    signalInfos[0].stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+
+    u32 signalCount = 1;
+    if (signalBinary != VK_NULL_HANDLE) {
+        signalInfos[1].sType     = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+        signalInfos[1].semaphore = signalBinary;
+        // Zero, and required to be: a binary semaphore's signal ignores the value, and
+        // supplying one is `VUID-VkSubmitInfo2-semaphore-03882`.
+        signalInfos[1].value = 0;
+        // ALL_COMMANDS again, and here it is load-bearing rather than tidy: the last thing the
+        // frame records is the barrier into `TextureLayout::PresentSource`, and the
+        // presentation engine must not read the image until that transition has completed. A
+        // narrower signal stage would let present begin while the layout transition was still
+        // in flight.
+        signalInfos[1].stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        signalCount              = 2;
+    }
+
+    VkSemaphoreSubmitInfo waitInfo{};
+    if (waitBinary != VK_NULL_HANDLE) {
+        waitInfo.sType     = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+        waitInfo.semaphore = waitBinary;
+        waitInfo.value     = 0;
+        // COLOR_ATTACHMENT_OUTPUT and not ALL_COMMANDS, and the choice is paired with the
+        // caller's first barrier rather than free: the acquire semaphore says the image is
+        // available, and the first thing that touches the image is the layout transition out
+        // of `Undefined`. A transition is a write, so it has to be ordered after this wait --
+        // which happens because the frame's first barrier names
+        // `PipelineStage::ColorAttachmentOutput` as its *before* scope, and the semaphore's
+        // second scope is this stage. That chain is what Khronos' own synchronisation examples
+        // do; waiting at ALL_COMMANDS instead would work and would order the whole submission
+        // behind the acquire for no reason.
+        //
+        // **Nothing in this build verifies the chain.** Synchronisation validation is a
+        // separate validation feature and Monarc does not enable it, so this is reasoning
+        // rather than a measurement, and it is written down as such.
+        waitInfo.stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    }
+
+    VkSubmitInfo2 submitInfo{};
+    submitInfo.sType                    = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+    submitInfo.waitSemaphoreInfoCount   = waitBinary != VK_NULL_HANDLE ? 1U : 0U;
+    submitInfo.pWaitSemaphoreInfos      = waitBinary != VK_NULL_HANDLE ? &waitInfo : nullptr;
+    submitInfo.commandBufferInfoCount   = 1;
+    submitInfo.pCommandBufferInfos      = &bufferInfo;
+    submitInfo.signalSemaphoreInfoCount = signalCount;
+    submitInfo.pSignalSemaphoreInfos    = signalInfos;
+
+    // No fence. The timeline semaphore is the completion signal, and a fence beside it would be
+    // a second answer to one question.
+    if (const VkResult result =
+            functions.vkQueueSubmit2(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+        result != VK_SUCCESS) {
+        // lastSubmittedValue is deliberately not advanced on failure: nothing will signal
+        // signalValue, so a later Wait on it would time out rather than return.
+        return FailVk("vkQueueSubmit2", result);
+    }
+
+    lastSubmittedValue = signalValue;
+    // Stamped on the frame slot the list came from, which is what BeginFrame waits on before
+    // resetting that slot's pool. The queue is the only thing that knows the value, and the
+    // list is the only thing that knows the slot, so this is where the two meet.
+    frames[list.FrameIndex()].timelineValue = signalValue;
+    // Moved after the submission succeeded, for the reason `End` moves to `Recorded` after
+    // `vkEndCommandBuffer` succeeded: a `vkQueueSubmit2` the driver rejected took nothing, so
+    // the list is still submittable and marking it otherwise would refuse a retry the caller is
+    // entitled to.
+    list.MarkSubmitted();
+    return signalValue;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -324,103 +564,18 @@ void VulkanDeviceState::Shutdown() {
 // ---------------------------------------------------------------------------------------
 
 Result<u64> VulkanQueue::Submit(ICommandList& commands) {
-    if (m_state == nullptr || m_state->device == VK_NULL_HANDLE) {
+    if (m_state == nullptr) {
         return Err(ErrorCode::InvalidArgument,
                    "IQueue::Submit called on a queue whose device has been shut down");
     }
-
-    VulkanCommandList* list = m_state->FindOwnList(&commands);
-    if (list == nullptr) {
-        return Err(ErrorCode::InvalidArgument,
-                   "IQueue::Submit was given a command list that does not belong to this "
-                   "queue's device");
+    Result<VulkanCommandList*> list = m_state->ValidateForSubmit("IQueue::Submit", commands);
+    if (!list) {
+        return std::unexpected(list.error());
     }
-    if (list->IsRecording()) {
-        return Err(ErrorCode::InvalidArgument,
-                   "IQueue::Submit was given a command list that is still recording; call End "
-                   "first");
-    }
-    if (!list->IsRecorded()) {
-        // **The list straight out of `BeginFrame`, with nothing recorded into it.** Not the
-        // same condition as the one above: `BeginFrame` resets the whole pool, which returns
-        // the command buffer to Vulkan's initial state, and a list in that state is not
-        // recording either. Submitting one is `VUID-vkQueueSubmit2-commandBuffer-03874`
-        // ("is unrecorded and contains no commands") and, with the fatal messenger installed,
-        // stops the process -- so this is the refusal that keeps a frame loop with an early-out
-        // between `BeginFrame` and recording a returned Status instead.
-        return Err(ErrorCode::InvalidArgument,
-                   "IQueue::Submit was given a command list that has recorded nothing since "
-                   "BeginFrame; call Begin and End first");
-    }
-    if (list->IsSubmitted()) {
-        // **The third condition, and the one the two above cannot express.** A submitted list
-        // is still recorded -- the recording in its buffer is the one this queue took -- so
-        // `IsRecorded()` says yes and `IsRecording()` says no, exactly as they do for a list
-        // that is ready to go. What has changed is the command buffer: it is *pending*, and
-        // `Begin` records with `VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT`, so once the work
-        // finishes it becomes *invalid* rather than executable again. Neither state may be
-        // submitted, and only `BeginFrame` -- which waits on this slot's timeline value and
-        // resets its pool -- puts the buffer back to initial.
-        //
-        // Measured, on this machine, before the guard: `BeginFrame -> Begin -> End -> Submit
-        // -> Submit` stopped at `VUID-vkQueueSubmit2-commandBuffer-03875` ("is already in use
-        // and is not marked for simultaneous use") and exit 3221226505, and the same sequence
-        // with a `WaitIdle` between the two submissions stopped at
-        // `UNASSIGNED-DrawState-CommandBufferSingleSubmitViolation` ("recorded with
-        // VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT has been submitted 2 times"). **The
-        // second of those is why this is a flag on the list and not a test of the slot's
-        // `timelineValue`**: after a `WaitIdle` nothing is outstanding, so a guard phrased as
-        // "this slot has work in flight" would have let it through. In a build with no
-        // validation layer both exited zero and said nothing.
-        return Err(ErrorCode::InvalidArgument,
-                   "IQueue::Submit was given a command list that has already been submitted; "
-                   "call IDevice::BeginFrame for a fresh one");
-    }
-
-    const u64 signalValue = m_state->lastSubmittedValue + 1;
-
-    VkCommandBufferSubmitInfo bufferInfo{};
-    bufferInfo.sType         = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
-    bufferInfo.commandBuffer = list->Buffer();
-
-    VkSemaphoreSubmitInfo signalInfo{};
-    signalInfo.sType     = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
-    signalInfo.semaphore = m_state->timeline;
-    signalInfo.value     = signalValue;
-    // ALL_COMMANDS, because the value means "everything in this submission finished". A
-    // narrower stage would signal earlier than the promise `Submit` documents.
-    signalInfo.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-
-    VkSubmitInfo2 submitInfo{};
-    submitInfo.sType                    = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
-    submitInfo.commandBufferInfoCount   = 1;
-    submitInfo.pCommandBufferInfos      = &bufferInfo;
-    submitInfo.signalSemaphoreInfoCount = 1;
-    submitInfo.pSignalSemaphoreInfos    = &signalInfo;
-
-    // No fence. The timeline semaphore is the completion signal, and a fence beside it would be
-    // a second answer to one question -- see IQueue's comment on why there are no binary
-    // semaphores either.
-    if (const VkResult result =
-            m_state->functions.vkQueueSubmit2(m_state->graphicsQueue, 1, &submitInfo,
-                                              VK_NULL_HANDLE);
-        result != VK_SUCCESS) {
-        // lastSubmittedValue is deliberately not advanced on failure: nothing will signal
-        // signalValue, so a later Wait on it would time out rather than return.
-        return m_state->FailVk("vkQueueSubmit2", result);
-    }
-
-    m_state->lastSubmittedValue = signalValue;
-    // Stamped on the frame slot the list came from, which is what BeginFrame waits on before
-    // resetting that slot's pool. The queue is the only thing that knows the value, and the
-    // list is the only thing that knows the slot, so this is where the two meet.
-    m_state->frames[list->FrameIndex()].timelineValue = signalValue;
-    // Set after the submission succeeded, for the reason `End` sets `m_recorded` after
-    // `vkEndCommandBuffer` succeeded: a `vkQueueSubmit2` the driver rejected took nothing, so
-    // the list is still submittable and marking it otherwise would refuse a retry the caller
-    // is entitled to.
-    list->MarkSubmitted();
-    return signalValue;
+    // No binary semaphores: this is the submission a frame with no presentation makes, which is
+    // every submission in Task 3's readback and every one a headless render will make. The
+    // presenting overload is `ISwapchain::SubmitForPresent`, in VulkanSwapchain.cpp.
+    return m_state->SubmitList(**list, VK_NULL_HANDLE, VK_NULL_HANDLE);
 }
 
 Status VulkanQueue::Wait(u64 value, u64 timeoutNanoseconds) {
@@ -475,16 +630,9 @@ u64 VulkanQueue::LastSubmittedValue() const {
 // VulkanDeviceFactory
 // ---------------------------------------------------------------------------------------
 
-namespace {
-
-/// Index of the first queue family on `physicalDevice` that can do graphics, or
-/// `kNoQueueFamily`.
-///
-/// First and not best: A3 has one queue and submits everything to it, so there is nothing to
-/// optimise between families. A transfer-only or async-compute family is a later phase's
-/// choice, and it will want this to become a query over all families rather than a first hit.
-[[nodiscard]] u32 FindGraphicsQueueFamily(const Loader& loader, IAllocator& allocator,
-                                          VkPhysicalDevice physicalDevice) {
+// Declared in VulkanDeviceState.h, which says why it is not in the anonymous namespace below.
+u32 FindGraphicsQueueFamily(const Loader& loader, IAllocator& allocator,
+                            VkPhysicalDevice physicalDevice) {
     u32 count = 0;
     loader.Instance().vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &count, nullptr);
     if (count == 0) {
@@ -502,6 +650,44 @@ namespace {
         }
     }
     return kNoQueueFamily;
+}
+
+namespace {
+
+/// Whether `physicalDevice` offers `VK_KHR_swapchain`.
+///
+/// **A local count-then-fill rather than `VulkanBackend::State::EnumerateInto`**, which is a
+/// private member of a struct defined in another translation unit. Duplicating four lines of
+/// idiom is the smaller cost: the alternative was widening `VulkanDeviceFactory::Create`'s
+/// signature with a flag the caller had queried, which would put the reason the extension was
+/// or was not enabled in a different file from the enabling.
+///
+/// A query that fails is reported as "not offered". That is the conservative answer and it
+/// loses nothing: the extension is optional, and a device it is not enabled on refuses to make
+/// a swapchain with a message naming it -- where treating a failed query as "offered" would ask
+/// `vkCreateDevice` for an extension that may not exist and fail device creation outright.
+[[nodiscard]] bool DeviceOffersSwapchain(const Loader& loader, IAllocator& allocator,
+                                         VkPhysicalDevice physicalDevice) {
+    u32 count = 0;
+    if (loader.Instance().vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &count,
+                                                               nullptr) != VK_SUCCESS) {
+        return false;
+    }
+    if (count == 0) {
+        return false;
+    }
+
+    Array<VkExtensionProperties> extensions(allocator);
+    ResizeTo(extensions, count);
+    const VkResult filled = loader.Instance().vkEnumerateDeviceExtensionProperties(
+        physicalDevice, nullptr, &count, extensions.Data());
+    if (filled != VK_SUCCESS && filled != VK_INCOMPLETE) {
+        return false;
+    }
+    // VK_INCOMPLETE means more appeared between the two calls; `count` is what was written, so
+    // the honest response is to keep those -- `EnumerateInto`'s own reasoning.
+    ShrinkTo(extensions, count);
+    return ContainsExtension(extensions, VK_KHR_SWAPCHAIN_EXTENSION_NAME);
 }
 
 /// Creates the `VkDevice`, one graphics queue, the timeline semaphore and the per-frame command
@@ -536,16 +722,34 @@ namespace {
     features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     features.pNext = &features12;
 
+    // **One device extension, and it is the only one that is not core.** Dynamic rendering,
+    // synchronization2, timeline semaphores and copy_commands2 are every one of them promoted
+    // to Vulkan 1.3, which is Monarc's floor, so none of those is asked for. `VK_KHR_swapchain`
+    // never was and never will be: presentation is a window-system capability rather than a
+    // core one.
+    //
+    // **Asked for only where the device offers it, which is what makes it optional rather than
+    // a new requirement.** Enabling an extension a device does not have fails
+    // `vkCreateDevice` outright with `VK_ERROR_EXTENSION_NOT_PRESENT`, so an unconditional
+    // request would make every device Monarc creates a presenting device -- and a compute-only
+    // or headless part would stop being usable for the offscreen rendering it is perfectly
+    // capable of. `VulkanDeviceState::swapchainEnabled` says why the answer is recorded here
+    // rather than promoted to a capability tier.
+    //
+    // Both local adapters offer it, measured -- so the false branch is not exercised on this
+    // machine and is stated as reasoning rather than as a run.
+    state.swapchainEnabled = DeviceOffersSwapchain(loader, state.allocator, state.physicalDevice);
+    const char* const swapchainExtension = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+
     VkDeviceCreateInfo deviceInfo{};
     deviceInfo.sType                = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     deviceInfo.pNext                = &features;
     deviceInfo.queueCreateInfoCount = 1;
     deviceInfo.pQueueCreateInfos    = &queueInfo;
-    // **No device extension, at all.** Dynamic rendering, synchronization2, timeline
-    // semaphores and copy_commands2 are every one of them promoted to Vulkan 1.3 core, which is
-    // Monarc's floor -- so the extension list is empty rather than short. `pEnabledFeatures`
-    // stays null because VkPhysicalDeviceFeatures2 is chained instead; Vulkan forbids both.
-    deviceInfo.enabledExtensionCount = 0;
+    // `pEnabledFeatures` stays null because VkPhysicalDeviceFeatures2 is chained instead;
+    // Vulkan forbids both.
+    deviceInfo.enabledExtensionCount   = state.swapchainEnabled ? 1U : 0U;
+    deviceInfo.ppEnabledExtensionNames = state.swapchainEnabled ? &swapchainExtension : nullptr;
 
     if (const VkResult result = loader.Instance().vkCreateDevice(
             state.physicalDevice, &deviceInfo, nullptr, &state.device);
@@ -568,6 +772,19 @@ namespace {
         // leak line disappears from the log and vkDestroyDevice runs.
         state.functions.vkDestroyDevice = loader.ResolveDeviceDestroyer(state.device);
         return loaded;
+    }
+
+    if (state.swapchainEnabled && !Loader::HasSwapchainFunctions(state.functions)) {
+        // The extension was enabled and its entry points did not all resolve. That is a broken
+        // implementation rather than a missing capability -- `InstallMessenger`'s reasoning for
+        // the debug-utils pair, one file over -- and the response is the same: log it loudly
+        // and carry on with the capability marked absent, so a swapchain is refused by name
+        // instead of dispatched through a null pointer.
+        MONARC_LOG(LogCategories::VulkanDevice, Error,
+                   "\"{}\" enabled {} and did not export all five of its entry points; this "
+                   "device cannot present",
+                   state.adapter.name, VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+        state.swapchainEnabled = false;
     }
 
     state.functions.vkGetDeviceQueue(state.device, state.graphicsQueueFamily, 0,
@@ -691,9 +908,10 @@ Result<VulkanDevice> VulkanDeviceFactory::Create(IAllocator& allocator, const Lo
 
     MONARC_LOG(LogCategories::VulkanDevice, Info,
                "Vulkan device created on \"{}\" | tier {} | graphics queue family {} | {} "
-               "frame(s) in flight | pools: {} texture(s), {} buffer(s)",
+               "frame(s) in flight | pools: {} texture(s), {} buffer(s) | {} {}",
                adapter.name, ToString(adapter.tier), queueFamily, kFramesInFlight,
-               config.maxTextures, config.maxBuffers);
+               config.maxTextures, config.maxBuffers, VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+               state->swapchainEnabled ? "enabled" : "unavailable");
     return VulkanDevice(state);
 }
 

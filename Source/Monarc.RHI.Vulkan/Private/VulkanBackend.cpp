@@ -41,7 +41,10 @@
 #include <Loader.h>
 #include <Translate.h>
 #include <VulkanDeviceFactory.h>
+#include <VulkanDeviceState.h>
 #include <VulkanPlatform.h>
+#include <VulkanSurface.h>
+#include <VulkanSwapchainFactory.h>
 
 #include <cstdlib>
 #include <cstring>
@@ -917,6 +920,74 @@ Result<VulkanDevice> VulkanBackend::CreateDevice(IAllocator& allocator,
 
     return Detail::VulkanDeviceFactory::Create(allocator, m_state->loader, physicalDevice,
                                                described, config);
+}
+
+Result<bool> VulkanBackend::AdapterCanPresent(const AdapterInfo&        adapter,
+                                              const SurfaceDescription& surface) {
+    if (!IsInitialized()) {
+        return Err(ErrorCode::InvalidArgument,
+                   "VulkanBackend::AdapterCanPresent called on a backend that has been shut "
+                   "down or moved from");
+    }
+    if (surface.IsEmpty()) {
+        return Err(ErrorCode::InvalidArgument,
+                   "VulkanBackend::AdapterCanPresent was given no native window handle");
+    }
+
+    VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+    if (Status found = m_state->FindPhysicalDevice(adapter.uuid, physicalDevice); !found) {
+        return std::unexpected(found.error());
+    }
+
+    // The family device creation would pick, from the one function that decides that -- see
+    // `Detail::FindGraphicsQueueFamily`, which is declared in a private header rather than kept
+    // local precisely so that these two answers cannot drift apart.
+    const u32 queueFamily =
+        Detail::FindGraphicsQueueFamily(m_state->loader, m_state->allocator, physicalDevice);
+    if (queueFamily == Detail::kNoQueueFamily) {
+        MONARC_LOG(Vulkan, Warning,
+                   "\"{}\" reports no queue family that can do graphics, so presentation "
+                   "support cannot be asked about",
+                   adapter.name);
+        return Err(ErrorCode::Unsupported,
+                   "this adapter reports no queue family that can do graphics");
+    }
+
+    VkSurfaceKHR probe = VK_NULL_HANDLE;
+    if (Status created = Detail::CreatePlatformSurface(m_state->loader.GetInstanceProcAddr(),
+                                                       m_state->instance, surface, probe);
+        !created) {
+        return std::unexpected(created.error());
+    }
+
+    VkBool32       supported = VK_FALSE;
+    const VkResult result    = m_state->loader.Instance().vkGetPhysicalDeviceSurfaceSupportKHR(
+        physicalDevice, queueFamily, probe, &supported);
+
+    // Destroyed before the result is examined, so there is one release path rather than two.
+    // Legal in either case: this surface never had a swapchain, which is the only thing
+    // `vkDestroySurfaceKHR` forbids outstanding.
+    m_state->loader.Instance().vkDestroySurfaceKHR(m_state->instance, probe, nullptr);
+
+    if (result != VK_SUCCESS) {
+        return m_state->FailVk("vkGetPhysicalDeviceSurfaceSupportKHR", result);
+    }
+
+    MONARC_LOG(Vulkan, Info,
+               "\"{}\" {} present to this surface on graphics queue family {}", adapter.name,
+               supported == VK_TRUE ? "can" : "cannot", queueFamily);
+    return supported == VK_TRUE;
+}
+
+Result<VulkanSwapchain> VulkanBackend::CreateSwapchain(
+    IAllocator& allocator, VulkanDevice& device, const SwapchainDescription& description) {
+    if (!IsInitialized()) {
+        return Err(ErrorCode::InvalidArgument,
+                   "VulkanBackend::CreateSwapchain called on a backend that has been shut down "
+                   "or moved from");
+    }
+    return Detail::VulkanSwapchainFactory::Create(allocator, m_state->loader, m_state->instance,
+                                                  device, description);
 }
 
 }  // namespace Monarc::RHI

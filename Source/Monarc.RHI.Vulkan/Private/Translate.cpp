@@ -1,5 +1,7 @@
 #include <Translate.h>
 
+#include <Monarc/Core/Math/Scalar.h>
+
 #include <string_view>
 
 namespace Monarc::RHI::Detail {
@@ -301,6 +303,7 @@ VkImageLayout ToVulkan(TextureLayout layout) {
         case TextureLayout::ShaderReadOnly:  return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         case TextureLayout::TransferSource:  return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         case TextureLayout::TransferDestination: return VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        case TextureLayout::PresentSource:   return VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     }
     // Not VK_IMAGE_LAYOUT_UNDEFINED. See Translate.h: UNDEFINED is a legal `oldLayout` that
     // discards the texture's contents, so it would turn an invalid value into silent data
@@ -320,6 +323,7 @@ TextureLayout FromVulkan(VkImageLayout layout) {
         case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL: return TextureLayout::ShaderReadOnly;
         case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL: return TextureLayout::TransferSource;
         case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL: return TextureLayout::TransferDestination;
+        case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR: return TextureLayout::PresentSource;
         default:                        return TextureLayout::Undefined;
     }
 }
@@ -454,6 +458,35 @@ VkMemoryPropertyFlags ToVulkan(MemoryLocation location) {
     // the device reports, which for a HostVisible request could be device-local memory the CPU
     // cannot address -- a mapping failure much further from its cause.
     return VK_MEMORY_PROPERTY_FLAG_BITS_MAX_ENUM;
+}
+
+u32 ChooseSwapchainImageCount(u32 minImageCount, u32 maxImageCount) {
+    const u32 wanted = minImageCount + 1;
+    // Zero means "no limit", so the clamp is guarded rather than unconditional -- a
+    // std::min against zero would ask for no images at all, which vkCreateSwapchainKHR
+    // rejects as VUID-VkSwapchainCreateInfoKHR-minImageCount-01271.
+    if (maxImageCount != 0 && wanted > maxImageCount) {
+        return maxImageCount;
+    }
+    return wanted;
+}
+
+Extent2D ChooseSwapchainExtent(const VkSurfaceCapabilitiesKHR& capabilities,
+                               Extent2D                        requested) {
+    // The sentinel is both dimensions at 0xFFFFFFFF, and the spec pairs them: a surface either
+    // has a current extent or it does not. Testing one of the two would leave a surface
+    // reporting a real width and the sentinel height taking the wrong branch, so both are
+    // tested and a mixed pair falls through to the surface's own numbers.
+    constexpr u32 kNoPreference = 0xFFFFFFFFU;
+    if (capabilities.currentExtent.width == kNoPreference &&
+        capabilities.currentExtent.height == kNoPreference) {
+        const u32 width  = Math::Clamp(requested.width, capabilities.minImageExtent.width,
+                                       capabilities.maxImageExtent.width);
+        const u32 height = Math::Clamp(requested.height, capabilities.minImageExtent.height,
+                                       capabilities.maxImageExtent.height);
+        return Extent2D{width, height};
+    }
+    return Extent2D{capabilities.currentExtent.width, capabilities.currentExtent.height};
 }
 
 u32 FindMemoryType(const VkPhysicalDeviceMemoryProperties& properties, u32 allowedTypeBits,
