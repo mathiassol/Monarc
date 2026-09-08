@@ -185,13 +185,38 @@ struct WindowTestHooks {
     /// itself would exercise neither. It is what proves close is a request.
     static void RequestClose(Window& window);
 
+    /// How far `BringToForeground` got.
+    enum class Foreground : u8 {
+        /// The window is not on top, so a screen capture of its client rect cannot be trusted.
+        /// Either it is not open, or the z-order change itself failed.
+        NotOnTop,
+
+        /// Topmost, but not activated: `SetForegroundWindow` was refused, which it may be --
+        /// Windows locks the foreground against processes that have not had recent user input,
+        /// and a console process is not always allowed to take it. Topmost is what a screen
+        /// capture actually needs, so this is a usable outcome and not a failure.
+        TopmostOnly,
+
+        /// Topmost and activated.
+        Activated,
+    };
+
     /// Brings the window to the front and makes it topmost, so a screen capture of its client
-    /// rect reads its pixels rather than whatever was over it. Returns false when the platform
-    /// refused, which it may: a console process is not always allowed to take the foreground.
-    [[nodiscard]] static bool BringToForeground(Window& window);
+    /// rect reads its pixels rather than whatever was over it.
+    ///
+    /// **Three outcomes rather than a bool, because the two that are not failures are worth
+    /// telling apart -- and the bool's declared contract was inverted.** It read "Returns
+    /// false when the platform refused, which it may: a console process is not always allowed
+    /// to take the foreground", and that is precisely the case that returned **true**:
+    /// `SetForegroundWindow` being refused leaves the window topmost, which is what the
+    /// capture needs. `false` meant a `SetWindowPos` failure, which is a different fact
+    /// entirely. The screen-capture case logged the value as `fronted {}`, so the one hook
+    /// whose whole purpose is diagnosing a bad capture printed `true` for a window that was
+    /// never activated.
+    [[nodiscard]] static Foreground BringToForeground(Window& window);
 
     /// Reads one pixel from the **screen**, at `x, y` within `window`'s client area, into
-    /// `out` as blue, green, red, alpha.
+    /// `out` as blue, green, red, and one byte with no defined value.
     ///
     /// **From the screen's device context and not the window's, which is the trap worth
     /// naming.** `PrintWindow` and a `BitBlt` from the window's own DC return black for a
@@ -199,10 +224,18 @@ struct WindowTestHooks {
     /// surface, because the desktop compositor puts them on screen directly. Capturing from
     /// the screen DC reads the composited result, which is the thing a person would see.
     ///
-    /// The bytes are blue, green, red, alpha because that is what a 32-bit `BI_RGB` DIB holds
-    /// -- `0x00RRGGBB` little-endian -- which is the same order a `B8G8R8A8_UNORM` swapchain
-    /// image reads back in. That is a coincidence of two conventions agreeing, not one fact,
-    /// and both assertions state their order.
+    /// The first three bytes are blue, green, red because that is what a 32-bit `BI_RGB` DIB
+    /// holds -- `0x00RRGGBB` little-endian -- which is the same order a `B8G8R8A8_UNORM`
+    /// swapchain image reads back in. That is a coincidence of two conventions agreeing, not
+    /// one fact, and both assertions state their order.
+    ///
+    /// **`out[3]` is GDI's padding and not an alpha channel**, which the `0x00RRGGBB` above is
+    /// itself the proof of: little-endian, that fourth byte is the `0x00`. This said "blue,
+    /// green, red, alpha because that is what a 32-bit `BI_RGB` DIB holds -- `0x00RRGGBB`
+    /// little-endian" until a review pointed out that the two halves of that sentence
+    /// contradict each other. The screen-capture case has it right and deliberately does not
+    /// assert the byte; it has read 255 on every run of that case that was Monarc's to read,
+    /// and that is a reading rather than a guarantee.
     ///
     /// Fails with `ErrorCode::InvalidArgument` for a window that is not open or a point
     /// outside its client area, and `ErrorCode::IoFailure` when the platform's capture failed.

@@ -444,6 +444,28 @@ Result<Window> WindowPlatform::Create(const WindowDescription& description) {
     ToWideTitle(description.title, title);
 
     Window window;
+
+    // **Counted before the call and not after it, because `WM_NCCREATE` installs the
+    // back-pointer from inside `CreateWindowExW`** -- so every message from that moment on
+    // reaches `WindowPlatform`'s handlers, `WM_DESTROY` included. A creation Windows abandons
+    // after `WM_CREATE` delivers one for a window that had not been counted yet, and
+    // `OnDestroyed`'s `MONARC_CHECK(g_liveWindows > 0)` then aborts a Debug build on a failure
+    // the caller is entitled to receive as an `Err`.
+    //
+    // **Measured, and the two abort points differ.** With the count taken after the call, a
+    // `WM_CREATE` answered `-1` gives
+    // `[assert] (g_liveWindows > 0) a window was destroyed that was never counted as live`
+    // and the suite stops. A `WM_NCCREATE` answered `FALSE` does **not**: Windows sends
+    // `WM_NCDESTROY` without a `WM_DESTROY`, so `OnDestroyed` never runs and the count reads 0
+    // before and after -- probed, one line per attempted window. So the reachable half is the
+    // `WM_CREATE` one, and nothing in this file handles `WM_CREATE`: the abort would have to be
+    // Windows' own.
+    //
+    // Restored rather than decremented on the failure path below, which is what makes it right
+    // for both: whether or not the handler ran, the count ends where it started.
+    const u32 liveBefore = g_liveWindows;
+    ++g_liveWindows;
+
     const HWND handle = CreateWindowExW(
         0, kClassName, title, kWindowStyle, CW_USEDEFAULT, CW_USEDEFAULT,
         rect.right - rect.left, rect.bottom - rect.top, nullptr, nullptr,
@@ -451,14 +473,16 @@ Result<Window> WindowPlatform::Create(const WindowDescription& description) {
     if (handle == nullptr) {
         const DWORD error = GetLastError();
         MONARC_LOG(LogCategories::Window, Error, "CreateWindowExW failed with Win32 error {}", error);
+        // Restored rather than decremented, which is what makes it right whether or not a
+        // `WM_DESTROY` arrived: the handler's decrement and this assignment cannot double up.
+        g_liveWindows = liveBefore;
         // The class was registered above for a window that does not exist, so it is released
-        // again here -- `g_liveWindows` is still whatever it was, so this unregisters only if
-        // there were no windows before this attempt.
+        // again here -- the count is back to whatever it was, so this unregisters only if there
+        // were no windows before this attempt.
         ReleaseClassIfUnused();
         return Err(ErrorCode::IoFailure, "the platform refused to create the window");
     }
 
-    ++g_liveWindows;
     window.m_nativeHandle = handle;
 
     ShowWindow(handle, SW_SHOW);
@@ -509,7 +533,17 @@ void WindowPlatform::Destroy(Window& window) {
         // Clearing the handle is not optional either: holding one that is not usable would
         // mean a destructor retrying the same failing call, which is the shape of loop a
         // teardown path must not have.
-        OnDestroyed(window);
+        //
+        // **Guarded on the handle, because `DestroyWindow` can fail *after* delivering
+        // `WM_DESTROY`** -- it is documented to return zero on failure and says nothing about
+        // how far it got. `OnDestroyed` is what clears the handle, so a non-null one here is
+        // exactly "the handler has not run". Without the guard the class reference count is
+        // decremented twice for one window; `MONARC_CHECK(g_liveWindows > 0)` catches that only
+        // when the count was 1, so with a second window alive it would silently drift down and
+        // release the class while a window of it still existed.
+        if (HandleOf(window) != nullptr) {
+            OnDestroyed(window);
+        }
     }
 
     // After the window is gone, which is the only point `UnregisterClassW` accepts.
@@ -696,10 +730,10 @@ void WindowTestHooks::RequestClose(Window& window) {
     }
 }
 
-bool WindowTestHooks::BringToForeground(Window& window) {
+WindowTestHooks::Foreground WindowTestHooks::BringToForeground(Window& window) {
     const HWND handle = HandleOf(window);
     if (handle == nullptr) {
-        return false;
+        return Foreground::NotOnTop;
     }
 
     // TOPMOST first, then the foreground request. The order matters: `SetForegroundWindow` can
@@ -710,17 +744,19 @@ bool WindowTestHooks::BringToForeground(Window& window) {
                      SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW) == 0) {
         MONARC_LOG(LogCategories::Window, Warning, "SetWindowPos (topmost) failed with Win32 error {}",
                    GetLastError());
-        return false;
+        return Foreground::NotOnTop;
     }
     if (SetForegroundWindow(handle) == 0) {
         MONARC_LOG(LogCategories::Window, Warning,
                    "SetForegroundWindow was refused; the window is topmost but not activated");
         // Topmost is what a screen capture actually needs, so this is reported and not fatal:
-        // the caller decides whether to trust the capture, and the test says which happened.
-        return true;
+        // the caller decides whether to trust the capture, and the outcome says which happened.
+        // **Reported as its own outcome and not as the same answer success gives**, which is
+        // what a bool made it -- see the declaration.
+        return Foreground::TopmostOnly;
     }
     BringWindowToTop(handle);
-    return true;
+    return Foreground::Activated;
 }
 
 Status WindowTestHooks::CaptureScreenPixel(const Window& window, i32 x, i32 y, u8 (&out)[4]) {
@@ -835,15 +871,40 @@ WindowTestHooks::PointOwner WindowTestHooks::WindowAtClientPoint(const Window& w
     }
     owner.isOurs = at == handle;
 
-    wchar_t wide[64] = {};
-    if (GetClassNameW(at, wide, static_cast<int>(std::size(wide))) > 0) {
+    wchar_t   wide[64]  = {};
+    const int wideChars = GetClassNameW(at, wide, static_cast<int>(std::size(wide)));
+    if (wideChars > 0) {
         // Truncating rather than refusing, and always null-terminating: this is a log line, and
         // a truncated class name still identifies the tenant where an empty one does not.
-        const int written =
-            WideCharToMultiByte(CP_UTF8, 0, wide, -1, owner.className,
-                                static_cast<int>(std::size(owner.className)) - 1, nullptr,
-                                nullptr);
-        owner.className[written >= 0 ? written : 0] = '\0';
+        //
+        // **The loop is what makes that true, and the one-call form did not.** With `-1` as the
+        // source length `WideCharToMultiByte` requires the whole string *and* its terminator to
+        // fit: it returns 0 and sets `ERROR_INSUFFICIENT_BUFFER` rather than writing what it
+        // can, so a class name whose UTF-8 form exceeded 62 bytes produced exactly the empty
+        // string this comment says it avoids. Reachable for a non-ASCII class name, since
+        // `GetClassNameW` hands back up to 63 UTF-16 code units and one can become four UTF-8
+        // bytes. `ToWideTitle` above gets the same problem right with an explicit two-call
+        // fallback; this needs a loop rather than a second call because the byte length is not
+        // a function of the character count.
+        //
+        // Dropping one UTF-16 code unit per attempt cannot cut a UTF-8 sequence in half. It can
+        // leave a lone surrogate at the end, which converts to the replacement character rather
+        // than failing -- `WC_ERR_INVALID_CHARS` is deliberately not asked for, because a
+        // question mark in a log line is better than no line.
+        constexpr int kCapacity = static_cast<int>(std::size(owner.className)) - 1;
+        int           attempt   = wideChars;
+        int           written   = 0;
+        while (attempt > 0) {
+            written = WideCharToMultiByte(CP_UTF8, 0, wide, attempt, owner.className, kCapacity,
+                                          nullptr, nullptr);
+            if (written > 0) {
+                break;
+            }
+            --attempt;
+        }
+        // Terminated here rather than by the call, which is why `attempt` is a character count
+        // and not `-1`: the explicit-length form does not write a terminator.
+        owner.className[written > 0 ? written : 0] = '\0';
     }
     return owner;
 }

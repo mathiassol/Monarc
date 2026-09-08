@@ -324,6 +324,23 @@ struct FrameResult {
            Monarc::RHI::BytesPerPixel(kSwapchainFormat);
 }
 
+/// `WindowTestHooks::Foreground` as a phrase, for the capture case's log line.
+///
+/// A `default`-less switch, so a fourth outcome is a compile error here rather than an
+/// "unknown" in the one diagnostic that exists to explain a bad capture. The log line used to
+/// read `fronted true` for a window `SetForegroundWindow` had refused -- see
+/// `WindowTestHooks::BringToForeground`.
+[[nodiscard]] const char* ForegroundText(WindowTestHooks::Foreground outcome) {
+    switch (outcome) {
+        case WindowTestHooks::Foreground::NotOnTop:    return "the window is not on top";
+        case WindowTestHooks::Foreground::TopmostOnly: return "topmost but not activated";
+        case WindowTestHooks::Foreground::Activated:   return "topmost and activated";
+    }
+    // `Foreground` has a fixed underlying type, so a value outside the set is representable
+    // even with every case covered -- and MSVC asks what it returns.
+    return "an outcome no enumerator names";
+}
+
 /// Reports a pixel, naming what its fourth byte actually is.
 ///
 /// **`fourthByte` is a parameter because the two callers disagree about it, and one shared
@@ -688,15 +705,17 @@ TEST_CASE("THE SCREEN CAPTURE: the window's own pixels are the clear colour") {
     for (const Candidate& candidate : candidates) {
         WindowTestHooks::MoveTo(*harness.window, candidate.x, candidate.y);
         Settle(*harness.window);
-        const bool foregrounded = WindowTestHooks::BringToForeground(*harness.window);
+        const WindowTestHooks::Foreground fronted =
+            WindowTestHooks::BringToForeground(*harness.window);
         Settle(*harness.window);
 
         const WindowTestHooks::PointOwner owner =
             WindowTestHooks::WindowAtClientPoint(*harness.window, centreX, centreY);
         MONARC_LOG(SwapchainTest, Info,
-                   "at ({}, {}): fronted {}, and the top window at the capture point is \"{}\" "
+                   "at ({}, {}): {}, and the top window at the capture point is \"{}\" "
                    "(Monarc's: {})",
-                   candidate.x, candidate.y, foregrounded, owner.className, owner.isOurs);
+                   candidate.x, candidate.y, ForegroundText(fronted), owner.className,
+                   owner.isOurs);
         if (owner.isOurs) {
             onTop = true;
             break;
@@ -1458,6 +1477,17 @@ TEST_CASE("a swapchain is refused what it cannot honour") {
                        "this surface offers R8G8B8A8_UNORM, so the format-refusal half of this "
                        "case is unexercised on this machine; what is asserted instead is that "
                        "the format asked for is the format that came back");
+            // **What this assertion reaches, exactly.** `ImageFormat()` reads
+            // `VulkanSwapchainState::format`, which `VulkanSwapchainFactory::Create` assigns
+            // straight from `description.format` and never re-reads from the surface. So it
+            // catches a substitution that writes the field back -- which is the mutation
+            // Docs/Status.md records, `BringUp` substituting `B8G8R8A8_UNORM`, and this is the
+            // only assertion in the suite that caught it -- and **not** one that changes
+            // `swapchainInfo.imageFormat` and leaves the field alone. The assertion that would
+            // reach that is a readback, whose bytes differ between the two formats; this case
+            // asks for no readback, and the readback case asks for only
+            // `B8G8R8A8_UNORM`. Stated rather than implied, because "the format asked for is
+            // the format that came back" is a stronger sentence than the code supports.
             CHECK(attempted->ImageFormat() == Monarc::RHI::Format::R8G8B8A8_UNORM);
             // Before the base attempt below, so two swapchains never name this window at once.
             // `~VulkanSwapchain` would do it, and the explicit call is what makes the ordering
