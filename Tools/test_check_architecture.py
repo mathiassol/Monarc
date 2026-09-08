@@ -495,6 +495,19 @@ class TestPlatformContainment(FixtureTest):
         self._host("Private/Platform/Windows/Window.cpp", WIN32_IFDEF)
         self.assertGatePasses(self._host_gate())
 
+    def test_a_test_support_directory_inside_a_per_platform_one_is_still_exempt(self):
+        # **The nesting is load-bearing, so it is pinned.** A3 Task 5 put
+        # Monarc.Host.Windowed's WindowTestHooks in
+        # Private/Platform/Windows/TestSupport/WindowTestHooks.cpp -- test-only Win32, kept out
+        # of the shipped library -- and one of the two reasons it went *inside* the per-platform
+        # directory rather than beside Private/ is that the exemption is the path
+        # `Private/Platform/<Platform>/`, so a conditional there is judged by the same rule as
+        # one in the shipping half. A regex tightened to match only files directly in the
+        # per-platform directory would take that file out of gate 10's reach without failing
+        # anything; this case is what fails instead.
+        self._host("Private/Platform/Windows/TestSupport/WindowTestHooks.cpp", WIN32_IFDEF)
+        self.assertGatePasses(self._host_gate())
+
 
 class TestLogicalLines(unittest.TestCase):
     def test_plain_lines_keep_their_numbers(self):

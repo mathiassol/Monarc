@@ -1,5 +1,9 @@
 include_guard(GLOBAL)
 include(MonarcTargetOptions)
+# For monarc_platform_directory() and MONARC_TEST_SUPPORT_DIR, which the TestSupport/ glob
+# below needs. Included explicitly rather than relying on the top-level CMakeLists including
+# MonarcModule first -- both files carry include_guard(GLOBAL), so this costs nothing.
+include(MonarcModule)
 
 # **Every CTest entry gets a TIMEOUT, because a hang is a failure mode this tree has already
 # produced and nothing was bounding it.** Disabling `WindowPlatform::Pump`'s null-handle guard
@@ -56,8 +60,20 @@ function(_monarc_add_test_binary module source_dir target_suffix out_target)
         return()
     endif()
 
+    # The module's TestSupport/ trees, compiled into this binary rather than into the module.
+    # MONARC_TEST_SUPPORT_DIR in MonarcModule.cmake holds the convention and the measurement
+    # that motivated it; monarc_module() drops exactly these files.
+    #
+    # Both trees are globbed for every test binary of the module, so a helper two suites need
+    # is written once. The per-platform one is named directly rather than filtered afterwards,
+    # which is what keeps a Windows-only file from ever reaching a macOS compiler.
+    monarc_platform_directory(_monarc_platform)
+    file(GLOB_RECURSE _support_sources CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/Private/${MONARC_TEST_SUPPORT_DIR}/*.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Private/Platform/${_monarc_platform}/${MONARC_TEST_SUPPORT_DIR}/*.cpp")
+
     set(_target "${module}.${target_suffix}")
-    add_executable(${_target} ${_test_sources})
+    add_executable(${_target} ${_test_sources} ${_support_sources})
     target_link_libraries(${_target} PRIVATE ${module} doctest::doctest)
 
     # A module's own tests may include its private headers. target_link_libraries above

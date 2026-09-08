@@ -105,6 +105,18 @@ struct WindowPlatform {
     /// (CMake/MonarcTest.cmake) where nothing outside the module does. `LoaderTables.h` in
     /// Monarc.RHI.Vulkan is the precedent.
     [[nodiscard]] static bool IsClassRegistered();
+
+    /// The window style Monarc's windows are created with, as a plain `u32`.
+    ///
+    /// **Here so that there is exactly one definition of it, and it is here rather than in this
+    /// header as a constant because a `DWORD` is a platform type and this header names none.**
+    /// `WindowTestHooks::RequestClientSize` has to compute an outer size from a client size,
+    /// which means passing the same style `Create` used to `AdjustWindowRectExForDpi`; that
+    /// hook now lives in a different translation unit, and a second `constexpr DWORD` beside it
+    /// would compute the wrong outer size the day the style changed. The value stays a
+    /// `constexpr` local to `Private/Platform/Windows/Window.cpp`, which `Create` reads
+    /// directly; this returns it.
+    [[nodiscard]] static u32 WindowStyle();
 };
 
 /// Drives a window from code, and reads back what is actually on the screen.
@@ -116,46 +128,42 @@ struct WindowPlatform {
 /// regression test, and "I ran it and it looked right" is not the standard the rest of this
 /// branch holds.
 ///
-/// **They live here, beside the shipping platform functions, rather than in the test
-/// directories -- and that buys something specific: no test file in this repository includes
-/// `<Windows.h>`.** `SetWindowPos`, `ShowWindow` and a screen `BitBlt` all need it, and
-/// putting them in a test would put Win32 in two places in this module and outside the
-/// per-platform directory ADR-0016 confines it to. Two test binaries need them (the
-/// device-free window tests and the device-required swapchain tests), so a header in
-/// `Private/` is also the only place both can reach -- `LoaderTables.h`'s argument, one module
-/// over.
+/// **Declared here, defined in `Private/Platform/Windows/TestSupport/WindowTestHooks.cpp` --
+/// a translation unit the module does not compile and each of its test binaries does.** Two
+/// test binaries need these (the device-free window tests and the device-required swapchain
+/// tests), so a header in `Private/` is the only place both can reach -- `LoaderTables.h`'s
+/// argument, one module over -- while the *definitions* have no business in the shipped
+/// library.
 ///
 /// A separate struct from `WindowPlatform` above so the distinction is greppable: everything
-/// in that one has a shipped caller and nothing in this one does.
+/// in that one has a shipped caller and nothing in this one does. `WindowPlatform::NativeHandle`
+/// is the whole of the access the definitions need, so nothing in this struct is a friend of
+/// `Window`.
 ///
-/// **"No shipped caller" is not the same as "not in the shipped binary", and a review made the
-/// difference measurable.** These are compiled into `Monarc.Host.Windowed`, so the linker pulls
-/// them into every app that links the module: `dumpbin /imports` on the Release
-/// `Monarc.FirstLight.exe` lists `GDI32.dll` -- `BitBlt` and `CreateCompatibleDC`, from
-/// `CaptureScreenPixel` -- plus `WindowFromPoint`, `GetClassNameW`, `MonitorFromWindow`,
-/// `GetMonitorInfoW`, `BringWindowToTop`, `SetForegroundWindow` and
-/// `AdjustWindowRectExForDpi`, none of which any shipped path calls. An extra system DLL in a
-/// first-light program's import table is a real cost and it is written down rather than argued
-/// away.
+/// **"No shipped caller" was not the same as "not in the shipped binary", and a review made
+/// the difference measurable.** Until A3 Task 5 these were compiled into
+/// `Monarc.Host.Windowed`, so the linker pulled them into every app that linked the module:
+/// `dumpbin /imports` on the Release `Monarc.FirstLight.exe` listed `GDI32.dll` -- an entire
+/// extra system DLL, for `CaptureScreenPixel`'s `BitBlt` through a DIB -- plus twelve USER32
+/// imports no shipped path calls. `Docs/Status.md` holds the before and after tables.
 ///
-/// **What it does not justify is moving these into the test files.** Four of them are not
-/// wrappers a test could write for itself: `RequestClientSize` needs this file's own
-/// `kWindowStyle`, and a test that hard-coded it would compute the wrong outer size the day the
-/// style changed; `CaptureScreenPixel` is a screen `BitBlt` through a DIB; and
-/// `WindowAtClientPoint` and `Monitors` are multi-call Win32 queries. Those four are exactly
-/// the ones that pull `GDI32` and most of the unused imports in, so moving only the
-/// `SetWindowPos`/`ShowWindow` wrappers would put `<Windows.h>` in two test files -- both
-/// suites need these -- and leave the measured cost almost untouched.
-///
-/// The fix that does remove it is a test-only translation unit under
-/// `Private/Platform/<Platform>/` that the module does not compile and the test targets do.
-/// That needs a convention in `CMake/MonarcModule.cmake` rather than a code change, so it is a
-/// Task 5 checkbox in Docs/Plans/2026-09-06-phase-a3-rhi-and-first-light.md and not something
-/// smuggled in here.
+/// **Moving them into the test files was considered and rejected.** Four are not wrappers a
+/// test could write for itself: `RequestClientSize` needs `Create`'s own window style, and a
+/// test that hard-coded it would compute the wrong outer size the day the style changed;
+/// `CaptureScreenPixel` is a screen `BitBlt` through a DIB; and `WindowAtClientPoint` and
+/// `Monitors` are multi-call Win32 queries. Those four are exactly the ones that pull `GDI32`
+/// and most of the unused imports in, so moving only the `SetWindowPos`/`ShowWindow` wrappers
+/// would have put `<Windows.h>` in two test files, put platform code where gate 10 does not
+/// read it, and left the measured cost almost untouched. Nesting a `TestSupport/` directory
+/// *inside* the per-platform one keeps both properties instead: the build still selects the
+/// file by directory, and gate 10 still governs it.
 struct WindowTestHooks {
     /// Asks the platform for a client area of `size`. The window may become another size, and
     /// `Window::ClientSize()` after a pump is what it actually became -- which is the fact the
     /// resize test exists to assert.
+    ///
+    /// Computes the outer size from `size` with `WindowPlatform::WindowStyle()`, which is why
+    /// that function exists: the style has one definition and both halves read it.
     static void RequestClientSize(Window& window, RHI::Extent2D size);
 
     /// Moves the window's top-left corner to `x, y` in virtual-screen coordinates, keeping its

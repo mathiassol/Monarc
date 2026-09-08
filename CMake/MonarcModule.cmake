@@ -15,6 +15,50 @@ define_property(GLOBAL PROPERTY MONARC_ALL_MODULES
 define_property(GLOBAL PROPERTY MONARC_ALL_TEST_TARGETS
     BRIEF_DOCS "Names of every test executable built by CMake/MonarcTest.cmake")
 
+# The name of this platform's directory under Private/Platform/.
+#
+# ADR-0016: platform code lives in per-platform directories and is selected by the build, so
+# that a file which cannot compile on this platform is never handed to the compiler. A function
+# rather than a variable because MonarcTest.cmake needs the same answer for a module's
+# TestSupport/ tree, and two copies of this `if` chain would be two things to keep true.
+function(monarc_platform_directory out_var)
+    if(WIN32)
+        set(${out_var} "Windows" PARENT_SCOPE)
+    elseif(APPLE)
+        set(${out_var} "Mac" PARENT_SCOPE)
+    elseif(UNIX)
+        set(${out_var} "Linux" PARENT_SCOPE)
+    else()
+        message(FATAL_ERROR "monarc_platform_directory: unrecognised target platform")
+    endif()
+endfunction()
+
+# **`Private/**/TestSupport/` is compiled into a module's test binaries and not into the module.**
+#
+# The convention exists because of a measured cost. `Monarc.Host.Windowed`'s
+# `Detail::WindowTestHooks` -- ten functions, no shipped caller, there so that no test in the
+# repository includes `<Windows.h>` -- were compiled into the module, so the linker pulled them
+# into every app that links it: `dumpbin /imports` on the Release `Monarc.FirstLight.exe` listed
+# `GDI32.dll` plus a dozen USER32 imports no shipped path calls. Moving them into the two test
+# directories that need them was considered and rejected (four are not wrappers a test could
+# write for itself, and it would put Win32 in two test files and outside the per-platform
+# directory ADR-0016 confines it to), so what is needed is a translation unit the module does
+# not glob and its test binaries do.
+#
+# A directory and not a filename suffix, because a directory composes with the rules already in
+# force: nested inside `Private/Platform/<Platform>/` it inherits the platform selection below
+# *and* stays inside gate 10's exemption, so a test-only Win32 file is still selected by
+# directory and still governed by the same conditional rule as the shipping one.
+#
+# Two places, one name:
+#
+#   Private/TestSupport/                     platform-neutral test-only code
+#   Private/Platform/<Platform>/TestSupport/ this platform's test-only code
+#
+# Both are read by every test binary of the owning module and by nothing else -- no other target
+# has this module's Private/ on its include path -- so a header may live there too.
+set(MONARC_TEST_SUPPORT_DIR "TestSupport")
+
 # Declares a static library that participates in the module graph.
 function(monarc_module)
     _monarc_declare(LIBRARY ${ARGN})
@@ -89,18 +133,7 @@ function(_monarc_declare target_type)
         message(FATAL_ERROR "${_fn}(${ARG_NAME}): TIER must be 0-4, got '${ARG_TIER}'")
     endif()
 
-    # ADR-0016: platform code lives in per-platform directories and is selected here, so
-    # that a file which cannot compile on this platform is never handed to the compiler.
-    # Any directory under Private/Platform/ that is not the current platform is excluded.
-    if(WIN32)
-        set(_monarc_platform "Windows")
-    elseif(APPLE)
-        set(_monarc_platform "Mac")
-    elseif(UNIX)
-        set(_monarc_platform "Linux")
-    else()
-        message(FATAL_ERROR "${_fn}(${ARG_NAME}): unrecognised target platform")
-    endif()
+    monarc_platform_directory(_monarc_platform)
     set(MONARC_PLATFORM_DIR "${_monarc_platform}" CACHE INTERNAL "")
 
     # An app has no Include/ to glob: it exports nothing, so there is no public header for
@@ -120,12 +153,22 @@ function(_monarc_declare target_type)
 
     file(GLOB_RECURSE _sources CONFIGURE_DEPENDS ${_globs})
 
-    # Drop sources under any Private/Platform/<other> directory.
+    # Drop sources under any Private/Platform/<other> directory, and under any TestSupport/
+    # directory at all -- the latter is the whole of what makes the convention above real on
+    # this side. See MONARC_TEST_SUPPORT_DIR for why the cost of not doing it was measurable.
     set(_filtered "")
     foreach(_source IN LISTS _sources)
         file(RELATIVE_PATH _rel "${CMAKE_CURRENT_SOURCE_DIR}" "${_source}")
         if(_rel MATCHES "^Private/Platform/([^/]+)/" AND
            NOT CMAKE_MATCH_1 STREQUAL _monarc_platform)
+            continue()
+        endif()
+        # Anchored to Private/, deliberately. A TestSupport/ directory under Include/ is then
+        # just a public directory with an odd name: globbed and governed like any other, which
+        # is the honest outcome. Dropping it from the glob instead would leave a header that no
+        # target ever compiles while gates 3 and 10 go on reading it -- the "simultaneously
+        # governed and dead" trap gate 13 exists to close for an app's Include/.
+        if(_rel MATCHES "^Private/(.*/)?${MONARC_TEST_SUPPORT_DIR}/")
             continue()
         endif()
         list(APPEND _filtered "${_source}")

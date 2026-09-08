@@ -167,6 +167,35 @@ The build emits `module-graph.json` as an artifact. That file is what
 [`monarc explain`](../Product/Build-And-Export.md) reads to answer why something is in an
 export.
 
+## A module's directories
+
+| Directory | Compiled into | Notes |
+|---|---|---|
+| `Include/` | the module | Public headers. Platform-neutral always ([ADR-0016](Decisions/ADR-0016-platform-code-selection.md)). An app has none — rule 9 |
+| `Private/` | the module | Implementation, and headers no consumer sees. A test target of the same module has this on its include path and nothing else does |
+| `Private/Platform/<Platform>/` | the module, on that platform only | The only place a platform conditional is legitimate — rule 7 |
+| `Private/**/TestSupport/` | **the module's test binaries, and nothing else** | Test-only code that is not a test |
+| `Tests/` | `<Module>.Tests` | Must run with no GPU, no driver and no display |
+| `TestsDevice/` | `<Module>.DeviceTests` | Needs a device; reports Skipped where there is none |
+
+**`Private/**/TestSupport/` is the one that needs explaining.** `monarc_module()` does not glob
+it; `_monarc_add_test_binary()` globs it into *every* test binary of the owning module. It is
+for code that is neither a test nor part of the module: helpers that need the module's private
+state or its platform headers, that two suites share, and that must not reach a shipped binary.
+
+Two places, one name — `Private/TestSupport/` for platform-neutral helpers, and
+`Private/Platform/<Platform>/TestSupport/` for one platform's. The nesting is deliberate and
+buys two things: the per-platform tree is still selected by directory, so a Windows-only helper
+is never handed to a macOS compiler, and it is still inside rule 7's exemption, so a platform
+conditional there is judged by exactly the rule that governs the shipping half.
+
+The convention exists because of a measured cost. `Monarc.Host.Windowed`'s
+`Detail::WindowTestHooks` — ten functions with no shipped caller, written so that no test in the
+repository includes `<Windows.h>` — were compiled into the module, so the linker put them in
+every app that linked it. `dumpbin /imports` on the Release `Monarc.FirstLight.exe` listed
+`GDI32.dll` as an entire extra system DLL plus twelve USER32 imports no shipped path called; it
+now lists neither. [Status.md](../Status.md) holds both tables.
+
 ## Enforced rules
 
 These are build failures or test failures, not conventions:
