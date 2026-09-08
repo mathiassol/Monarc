@@ -191,6 +191,78 @@ template <typename... Args>
     return value == sentinel ? Field("none") : Field("{}", value);
 }
 
+/// One pass's place in the rendered pass list: its execution order, with its position in the
+/// array breaking ties.
+///
+/// **Distinct for every pass**, which is what lets the ordering below be a selection over the
+/// caller's own span rather than a sort of a copy of it. `WriteInspectionText` owns no storage
+/// but the caller's buffer and takes no allocator, so there is nowhere to put a permutation.
+struct PassOrderKey {
+    u32   order    = 0;
+    usize position = 0;
+
+    [[nodiscard]] constexpr bool operator<(const PassOrderKey& other) const {
+        return order != other.order ? order < other.order : position < other.position;
+    }
+};
+
+void WritePassLine(TextWriter& writer, const PassInspection& pass) {
+    writer.Line("pass {} order={} queue={} culled={} record={} name=\"{}\"\n", pass.index,
+                DescribeOptional(pass.executionOrder, kNoPass).Get(), ToString(pass.queue),
+                pass.culled ? "yes" : "no", pass.hasRecord ? "yes" : "no", pass.name);
+}
+
+/// One line per pass, **in execution order rather than in the order the array holds them**.
+///
+/// Docs/Rendering/Render-Graph.md asks for a "pass list in execution order", and
+/// `GraphInspection::passes` deliberately is not one: it is declaration order with
+/// `executionOrder` as a field, so that a pass's index into the array is stable and a culled
+/// pass still has a row. **The array keeps that shape; the text does not, because the text is
+/// the diffable artifact and a diff is worth far more read in the order the frame runs.** Once
+/// Task 2 reorders passes, the reordering appears in the report itself rather than having to be
+/// reconstructed from `order=` fields scattered down the list. Today every compiled graph has
+/// `executionOrder == index`, so this changes no existing output -- which is the point of doing
+/// it now rather than noticing it later.
+///
+/// **Culled passes land at the end**, because `kNoPass` is the largest `u32` and sorts there
+/// for free; each is still marked in place by `order=none culled=yes`, so nothing about the
+/// line depends on where it fell. A graph inspected mid-declaration has `kNoPass` for every
+/// pass, which ties, and the tie-break keeps the array's order -- so an uncompiled graph
+/// renders exactly as it did.
+///
+/// A selection, O(n^2) over a pass list bounded by `RenderGraph::Config::maxPasses` and
+/// rendered at most once per frame by a debug view or an artifact dump. Nothing about that is
+/// on a hot path, and the alternative needs the storage this function does not have.
+void WritePassLines(TextWriter& writer, std::span<const PassInspection> passes) {
+    PassOrderKey emitted{};
+    bool         anyEmitted = false;
+
+    for (usize n = 0; n < passes.size(); ++n) {
+        usize        next = passes.size();
+        PassOrderKey nextKey{};
+        for (usize i = 0; i < passes.size(); ++i) {
+            const PassOrderKey key{passes[i].executionOrder, i};
+            if (anyEmitted && !(emitted < key)) {
+                continue;
+            }
+            if (next == passes.size() || key < nextKey) {
+                next    = i;
+                nextKey = key;
+            }
+        }
+        if (next == passes.size()) {
+            // Unreachable, and here for the reason the trailing returns above are: the keys are
+            // distinct and `emitted` only ever advances to the smallest key above itself, so
+            // after n picks exactly `size() - n` keys remain above it. The compiler cannot know
+            // that; no case can reach this.
+            return;
+        }
+        emitted    = nextKey;
+        anyEmitted = true;
+        WritePassLine(writer, passes[next]);
+    }
+}
+
 void WriteResourceLines(TextWriter& writer, usize index, const ResourceInspection& resource) {
     // One line per resource, and a second only for an imported one. The extent, format and
     // usage are on the first line because every resource has them; the import states are on
@@ -262,11 +334,7 @@ InspectionText WriteInspectionText(const GraphInspection& inspection, std::span<
                 inspection.accesses.size(), inspection.barriers.size(),
                 inspection.diagnostics.size(), inspection.diagnosticsDropped);
 
-    for (const PassInspection& pass : inspection.passes) {
-        writer.Line("pass {} order={} queue={} culled={} record={} name=\"{}\"\n", pass.index,
-                    DescribeOptional(pass.executionOrder, kNoPass).Get(), ToString(pass.queue),
-                    pass.culled ? "yes" : "no", pass.hasRecord ? "yes" : "no", pass.name);
-    }
+    WritePassLines(writer, inspection.passes);
 
     for (usize i = 0; i < inspection.resources.size(); ++i) {
         WriteResourceLines(writer, i, inspection.resources[i]);

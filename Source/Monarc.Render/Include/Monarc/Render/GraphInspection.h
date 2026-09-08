@@ -402,7 +402,9 @@ struct GraphInspection {
     /// in this build carries.
     u32 buildGeneration = 0;
 
-    /// Declaration order. `PassInspection::executionOrder` is the other order.
+    /// Declaration order. `PassInspection::executionOrder` is the other order, and
+    /// `WriteInspectionText` is what renders the list in it -- the array stays in declaration
+    /// order so that an index into it is stable and a culled pass still has a row.
     std::span<const PassInspection> passes = {};
 
     std::span<const ResourceInspection> resources = {};
@@ -457,6 +459,13 @@ struct InspectionText {
 /// that varies between runs of the same declaration -- no addresses, no timings, no iteration
 /// order that depends on a hash. Two builds that declared the same thing render identically,
 /// which is what makes a diff meaningful.
+///
+/// **The pass lines come out in execution order, which is not the order `passes` holds them
+/// in.** That array is declaration order on purpose -- see the field -- and the text is the
+/// artifact a human diffs, so it is worth reading in the order the frame runs. Culled passes
+/// sort to the end and stay marked in place. Everything else -- resources, accesses, barriers,
+/// diagnostics -- renders in the order its own array holds, and the leading number on each line
+/// is that array index. `WritePassLines` in Private/GraphInspection.cpp argues it at length.
 ///
 /// Written through `std::format_to_n`, which is ADR-0003's condition on `<format>` in runtime
 /// code, and through `std::formatted_size` for the counting-only call -- see

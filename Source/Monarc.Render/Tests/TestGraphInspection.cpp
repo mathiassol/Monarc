@@ -312,6 +312,101 @@ TEST_CASE("a transient renders no import line") {
           "access 0 pass=0 resource=0:0 access=ColorAttachmentWrite\n");
 }
 
+TEST_CASE("an access line renders its pass, not its own row number") {
+    // **The `access` line's `pass=` field had no text coverage until this case.** Every other
+    // exact-text case here declares one access from pass 0, so the row index and the pass index
+    // are both `0` and a rendering that emitted either would produce the same report --
+    // replacing `access.pass` with the loop counter passed the whole suite. The data is covered
+    // structurally in TestPassDeclaration.cpp; this is the projection.
+    //
+    // Pass 0 creates the resource and declares no access to it, which is legal and is
+    // `PassBuilder::CreateTexture`'s stated rule: creating a resource is not accessing it. Pass
+    // 1 then writes and reads it -- the read-modify-write case -- so the first access row is 0
+    // and belongs to pass 1, and the two numbers cannot be confused for one another.
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    Result<PassBuilder> producer = graph.AddPass("Producer");
+    REQUIRE(producer.has_value());
+    const Result<TextureId> target = producer->CreateTexture("Target", kSwapchainDescription);
+    REQUIRE(target.has_value());
+
+    Result<PassBuilder> consumer = graph.AddPass("Consumer");
+    REQUIRE(consumer.has_value());
+    REQUIRE(consumer->Write(*target, ResourceAccess::ColorAttachmentWrite));
+    REQUIRE(consumer->Read(*target, ResourceAccess::ColorAttachmentRead));
+    REQUIRE(graph.Compile());
+
+    char buffer[1024] = {};
+    CHECK(Render(graph.Inspect(), buffer) ==
+          "graph build=0 phase=Compiled\n"
+          "counts passes=2 resources=1 accesses=2 barriers=0 diagnostics=0 dropped=0\n"
+          "pass 0 order=0 queue=Graphics culled=no record=no name=\"Producer\"\n"
+          "pass 1 order=1 queue=Graphics culled=no record=no name=\"Consumer\"\n"
+          "resource 0 id=0:0 origin=Transient format=B8G8R8A8_UNORM extent=1280x720 usage=0x1 "
+          "lifetime=none..none alias=none name=\"Target\"\n"
+          "access 0 pass=1 resource=0:0 access=ColorAttachmentWrite\n"
+          "access 1 pass=1 resource=0:0 access=ColorAttachmentRead\n");
+}
+
+TEST_CASE("the pass lines come out in execution order, culled passes last") {
+    // **Render-Graph.md asks for a "pass list in execution order", and the text is where that
+    // is honoured -- `GraphInspection::passes` stays in declaration order.** Hand-built,
+    // because it is the only way to reach the property today: every graph a declaration can
+    // produce has `executionOrder == index`, so a report of a real graph renders identically
+    // whether or not anything sorts. Task 2's reordering is what makes the difference visible
+    // in a real frame, and this case is what makes it visible now.
+    //
+    // Declaration order here is Late, Early, Culled; execution order is Early, Late, and then
+    // the culled pass, which sorts last for free because `kNoPass` is the largest `u32` and is
+    // still marked in place by `order=none culled=yes`.
+    Monarc::Render::PassInspection passes[3] = {};
+    passes[0].name           = "Late";
+    passes[0].index          = 0;
+    passes[0].executionOrder = 1;
+    passes[1].name           = "Early";
+    passes[1].index          = 1;
+    passes[1].executionOrder = 0;
+    passes[2].name           = "Culled";
+    passes[2].index          = 2;
+    passes[2].executionOrder = kNoPass;
+    passes[2].culled         = true;
+
+    GraphInspection inspection{};
+    inspection.phase  = GraphPhase::Compiled;
+    inspection.passes = passes;
+
+    char buffer[1024] = {};
+    CHECK(Render(inspection, buffer) ==
+          "graph build=0 phase=Compiled\n"
+          "counts passes=3 resources=0 accesses=0 barriers=0 diagnostics=0 dropped=0\n"
+          "pass 1 order=0 queue=Graphics culled=no record=no name=\"Early\"\n"
+          "pass 0 order=1 queue=Graphics culled=no record=no name=\"Late\"\n"
+          "pass 2 order=none queue=Graphics culled=yes record=no name=\"Culled\"\n");
+}
+
+TEST_CASE("passes with no order yet keep declaration order") {
+    // The tie case, and the reason the ordering breaks ties by array position rather than
+    // leaving it to whatever a sort does. `AddPass` leaves `executionOrder` at `kNoPass` until
+    // `Compile` settles one, so *every* pass of a graph inspected mid-declaration has the same
+    // key -- and a report that shuffled them would make an uncompiled graph's text unstable,
+    // which is the one property `WriteInspectionText` promises above all others.
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    REQUIRE(graph.AddPass("First").has_value());
+    REQUIRE(graph.AddPass("Second").has_value());
+    REQUIRE(graph.AddPass("Third").has_value());
+
+    char buffer[1024] = {};
+    CHECK(Render(graph.Inspect(), buffer) ==
+          "graph build=0 phase=Declaring\n"
+          "counts passes=3 resources=0 accesses=0 barriers=0 diagnostics=0 dropped=0\n"
+          "pass 0 order=none queue=Graphics culled=no record=no name=\"First\"\n"
+          "pass 1 order=none queue=Graphics culled=no record=no name=\"Second\"\n"
+          "pass 2 order=none queue=Graphics culled=no record=no name=\"Third\"\n");
+}
+
 TEST_CASE("a refused declaration renders as a diagnostic line") {
     SystemAllocator allocator;
     RenderGraph     graph(allocator, RenderGraph::Config{});
