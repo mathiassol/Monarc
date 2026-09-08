@@ -417,6 +417,11 @@ void PrintHelp() {
 
         bool resized = false;
         for (const Monarc::Host::WindowEvent& event : window.Events()) {
+            // Logged by name, which is what gives `Host::ToString(WindowEventKind)` a shipped
+            // caller. Not noisy: events are coalesced to at most one resize and one close per
+            // pump, and a window that is not being dragged produces neither.
+            MONARC_LOG(FirstLight, Info, "window event: {} ({}x{})",
+                       Monarc::Host::ToString(event.kind), event.size.width, event.size.height);
             if (event.kind == Monarc::Host::WindowEventKind::Resized) {
                 resized = true;
             }
@@ -474,6 +479,13 @@ void PrintHelp() {
             // nothing was recorded into it, which is a state `IQueue::Submit` refuses by name
             // -- so the loop must not try. `NeedsRecreation()` is set, so the next iteration
             // recreates.
+            //
+            // Named rather than counted silently, which is what gives
+            // `RHI::ToString(AcquireOutcome)` a shipped caller: "the frame was skipped" and
+            // "the swapchain went out of date" are the same event only for as long as
+            // `AcquireOutcome` has two enumerators.
+            MONARC_LOG(FirstLight, Info, "acquire reported {}; skipping this frame",
+                       Monarc::RHI::ToString(acquired->outcome));
             ++skipped;
             continue;
         }
