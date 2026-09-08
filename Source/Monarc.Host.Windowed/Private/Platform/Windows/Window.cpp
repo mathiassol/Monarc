@@ -30,6 +30,8 @@
 
 #include <WindowPlatform.h>
 
+#include <iterator>
+
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <Windows.h>
@@ -76,6 +78,22 @@ constexpr int kMaxTitleWide = 256;
 /// it, so a window created on another thread would have a queue nobody pumps.
 /// `Window`'s class comment states that.
 u32 g_liveWindows = 0;
+
+/// Whether Monarc's window class is registered right now.
+///
+/// **Not derivable from `g_liveWindows`, which is why it is a second variable.** The count
+/// reaches zero while the class is still registered: `UnregisterClassW` refuses while a window
+/// of the class exists, so the release happens in `WindowPlatform::Destroy` after
+/// `DestroyWindow` has returned, and the count was decremented back in the message handler. So
+/// there is a window in which the count is zero and the registration is live, and without this
+/// flag every `Destroy` on an already-closed window would attempt an unregister that fails
+/// with `ERROR_CLASS_DOES_NOT_EXIST` (1411) and log a warning about it -- which is exactly what
+/// the first version of this did, five times per suite run.
+///
+/// `Detail::WindowPlatform::IsClassRegistered()` deliberately asks the *platform* rather than
+/// reading this, so the test that watches registration is measuring Windows and not Monarc's
+/// bookkeeping.
+bool g_classRegistered = false;
 
 /// Whether `SetProcessDpiAwarenessContext` has been attempted. Process-wide and one-shot: the
 /// call fails once awareness has been set, by us or by anything else, and re-attempting it
@@ -246,7 +264,7 @@ LRESULT CALLBACK WindowProc(HWND handle, UINT message, WPARAM wParam, LPARAM lPa
 
 /// Registers the window class if this is the first window. Returns false and logs on failure.
 [[nodiscard]] bool EnsureClassRegistered() {
-    if (g_liveWindows != 0) {
+    if (g_classRegistered) {
         return true;
     }
 
@@ -278,12 +296,17 @@ LRESULT CALLBACK WindowProc(HWND handle, UINT message, WPARAM wParam, LPARAM lPa
                    GetLastError());
         return false;
     }
+    g_classRegistered = true;
     return true;
 }
 
 /// Unregisters the window class once the last window has gone.
+///
+/// Called from `WindowPlatform::Destroy` and nowhere else, and both of its paths call it --
+/// including the one where the window was already gone, which is how a window the *system*
+/// destroyed still releases its class. See `g_classRegistered` for why both variables exist.
 void ReleaseClassIfUnused() {
-    if (g_liveWindows != 0) {
+    if (g_liveWindows != 0 || !g_classRegistered) {
         return;
     }
     if (UnregisterClassW(kClassName, GetModuleHandleW(nullptr)) == 0) {
@@ -291,7 +314,9 @@ void ReleaseClassIfUnused() {
         // this module did not make, and there is nothing to do about it either way.
         MONARC_LOG(LogCategories::Window, Warning, "UnregisterClassW failed with Win32 error {}",
                    GetLastError());
+        return;
     }
+    g_classRegistered = false;
 }
 
 /// Makes the process per-monitor DPI aware, once.
@@ -348,6 +373,31 @@ void WindowPlatform::OnCloseRequested(Window& window) {
 void WindowPlatform::OnDestroyed(Window& window) {
     window.m_nativeHandle = nullptr;
     window.m_clientSize   = RHI::Extent2D{};
+
+    // **The class reference count is decremented here and not in `Destroy`, and a mutation is
+    // what moved it.** `Destroy` is one of two ways a window's `WM_DESTROY` arrives; the other
+    // is the system destroying it -- a logoff, or a parent going away -- and a count that only
+    // `Destroy` decremented would drift upwards by one on that path and leave the class
+    // registered for the life of the process. Here it moves exactly once per destruction,
+    // whoever started it.
+    //
+    // Found by making the `WM_CLOSE` handler call `DefWindowProcW`, whose `WM_CLOSE` calls
+    // `DestroyWindow`: the case that says closing is a request went red as intended, and
+    // `CHECK_FALSE(IsClassRegistered())` in a *later* case went red as well -- which was the
+    // drift rather than the mutation.
+    //
+    // **`ReleaseClassIfUnused` is deliberately *not* called from here**, and the first attempt
+    // at this fix did call it. `UnregisterClassW` refuses with `ERROR_CLASS_HAS_WINDOWS` while
+    // any window of the class exists, and during `WM_DESTROY` one still does -- the handle
+    // stays valid until after `WM_NCDESTROY` returns. So the unregister failed, the class
+    // stayed registered with a count of zero, and the next `RegisterClassExW` failed with
+    // `ERROR_CLASS_ALREADY_EXISTS` (1410): every remaining case in the suite went red. It is
+    // `Destroy` that releases, because the earliest moment the platform will accept the
+    // unregister is after `DestroyWindow` has returned.
+    MONARC_CHECK(g_liveWindows > 0, "a window was destroyed that was never counted as live");
+    if (g_liveWindows > 0) {
+        --g_liveWindows;
+    }
 }
 
 Result<Window> WindowPlatform::Create(const WindowDescription& description) {
@@ -433,27 +483,29 @@ Result<Window> WindowPlatform::Create(const WindowDescription& description) {
 void WindowPlatform::Destroy(Window& window) {
     const HWND handle = HandleOf(window);
     if (handle == nullptr) {
-        // Already closed, moved from, or never opened. `Destroy` is documented as safe to call
-        // unconditionally and more than once, and this is the whole of that promise.
+        // Already closed, moved from, never opened -- **or destroyed by the system**, which is
+        // the case worth the call below. `OnDestroyed` has decremented the count by then and
+        // could not unregister the class, because a window of it still existed at the time; so
+        // this is the first moment the platform will accept the unregister. `~Window` always
+        // reaches here, which is what makes it happen at all.
+        ReleaseClassIfUnused();
         return;
     }
 
-    // DestroyWindow sends WM_DESTROY synchronously, and the handler clears
-    // `window.m_nativeHandle` -- which is what makes a second `Destroy` a no-op without a
-    // second flag to keep in step.
+    // DestroyWindow sends WM_DESTROY synchronously, so `OnDestroyed` has already cleared
+    // `window.m_nativeHandle` and decremented the count by the time this returns -- which is
+    // what makes a second `Destroy` a no-op without a second flag to keep in step.
     if (DestroyWindow(handle) == 0) {
-        MONARC_LOG(LogCategories::Window, Warning, "DestroyWindow failed with Win32 error {}", GetLastError());
-        // Cleared anyway. The handle is not usable and holding it would mean a destructor
-        // retrying the same failing call, which is the shape of loop a teardown path must not
-        // have.
-        window.m_nativeHandle = nullptr;
+        MONARC_LOG(LogCategories::Window, Warning, "DestroyWindow failed with Win32 error {}",
+                   GetLastError());
+        // WM_DESTROY never arrived, so the bookkeeping it would have done has to happen here.
+        // Clearing the handle is not optional either: holding one that is not usable would
+        // mean a destructor retrying the same failing call, which is the shape of loop a
+        // teardown path must not have.
+        OnDestroyed(window);
     }
-    window.m_clientSize = RHI::Extent2D{};
 
-    MONARC_CHECK(g_liveWindows > 0, "a window was destroyed that was never counted as live");
-    if (g_liveWindows > 0) {
-        --g_liveWindows;
-    }
+    // After the window is gone, which is the only point `UnregisterClassW` accepts.
     ReleaseClassIfUnused();
 }
 
@@ -598,6 +650,17 @@ void WindowTestHooks::Restore(Window& window) {
     }
 }
 
+void WindowTestHooks::DestroyNatively(Window& window) {
+    if (const HWND handle = HandleOf(window); handle != nullptr) {
+        // Straight to the platform, so the `WM_DESTROY` arrives without `WindowPlatform::Destroy`
+        // having been involved -- which is the whole point of the hook.
+        if (DestroyWindow(handle) == 0) {
+            MONARC_LOG(LogCategories::Window, Warning,
+                       "DestroyWindow failed with Win32 error {}", GetLastError());
+        }
+    }
+}
+
 void WindowTestHooks::RequestClose(Window& window) {
     const HWND handle = HandleOf(window);
     if (handle == nullptr) {
@@ -729,9 +792,47 @@ Status WindowTestHooks::CaptureScreenPixel(const Window& window, i32 x, i32 y, u
     return result;
 }
 
+WindowTestHooks::PointOwner WindowTestHooks::WindowAtClientPoint(const Window& window, i32 x,
+                                                                 i32 y) {
+    PointOwner owner{};
+
+    const HWND handle = HandleOf(window);
+    if (handle == nullptr) {
+        return owner;
+    }
+
+    POINT point{x, y};
+    if (ClientToScreen(handle, &point) == 0) {
+        return owner;
+    }
+
+    // `WindowFromPoint` and not `GetForegroundWindow`: the question is what is *drawn* at that
+    // pixel, and a topmost layered overlay can be over the window without being the foreground
+    // one. That is precisely the case this hook was written for.
+    const HWND at = WindowFromPoint(point);
+    if (at == nullptr) {
+        return owner;
+    }
+    owner.isOurs = at == handle;
+
+    wchar_t wide[64] = {};
+    if (GetClassNameW(at, wide, static_cast<int>(std::size(wide))) > 0) {
+        // Truncating rather than refusing, and always null-terminating: this is a log line, and
+        // a truncated class name still identifies the tenant where an empty one does not.
+        const int written =
+            WideCharToMultiByte(CP_UTF8, 0, wide, -1, owner.className,
+                                static_cast<int>(std::size(owner.className)) - 1, nullptr,
+                                nullptr);
+        owner.className[written >= 0 ? written : 0] = '\0';
+    }
+    return owner;
+}
+
 WindowTestHooks::MonitorInfo WindowTestHooks::Monitors(const Window& window) {
     MonitorInfo info{};
     info.monitorCount = static_cast<u32>(GetSystemMetrics(SM_CMONITORS));
+    info.virtualLeft  = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    info.virtualTop   = GetSystemMetrics(SM_YVIRTUALSCREEN);
 
     const HWND handle = HandleOf(window);
     if (handle == nullptr) {

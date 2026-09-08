@@ -142,6 +142,16 @@ struct WindowTestHooks {
     static void Maximise(Window& window);
     static void Restore(Window& window);
 
+    /// Destroys the native window behind `window`'s back, the way the system does at a logoff
+    /// or when a parent goes away -- rather than through `Window::Destroy`.
+    ///
+    /// **The only way to reach the other of the two paths a `WM_DESTROY` arrives by.** A
+    /// window's class registration is reference-counted, and until a mutation found otherwise
+    /// the count was decremented in `Window::Destroy` -- so a system-initiated destruction
+    /// drifted the count upwards and left the class registered for the life of the process.
+    /// The count moved into the message handler; this is what tests that it did.
+    static void DestroyNatively(Window& window);
+
     /// Asks the platform to close the window, exactly as its close button does.
     ///
     /// **A posted message and not a direct call into `Window`, which is what makes it worth
@@ -174,6 +184,30 @@ struct WindowTestHooks {
     [[nodiscard]] static Status CaptureScreenPixel(const Window& window, i32 x, i32 y,
                                                    u8 (&out)[4]);
 
+    /// Whose pixels are actually on screen at `x, y` within `window`'s client area.
+    struct PointOwner {
+        /// True when the topmost window at that screen point is `window` itself.
+        bool isOurs = false;
+
+        /// The window class of whatever is there, null-terminated and truncated to fit. For a
+        /// log line, so a capture that read someone else's pixels can say whose.
+        char className[64] = {};
+    };
+
+    /// Asks the platform which window is on top at `x, y` within `window`'s client area.
+    ///
+    /// **This exists because a screen capture is an assertion about the desktop, and the
+    /// desktop has other tenants.** The capture below read a stable
+    /// `(106, 71, 35)` -- the expected bytes at 55% -- on every run for a while, and the cause
+    /// was not Monarc: `WindowFromPoint` named a layered, topmost `Shell_SystemDim`, which is
+    /// the overlay Windows puts over the whole desktop while a system security dialog is open.
+    /// A test that asserted through that would be asserting about Windows' dimming.
+    ///
+    /// So the capture case asks this first, and reports rather than asserts when the answer is
+    /// somebody else. That is not a widened tolerance: the bytes it does assert are still
+    /// exact, and the reason it declined is named in the log.
+    [[nodiscard]] static PointOwner WindowAtClientPoint(const Window& window, i32 x, i32 y);
+
     /// How many monitors the platform reports, and the bounding rectangle of the one `window`
     /// is currently on, in virtual-screen coordinates.
     ///
@@ -192,6 +226,17 @@ struct WindowTestHooks {
         /// exercise the DPI-change path -- the window tests read this and say so rather than
         /// implying otherwise.
         u32 dpi = 0;
+
+        /// The top-left of the *virtual screen* -- the bounding box of every monitor. On a
+        /// machine with one monitor this is that monitor's origin; on this one it is
+        /// `(-1920, 0)`, because `\\.\DISPLAY5` sits to the left of the primary.
+        ///
+        /// **Here so that a test can move a window to a different monitor without naming
+        /// one.** The screen-capture case needs that: Windows' `Shell_SystemDim` overlay
+        /// covers the monitor a system dialog is on and not the others, so trying a second
+        /// position is the difference between reading Monarc's pixels and reading Windows'.
+        i32 virtualLeft = 0;
+        i32 virtualTop  = 0;
     };
 
     [[nodiscard]] static MonitorInfo Monitors(const Window& window);

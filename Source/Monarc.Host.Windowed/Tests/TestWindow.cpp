@@ -430,6 +430,42 @@ TEST_CASE("destroying a window twice is a no-op, and so is pumping a closed one"
     CHECK(window->Events().empty());
 }
 
+TEST_CASE("a window the system destroys still releases its class registration") {
+    // **The other of the two paths a `WM_DESTROY` arrives by, and a mutation is what found
+    // it.** Making the `WM_CLOSE` handler call `DefWindowProcW` -- whose `WM_CLOSE` calls
+    // `DestroyWindow` -- turned the close case red as intended and *also* turned a later
+    // case's `CHECK_FALSE(IsClassRegistered())` red, because the reference count was
+    // decremented in `Window::Destroy` and nothing decremented it when the system did the
+    // destroying. The count moved into the message handler; this is the case that says so.
+    CHECK_FALSE(WindowPlatform::IsClassRegistered());
+
+    Monarc::Result<Window> window = Window::Create(kTestWindow);
+    REQUIRE(window.has_value());
+    CHECK(WindowPlatform::IsClassRegistered());
+
+    WindowTestHooks::DestroyNatively(*window);
+
+    // No pump needed: `DestroyWindow` sends `WM_DESTROY` synchronously, so the handler has
+    // already run and the window reads as closed.
+    CHECK_FALSE(window->IsOpen());
+    CHECK(window->ClientSize().IsEmpty());
+
+    // **Still registered, and that is the mechanism rather than a gap.** `UnregisterClassW`
+    // refuses while a window of the class exists, and one still did when `WM_DESTROY` was
+    // handled -- so the count is at zero and the registration is waiting for a moment the
+    // platform will accept. The first fix for the drift above tried to unregister from the
+    // handler and turned this whole suite red; the note in `OnDestroyed` records what
+    // happened.
+    CHECK(WindowPlatform::IsClassRegistered());
+
+    // `Destroy` is that moment, and `~Window` always reaches it -- so a window destroyed by
+    // the system still releases its class when its owner goes away. It is also a no-op for the
+    // count rather than a second decrement, which is what the cleared handle buys: without it
+    // the count would go negative and the check in `OnDestroyed` would fire.
+    window->Destroy();
+    CHECK_FALSE(WindowPlatform::IsClassRegistered());
+}
+
 TEST_CASE("a window cannot be created with an empty client size") {
     const Monarc::Result<Window> zeroWidth =
         Window::Create(WindowDescription{.size = {0, 720}, .title = "no"});

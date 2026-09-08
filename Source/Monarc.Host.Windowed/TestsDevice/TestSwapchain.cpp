@@ -573,52 +573,137 @@ TEST_CASE("THE SCREEN CAPTURE: the window's own pixels are the clear colour") {
     // link in it is the desktop rather than Monarc: the window has to be visible, unobscured,
     // and composited before the pixel is read.
     //
-    // Two traps are worth naming because they cost time. `PrintWindow`, and a `BitBlt` from the
-    // *window's* device context, return black for a Vulkan window: the swapchain's contents
+    // Three traps are worth naming because each cost time. `PrintWindow`, and a `BitBlt` from
+    // the *window's* device context, return black for a Vulkan window: the swapchain's contents
     // never enter the window's GDI surface, because the compositor puts them on screen
-    // directly. So the capture is from the screen DC -- see
-    // `WindowTestHooks::CaptureScreenPixel`. And the result can still be perturbed by occlusion
-    // or by display colour management, which is why a failure here reports the bytes it got
-    // rather than widening a tolerance until it fits.
+    // directly, so the capture is from the screen DC -- see
+    // `WindowTestHooks::CaptureScreenPixel`. A fixed number of frames before reading makes the
+    // answer depend on how long the previous case took. And the desktop has other tenants: for
+    // an afternoon this read a stable `(106, 71, 35)` -- the clear at 55% -- because a
+    // `Shell_SystemDim` overlay was over the window while a Windows Security dialog was open.
+    // Each of those is handled below, and none of them by loosening what is asserted.
     REQUIRE_FALSE(Adapters().IsEmpty());
 
     Harness harness;
     REQUIRE(harness.Open(Adapters()[0], false).has_value());
 
-    const bool foregrounded = WindowTestHooks::BringToForeground(*harness.window);
-    MONARC_LOG(SwapchainTest, Info, "the window was brought to the front: {}", foregrounded);
-    Settle(*harness.window);
-
-    // **Presented repeatedly rather than once, and the reason is FIFO.** Each present waits for
-    // a vertical blank, so forty frames is roughly two thirds of a second on a 60 Hz display --
-    // long enough for the compositor to have put the newest frame on screen several times over.
-    // A single frame followed by an immediate read is a race with the compositor, not a test.
-    for (int frame = 0; frame < 40; ++frame) {
-        harness.window->PumpEvents();
-        const FrameResult result = PresentOneFrame(harness, Monarc::RHI::BufferHandle{});
-        if (result.outcome != Monarc::RHI::AcquireOutcome::Acquired) {
-            REQUIRE(harness.swapchain->Recreate(harness.window->ClientSize()).has_value());
-        }
-    }
-    REQUIRE(harness.device->WaitIdle().has_value());
-    Settle(*harness.window);
-
     const Monarc::RHI::Extent2D size = harness.window->ClientSize();
     REQUIRE_FALSE(size.IsEmpty());
+    const Monarc::i32 centreX = static_cast<Monarc::i32>(size.width / 2);
+    const Monarc::i32 centreY = static_cast<Monarc::i32>(size.height / 2);
 
-    Monarc::u8 pixel[4] = {};
-    const Monarc::Status captured =
-        WindowTestHooks::CaptureScreenPixel(*harness.window,
-                                            static_cast<Monarc::i32>(size.width / 2),
-                                            static_cast<Monarc::i32>(size.height / 2), pixel);
-    REQUIRE(captured.has_value());
+    // **Put somewhere the window is actually the top one, trying more than one monitor.**
+    // Windows opens a `CW_USEDEFAULT` window in a cascade, so where it lands depends on how
+    // many windows the process has already opened -- which made this case's answer depend on
+    // which cases ran before it. And a pinned position is not enough on its own: Windows'
+    // `Shell_SystemDim` overlay covers the monitor a system security dialog is on, so a window
+    // pinned to *that* monitor reads the dim's blend and nothing else, for as long as the
+    // dialog is up. Measured; `WindowTestHooks::WindowAtClientPoint` records the diagnosis.
+    //
+    // Two candidates, and neither names a monitor: where the window already is, then the
+    // top-left of the virtual screen -- which on a one-monitor machine is the same place and on
+    // this one is the other display. The first where the window is genuinely on top wins.
+    const WindowTestHooks::MonitorInfo monitor = WindowTestHooks::Monitors(*harness.window);
+    struct Candidate {
+        Monarc::i32 x;
+        Monarc::i32 y;
+    };
+    const Candidate candidates[] = {{monitor.left + 64, monitor.top + 64},
+                                    {monitor.virtualLeft + 64, monitor.virtualTop + 64}};
+
+    bool onTop = false;
+    for (const Candidate& candidate : candidates) {
+        WindowTestHooks::MoveTo(*harness.window, candidate.x, candidate.y);
+        Settle(*harness.window);
+        const bool foregrounded = WindowTestHooks::BringToForeground(*harness.window);
+        Settle(*harness.window);
+
+        const WindowTestHooks::PointOwner owner =
+            WindowTestHooks::WindowAtClientPoint(*harness.window, centreX, centreY);
+        MONARC_LOG(SwapchainTest, Info,
+                   "at ({}, {}): fronted {}, and the top window at the capture point is \"{}\" "
+                   "(Monarc's: {})",
+                   candidate.x, candidate.y, foregrounded, owner.className, owner.isOurs);
+        if (owner.isOurs) {
+            onTop = true;
+            break;
+        }
+    }
+
+    // **Presented in batches until two consecutive captures agree, rather than after a fixed
+    // number of frames -- and the reason is a measurement, not caution.** Forty frames was the
+    // first attempt, about two thirds of a second under FIFO on a 60 Hz display, and it read
+    // correctly when the case ran with the rest of the suite in front of it and wrongly when it
+    // ran alone. Waiting for the reading to stop changing removes that dependence on how long
+    // the previous case took.
+    //
+    // It does **not** widen what is asserted: the settled value is compared against the exact
+    // bytes below, so a window that settled on the wrong colour fails and reports what it read.
+    Monarc::u8            previous[4]     = {};
+    Monarc::u8            pixel[4]        = {};
+    bool                  settled         = false;
+    Monarc::u32           batches         = 0;
+    Monarc::u32           presented       = 0;
+    constexpr Monarc::u32 kFramesPerBatch = 20;
+    constexpr Monarc::u32 kMaxBatches     = 25;
+
+    for (; batches < kMaxBatches && !settled; ++batches) {
+        for (Monarc::u32 frame = 0; frame < kFramesPerBatch; ++frame) {
+            harness.window->PumpEvents();
+            const FrameResult result = PresentOneFrame(harness, Monarc::RHI::BufferHandle{});
+            if (result.outcome != Monarc::RHI::AcquireOutcome::Acquired) {
+                REQUIRE(harness.swapchain->Recreate(harness.window->ClientSize()).has_value());
+                continue;
+            }
+            ++presented;
+        }
+        REQUIRE(harness.device->WaitIdle().has_value());
+        Settle(*harness.window);
+
+        REQUIRE(WindowTestHooks::CaptureScreenPixel(*harness.window, centreX, centreY, pixel)
+                    .has_value());
+        if (batches > 0 && pixel[0] == previous[0] && pixel[1] == previous[1] &&
+            pixel[2] == previous[2]) {
+            settled = true;
+        }
+        for (int i = 0; i < 4; ++i) {
+            previous[i] = pixel[i];
+        }
+    }
+
+    MONARC_LOG(SwapchainTest, Info,
+               "the screen reading settled after {} batch(es) of {} frame(s) -- {} presented in "
+               "all; settled: {}",
+               batches, kFramesPerBatch, presented, settled);
+    CHECK(settled);
 
     ReportBytes("screen capture", Adapters()[0].name, pixel);
+
+    // **Whose pixels those were, asked before they are asserted about.** The desktop has other
+    // tenants, and a screen capture that did not check would sooner or later assert about one
+    // of them -- which is exactly what happened: a stable `(106, 71, 35)`, the expected bytes
+    // at 55%, from a layered topmost `Shell_SystemDim`.
+    //
+    // Reported and skipped rather than asserted through, and **not** softened to a tolerance:
+    // where the window is the top one at that pixel the bytes below are exact, and where it is
+    // not the log names who was in the way. The swapchain readback is the assertion that needs
+    // nothing of the desktop.
+    const WindowTestHooks::PointOwner owner =
+        WindowTestHooks::WindowAtClientPoint(*harness.window, centreX, centreY);
+    if (!onTop || !owner.isOurs) {
+        MONARC_LOG(SwapchainTest, Warning,
+                   "the topmost window at the capture point is \"{}\" and not Monarc's on any "
+                   "monitor tried, so the screen reading is not Monarc's to assert about; it "
+                   "read ({}, {}, {}, {})",
+                   owner.className, pixel[0], pixel[1], pixel[2], pixel[3]);
+        return;
+    }
 
     // Blue, green and red exactly. **The alpha byte is deliberately not asserted**: a 32-bit
     // `BI_RGB` device-independent bitmap has an unused fourth byte with no defined value, so
     // asserting it would be asserting about GDI's padding rather than about Monarc's clear. It
-    // is logged above, so what it actually was is in the record either way.
+    // is logged above, so what it actually was is in the record either way -- and it has read
+    // 255 on every run of this that was Monarc's to read.
     CHECK(pixel[0] == kExpectedSwapchainBytes[0]);
     CHECK(pixel[1] == kExpectedSwapchainBytes[1]);
     CHECK(pixel[2] == kExpectedSwapchainBytes[2]);
