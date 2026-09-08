@@ -182,10 +182,16 @@ TEST_CASE("a window created and destroyed leaves no registered class behind") {
 }
 
 TEST_CASE("the window class survives one of two windows closing") {
-    // **The half of the reference count the case above cannot reach.** With the count replaced
-    // by a bool -- register on the first window, unregister on any close -- the case above
-    // stays green and this one goes red at the second assertion: the surviving window's class
-    // would have been unregistered under it.
+    // **This case's first draft claimed to catch the reference count going, and measuring said
+    // otherwise.** With the count dropped from `ReleaseClassIfUnused` -- unregister on any
+    // close -- this suite stays entirely green and logs twelve `ERROR_CLASS_HAS_WINDOWS`
+    // warnings instead: Windows refuses to unregister a class while a window of it exists, so
+    // it protects the surviving window whether Monarc's bookkeeping does or not.
+    //
+    // What is left is still worth asserting, and it is not the same thing: that a second window
+    // does not need a second registration, that closing the inner one leaves the outer one
+    // open and its class registered, and that closing the last one releases it. The *release*
+    // is the part with a red: removing it turns 13 of 18 cases in this file red.
     CHECK_FALSE(WindowPlatform::IsClassRegistered());
 
     Monarc::Result<Window> first = Window::Create(kTestWindow);

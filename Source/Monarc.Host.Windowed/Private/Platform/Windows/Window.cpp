@@ -67,11 +67,17 @@ constexpr int kMaxTitleWide = 256;
 
 /// How many live windows the registered class is serving.
 ///
-/// **Reference-counted, and that is what the plan's own test reads**: "a window created and
-/// destroyed leaves no registered class behind". Registering is idempotent-ish -- a second
-/// `RegisterClassExW` for the same name fails with `ERROR_CLASS_ALREADY_EXISTS` -- but
-/// *unregistering* is not something a second window can survive, so the count is what decides
-/// when it is safe.
+/// **What the count decides is whether Monarc *asks* to unregister -- not whether it is safe
+/// to, because Windows decides that itself.** `UnregisterClassW` refuses with
+/// `ERROR_CLASS_HAS_WINDOWS` (1412) while any window of the class exists, and measuring that is
+/// what corrected this comment: with the count dropped from `ReleaseClassIfUnused`, the window
+/// suite stays entirely green and logs twelve of those warnings. So the count buys a quiet log
+/// and an honest "release when the last one goes", and **no assertion in the suite can tell it
+/// from Windows' own refusal.** That is stated rather than dressed up as coverage.
+///
+/// What the count is genuinely load-bearing for is the *other* direction, and that has reds:
+/// with the release removed entirely, 13 of 18 window cases go red and `RegisterClassExW`
+/// starts failing with `ERROR_CLASS_ALREADY_EXISTS` (1410).
 ///
 /// A plain `u32` and not an atomic, because window creation and destruction are single-thread
 /// operations by construction: Win32 delivers a window's messages to the thread that created
