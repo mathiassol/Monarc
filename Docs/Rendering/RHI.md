@@ -164,12 +164,20 @@ the path the swapchain clear and the render graph both take — a separate clear
 would be a second code path with no shipped caller, and a test of it would read as coverage
 while the real path stayed unexercised.
 
-**Frame completion is a timeline semaphore, and there are no binary semaphores.**
-`IQueue::Submit` returns the value its submission will signal; `IDevice::BeginFrame` waits on
-the value its frame slot's previous submission signalled before resetting that slot's command
-pool, which is what makes the reset legal — resetting a pool whose buffers are still executing
-is undefined behaviour. Two frames in flight, one command pool each. Binary semaphores arrive
-with presentation, because `vkQueuePresentKHR` accepts only those.
+**Frame completion is a timeline semaphore; presentation adds binary ones, each where it
+belongs.** `IQueue::Submit` returns the value its submission will signal;
+`IDevice::BeginFrame` waits on the value its frame slot's previous submission signalled before
+resetting that slot's command pool, which is what makes the reset legal — resetting a pool
+whose buffers are still executing is undefined behaviour. Two frames in flight, one command
+pool each.
+
+Binary semaphores arrived with the swapchain in A3 Task 4, because `vkQueuePresentKHR` accepts
+only those: an acquire semaphore per frame in flight and a render-finished semaphore per
+swapchain image, both owned by the swapchain and destroyed with it. The timeline is still what
+says whether frame N-2 has finished, and it is *also* what makes reusing an acquire semaphore
+safe — the swapchain records the timeline value of the submission that waited on each one and
+waits for it before handing that semaphore to another acquire. Making the timeline cover
+presentation was never available; using each where it belongs is the whole decision.
 
 **One `Begin`, one `End` and one `Submit` per `BeginFrame`**, and a second of any of them is
 refused with `ErrorCode::InvalidArgument` rather than attempted: only `BeginFrame` resets the
@@ -177,6 +185,16 @@ pool, so only `BeginFrame` makes a list recordable and submittable again — wai
 to finish does not. A frame loop that comes round without calling it gets a `Status` and not
 undefined behaviour, in every configuration and not only where a validation layer is loaded.
 `ICommandList` in `Monarc/RHI/Device.h` lists the states each call refuses.
+
+**A command list is in exactly one of five states, and the backend switches over them
+exhaustively.** Task 3 tracked the machine in four booleans and closing the table found three
+reachable holes, each a named VUID in Debug and silent undefined behaviour in Release; Task 4
+made it one `enum class State` — `Reset`, `Recording`, `Rendering`, `Recorded`, `Submitted` —
+with every switch `default`-less, so `/w44062` makes an unaudited method a compile error where
+four booleans could not. The fifth state is `Rendering`, which was the sub-state Task 3 kept in
+a fourth bool; the swapchain adds no list state at all, because an acquired image is an ordinary
+texture handle. `VulkanCommandList`'s class comment in
+`Monarc.RHI.Vulkan/Private/VulkanDeviceState.h` holds the table and the transitions.
 
 **Resources are handles from device-owned, generation-checked, fixed-capacity pools.** Capacity
 comes from a `DeviceConfig` at device creation and is never grown, which is
@@ -198,6 +216,66 @@ replaces one function's body without touching a call site. What would have been 
 interface that never took a description.
 [ADR-0014](../Architecture/Decisions/ADR-0014-dependency-policy.md)'s dependency table has no
 VMA row, and adding one is a decision for whoever needs the second allocation strategy.
+
+## The swapchain, and how a surface reaches it
+
+`ISwapchain` and `SurfaceDescription` (`Monarc.RHI/Include/Monarc/RHI/Swapchain.h`, Phase A3
+Task 4) are the presentation half, and both are backend-free.
+
+**A surface is two opaque `void*` and nothing knows what a window is.** `SurfaceDescription`
+carries a native window handle and the module or display connection it belongs to, and neither
+the RHI's headers nor the backend's may name a platform type
+([ADR-0016](../Architecture/Decisions/ADR-0016-platform-code-selection.md);
+[ADR-0014](../Architecture/Decisions/ADR-0014-dependency-policy.md) rule 1). That is
+structural rather than stylistic: gate 3 forbids a Tier 2 translation unit from including
+`Monarc/Host/`, so a `Window&` could not be passed to the backend even if someone wanted to.
+The app takes the handles out of the window and puts them in the description;
+`Monarc.RHI.Vulkan/Private/Platform/Windows/VulkanSurface.cpp` turns them into a
+`VkSurfaceKHR`, and it is the only file in the backend that includes `<Windows.h>`.
+
+**An acquired image is a `TextureHandle` from the device's own pool.** So `Barrier`,
+`BeginRendering` and `CopyTextureToBuffer` work on one unchanged, with ADR-0002's generation
+checking intact — which is what lets the swapchain readback that proves the clear reuse the
+same copy path an offscreen texture does, with no entry point of its own. `ISwapchain::Recreate`
+releases every slot, so a handle held across a resize is stale rather than naming the slot's new
+occupant.
+
+**FIFO, `B8G8R8A8_UNORM`, `VK_COLOR_SPACE_SRGB_NONLINEAR_KHR`, opaque composition — negotiated
+against the surface and refused rather than substituted.** FIFO is the only present mode Vulkan
+guarantees and sRGB-non-linear the only colour space; UNORM rather than an sRGB format keeps A3
+out of deciding clear-value semantics on sRGB images, which is stated as an open question rather
+than guessed at. A surface offering none of them reports `ErrorCode::Unsupported`, because a
+swapchain silently created in another format would make every byte the suite asserts a statement
+about a format nobody chose.
+
+**Swapchain images are not frames in flight.** The image count is `minImageCount + 1`, clamped
+to `maxImageCount` when that is non-zero, and belongs to the surface; `kFramesInFlight` is
+Monarc's own CPU/GPU overlap. On the development machine they are 3 and 2, and nothing derives
+either from the other — code that had tied them together would be wrong only on a driver
+reporting a different minimum, which is the kind of bug that surfaces on someone else's machine.
+
+**`VK_ERROR_OUT_OF_DATE_KHR` and `VK_SUBOPTIMAL_KHR` are handled from both acquire and present**
+— four cases, not two. Out-of-date from acquire means there is no image and nothing may be
+presented; suboptimal means the image is valid and *must* be presented, because abandoning a
+signalled acquire semaphore is the one mistake here a validation layer catches late and a
+release build not at all. `ISwapchain::NeedsRecreation()` is sticky and set by any of the four,
+so a loop that checks it once a frame cannot miss one.
+
+**A minimised window reports `0 x 0` and the frame loop parks.** `Recreate` refuses an empty
+extent — before tearing anything down, so a loop that asks at the wrong moment keeps the
+swapchain it had — and the parking belongs to the caller, because only the caller knows how to
+wait for the window to come back.
+
+**Presentation support is per adapter and per surface, and it is measured.**
+`VulkanBackend::AdapterCanPresent` asks `vkGetPhysicalDeviceSurfaceSupportKHR` about the
+graphics queue family device creation would actually pick. On the development machine both
+adapters can present to a window on either monitor — see [Status.md](../Status.md), which
+records it as a finding rather than an assumption.
+
+`VK_KHR_swapchain` is the only device extension Monarc enables, and it is enabled per adapter
+rather than required: presentation is a window-system capability, not a tier, so a compute-only
+or headless device stays usable for the offscreen work it is perfectly capable of and only
+swapchain creation reports about it.
 
 ## Adapter identity is the device UUID, and only that
 

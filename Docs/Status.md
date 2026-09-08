@@ -3,7 +3,7 @@
 **What is actually true right now.** Intent lives in the other documents; this file is the
 honest account. Update it when reality changes, not when a plan is written.
 
-_Last updated: 2026-09-07_
+_Last updated: 2026-09-08_
 
 ## Summary
 
@@ -13,18 +13,20 @@ diagnostics, container, math and platform foundations under test on two compiler
 sanitizers, and `Monarc.Jobs` — the first module beyond `Monarc.Core` — adds a thread
 pool, dependency graph, priorities and instrumentation on top of it.
 
-**A3 is under way: Tasks 1, 2 and 3 are complete.** The module graph has six modules,
+**A3 is under way: Tasks 1 through 4 are complete.** The module graph has six modules,
 `Monarc.RHI.Vulkan` opens `vulkan-1.dll` itself and brings up a real Vulkan 1.3 instance with a
 fatal validation messenger, adapter enumeration reports the two GPUs on this machine where raw
-enumeration reports five, and **there is now a logical device on each of them that clears a
-texture and reads the pixels back as exactly the bytes asked for**. Task 4 (window, surface,
-swapchain) is next. See [M0 — First Light](Milestones/M0-First-Light.md) for how the phases fit
-together.
+enumeration reports five, and there is a logical device on each of them. **`Monarc.FirstLight`
+now opens a window, clears it, and exits zero when it is closed.** Task 5 is close-out. See
+[M0 — First Light](Milestones/M0-First-Light.md) for how the phases fit together.
 
-**Something renders, and it is proved rather than looked at.** There is no window yet — that is
-Task 4 — but a `R8G8B8A8_UNORM` texture cleared through dynamic rendering reads back as
-`(64, 128, 192, 255)` on both the RTX 3070 Ti and the Intel UHD 730, with no tolerance
-anywhere. See [A3 Task 3 delivered](#a3-task-3-delivered).
+**First light is lit, and it is proved rather than looked at — twice.** A `R8G8B8A8_UNORM`
+texture cleared through dynamic rendering reads back as `(64, 128, 192, 255)` on both the RTX
+3070 Ti and the Intel UHD 730 (Task 3), and the *swapchain image that gets presented* reads back
+as `(192, 128, 64, 255)` — the same colour, in the swapchain's own `B8G8R8A8_UNORM` byte order —
+on both adapters, with the window's own pixels read off the screen agreeing to the byte. No
+tolerance anywhere. See [A3 Task 3 delivered](#a3-task-3-delivered) and
+[A3 Task 4 delivered](#a3-task-4-delivered).
 
 ## Verified environment
 
@@ -94,6 +96,14 @@ was expected and did not materialise.
   `86808b4c-0400-0000-0002-000000000000`. No mesh shading and no ray tracing
 - Intel i5-11400, 6 cores / 12 threads, 32 GB RAM — modest, so **compile-time discipline is
   a design constraint, not a virtue**
+- **Two monitors, both 1920x1080 and both at 96 DPI**: `\\.\DISPLAY5` at `(-1920, 0)` and
+  `\\.\DISPLAY1`, the primary, at `(0, 0)`. Equal DPI is the reason dragging a window between
+  them does not exercise the `WM_DPICHANGED` path — see
+  [A3 Task 4 delivered](#a3-task-4-delivered)
+- **Both adapters can present to a window on either monitor**, measured with
+  `vkGetPhysicalDeviceSurfaceSupportKHR` in A3 Task 4 rather than assumed. The integrated Intel
+  part is not restricted to the display it drives, which was the open question on a machine with
+  two GPUs and two screens
 
 Two facts from this constrained `Monarc.RHI.Vulkan` before a line of it was written, and
 both held up once it was:
@@ -1245,12 +1255,191 @@ discovered.
 are device-required, since a command buffer's state is only observable against a real device.
 Assertion totals are 504 device-free and 384 device-required.
 
-**Not done, and recommended for Task 4 rather than smuggled in here: make the four states an
-`enum class` and switch on it exhaustively.** With `/w44062` on, a fifth state would then fail to
-compile in every method that has to decide about it, which is the only mechanism that actually
-stops a fourth patch — a comment cannot. It is left out of this change because no test can
-distinguish it from the flags, and a refactor no test can see does not belong in a task being
-closed.
+**Not done in Task 3, and recommended for Task 4 rather than smuggled in there: make the four
+states an `enum class` and switch on it exhaustively.** With `/w44062` on, a fifth state would
+then fail to compile in every method that has to decide about it, which is the only mechanism
+that actually stops a fourth patch — a comment cannot. It was left out of Task 3 because no test
+can distinguish it from the flags, and a refactor no test can see does not belong in a task
+being closed. **Task 4 did it**, and the fifth state was not the one the plan predicted — see
+[A3 Task 4 delivered](#a3-task-4-delivered).
+
+### A3 Task 4 delivered
+
+A window, a surface, a swapchain, and first light. `Monarc.FirstLight` with no arguments opens a
+1280x720 window, clears every frame to `(64, 128, 192)`, and exits **zero** when the window is
+closed; `--frames=N` runs N presented frames and exits, and `--adapter=<n|name>` picks the GPU.
+
+**The headline: the clear reaches the image that gets presented, and it is asserted to the
+byte on both adapters.** The swapchain readback barriers the acquired image to transfer-source
+*before* presenting it, copies it into a host-visible buffer, and compares every pixel. Verbatim
+from `Monarc.Host.Windowed.DeviceTests`:
+
+```
+swapchain readback on "NVIDIA GeForce RTX 3070 Ti": first pixel = (192, 128, 64, 255) as blue, green, red, alpha; expected (192, 128, 64, 255)
+swapchain readback on "NVIDIA GeForce RTX 3070 Ti": 230400 of 230400 pixel(s) exact
+swapchain readback on "Intel(R) UHD Graphics 730": first pixel = (192, 128, 64, 255) as blue, green, red, alpha; expected (192, 128, 64, 255)
+swapchain readback on "Intel(R) UHD Graphics 730": 230400 of 230400 pixel(s) exact
+screen capture on "NVIDIA GeForce RTX 3070 Ti": first pixel = (192, 128, 64, 255) as blue, green, red, alpha; expected (192, 128, 64, 255)
+```
+
+The byte order is the finding as much as the values are. Task 3's `R8G8B8A8_UNORM` texture reads
+back `(64, 128, 192, 255)`; the swapchain is `B8G8R8A8_UNORM` and reads back `(192, 128, 64,
+255)` from the same clear, because Vulkan's clear value is specified per *component* and the
+format decides where each lands in memory. That makes the assertion a channel-order test rather
+than a repeat, and a mutation confirms it: with `ToVulkan(Format::B8G8R8A8_UNORM)` returning
+`VK_FORMAT_R8G8B8A8_UNORM`, both adapters read `(64, 128, 192, 255)` and **0 of 230400 pixels
+matched**.
+
+**The screen capture is real, and the desktop nearly made it lie.** It fronts the window,
+presents in batches until two consecutive readings agree, and `BitBlt`s one pixel from the
+*screen's* device context — the window's own DC returns black for a Vulkan window, because the
+swapchain's contents never enter its GDI surface. For an afternoon it read a stable
+`(106, 71, 35)`: the clear at 55%. The cause was not Monarc. `WindowFromPoint` at the capture
+point named a layered, topmost `Shell_SystemDim` — the overlay Windows puts over the monitor a
+system security dialog is on, and one was open. The case now asks who is on top before it
+asserts, tries the virtual screen's origin as a second position (which on this machine is the
+other display, undimmed), and **reports rather than asserts** when the answer is somebody else.
+The bytes it does assert are exact.
+
+**Both adapters can present to a window on either monitor.** Measured with
+`vkGetPhysicalDeviceSurfaceSupportKHR` on the graphics queue family device creation would pick,
+per adapter and per surface, and not assumed:
+
+| adapter | graphics family | can present to a window on the primary | on `\\.\DISPLAY5` |
+|---|---|---|---|
+| NVIDIA GeForce RTX 3070 Ti | 0 | yes | yes |
+| Intel(R) UHD Graphics 730 | 0 | yes | yes |
+
+So the Intel iGPU *can* present to the display the NVIDIA card drives on this machine, which was
+the open question. `VK_KHR_swapchain` is offered and enabled on both, so the Optional-entry
+branch of the loader's device table is not exercised here.
+
+**Swapchain parameters, as negotiated:** `B8G8R8A8_UNORM` + `VK_COLOR_SPACE_SRGB_NONLINEAR_KHR`,
+`VK_PRESENT_MODE_FIFO_KHR`, opaque composition, exclusive sharing. `minImageCount` is 2 on both
+surfaces, so `minImageCount + 1` gives **3 images against 2 frames in flight** — the two counts
+differ, which is the point of keeping them unrelated. `maxImageCount` differs by vendor: **8 on
+the NVIDIA surface and 64 on the Intel one**. Both surfaces offer
+`VK_IMAGE_USAGE_TRANSFER_SRC_BIT`, so the readback ran on both; both also offer
+`R8G8B8A8_UNORM`, which is why the "a format the surface does not offer is refused" half of one
+case reports that it did not run rather than asserting.
+
+**The command list's states are one `enum class` now, and the plan's premise about the fifth was
+wrong.** The plan deferred the refactor on the grounds that "the swapchain adds the fifth state —
+a list holding an acquired image". It does not: an acquired image is a `TextureHandle` in the
+device's own texture pool, so a list rendering into one is in exactly the state it is in for any
+other texture, and the swapchain adds no list state at all. The fifth state was already there —
+`Rendering`, the sub-state Task 3 tracked in a fourth bool — and folding it in turns the "+ pass"
+column of Task 3's table into a row of the enum. That column is where one of Task 3's three holes
+was.
+
+Sixteen boolean combinations collapse to the five that were ever real, and three unreachability
+arguments Task 3 had to make by hand stop needing to be made. Adding a sixth enumerator is a
+compile error in **eight** switch sites — seven in `VulkanCommandList.cpp`, one in
+`VulkanDevice.cpp`'s `ValidateForSubmit` — on both compilers. Verified by adding one:
+
+- MSVC: `warning C4062: enumerator 'Monarc::RHI::Detail::VulkanCommandList::State::Suspended' in
+  switch of enum 'Monarc::RHI::Detail::VulkanCommandList::State' is not handled`, fatal through
+  `error C2220`.
+- clang-cl: `error: enumeration value 'Suspended' not handled in switch [-Werror,-Wswitch]`.
+
+**RenderDoc captures, and what was machine-verified from them.** One per adapter, in
+`Build/Captures/` (outside version control — `/Build/` is git-ignored):
+
+- `monarc-firstlight-nvidia-rtx3070ti_frame345.rdc`
+- `monarc-firstlight-intel-uhd730_frame331.rdc`
+
+`renderdoccmd capture` cannot trigger a capture on its own — RenderDoc's hook polls the capture
+key inside `vkQueuePresentKHR` and requires the target's window to be the foreground one — so
+each was produced by launching `Monarc.FirstLight --frames=900 --adapter=<name>` under
+`renderdoccmd capture`, fronting the window and injecting F12 with `keybd_event`. **The contents
+were machine-verified, not eyeballed**: `renderdoccmd convert -c xml` produces an XML dump of
+every chunk, and both captures report
+
+- exactly **one** `vkCmdBeginRendering`, with `colorAttachmentCount = 1`,
+  `loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR`, `storeOp = VK_ATTACHMENT_STORE_OP_STORE`,
+  `imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL`, `renderArea = (0,0) 1280x720`,
+  `layerCount = 1`, and
+  `clearValue.color.float32 = [0.25098040699958801, 0.50196081399917603, 0.75294119119644165, 1]`
+  — which is exactly `(64, 128, 192, 255) / 255`;
+- exactly **two** `vkCmdPipelineBarrier2`, `VK_IMAGE_LAYOUT_UNDEFINED` →
+  `VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL` and `VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL` →
+  `VK_IMAGE_LAYOUT_PRESENT_SRC_KHR`;
+- one `vkQueueSubmit2`, one `vkQueuePresentKHR`, and **no** `vkCreateRenderPass` or
+  `vkCreateFramebuffer` chunk anywhere;
+- `vkCreateSwapchainKHR` with the parameters listed above.
+
+One caveat worth stating: the captures show
+`imageUsage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT`, and
+`Monarc.FirstLight` asks for colour-attachment only. RenderDoc patches the transfer-source bit in
+so that it can save the backbuffer; that value is RenderDoc's, not Monarc's.
+
+**Mutation experiments.** Each was rebuilt from a touched source, with `ninja` confirmed to have
+recompiled rather than reporting "no work to do", and reverted afterwards:
+
+| mutation | result |
+|---|---|
+| `QueryClientSize` reads `GetWindowRect` instead of `GetClientRect` | 7 of 18 window cases red, 9 assertions — including the maximise case's "no wider than the monitor" and the minimise case's `IsEmpty()` |
+| `Rebind` removed from `Window`'s move constructor | the resize case's `REQUIRE` red and the move case **CRASHED** with an SEH exception: `Create` returns by move, so without the rebind the platform writes through a dangling `Window*` immediately |
+| `ReleaseClassIfUnused` removed from `Destroy` | 13 of 18 window cases red, 15 assertions, with a cascade of `RegisterClassExW failed with Win32 error 1410` |
+| `WM_CLOSE` falls through to `DefWindowProcW` | "closing is a request" red on `IsOpen()` — **and a later case's class-registration assertion red, which was a real drift rather than the mutation**; see the commit that fixed it |
+| `ChooseSwapchainImageCount` returns `minImageCount` | `ImageCount() > kFramesInFlight` red on both adapters, and the screen capture red as well: 2 images against 2 frames in flight starves the loop |
+| `Acquire`'s "already acquired" refusal disabled | "acquiring twice without presenting is refused" red |
+| `AdoptImage` claims it owns the swapchain image | `VUID-vkDestroyImage-image-04882` ("is a presentable image controlled by the implementation"), case CRASHED, exit `0xC0000409` |
+| `ToVulkan(Format::B8G8R8A8_UNORM)` returns `VK_FORMAT_R8G8B8A8_UNORM` | both readbacks `(64, 128, 192, 255)`, **0 of 230400 pixels exact** |
+| the test's clear colour changed to `(200, 30, 10)` | 11 assertions red across both readbacks and the screen capture, every reading `(10, 30, 200, 255)` |
+| the acquire-semaphore reuse wait disabled | **no validation error and no red assertion that detects it** — see below |
+
+**One guard has no observable failure, and saying so is the extent of the claim made for it.**
+Removing the wait that retires an acquire semaphore before it is reused produced no validation
+output and no assertion that caught it: in the lockstep steady state `IDevice::BeginFrame` has
+already waited on the same timeline value, so the semaphore was retired anyway. The guard is for
+the drifted case — an out-of-date acquire skips a submission and the two counters stop agreeing —
+which this machine does not produce on demand. It stays, and it is written down as reasoned
+rather than measured.
+
+**Two other things Task 4 did not exercise, stated rather than implied.** Dragging a window
+between this machine's monitors does **not** exercise `WM_DPICHANGED`: both are 1920x1080 and
+`GetDpiForWindow` reports 96 on each, which the window tests read and log. And the
+`VK_KHR_swapchain`-absent path in `VulkanSwapchainFactory::Create` cannot be reached here,
+because both adapters offer the extension.
+
+**Departures from the plan's file listing, recorded.** The plan names
+`Private/Platform/Windows/VulkanSurface.cpp`, and that is the file added — separate from Task 2's
+`VulkanPlatform.cpp`, so that "exactly one file in the backend includes `<Windows.h>`" names a
+file whose whole job is the surface. Three private headers the plan does not name came with it:
+`Private/VulkanSurface.h` (because a header that declares surface creation must include
+`<vulkan/vulkan.h>`, and the platform .cpp has to define `VK_USE_PLATFORM_WIN32_KHR` before that
+header is first seen — a constraint worth confining to one file rather than to everything that
+reaches `Loader.h`), `Private/VulkanSwapchainFactory.h` (`VulkanDeviceFactory.h`'s shape, for the
+same reason), and `Private/WindowPlatform.h` in `Monarc.Host.Windowed` (which is what lets
+`Private/Window.cpp` be the platform-neutral half the plan names). The swapchain device tests
+live in `Monarc.Host.Windowed/TestsDevice/` rather than beside the swapchain, because they need
+both the backend and a window they can drive, and a tier-3 test reaching down to tier 2 is the
+direction the module graph allows.
+
+**Checkable claims.**
+`grep -rniE '^[[:space:]]*#[[:space:]]*include[[:space:]]*<windows\.h>' Source/` matches seven
+lines: five in `Monarc.Core`'s platform layer, one in `Monarc.Host.Windowed`, one in
+`Monarc.RHI.Vulkan`. No test in the repository includes it, which is what
+`Detail::WindowTestHooks` is for. `grep -rniE "renderpass|framebuffer|render pass" Source/`
+matches four lines, all comments — two in `Monarc/RHI/Device.h` and two in
+`VulkanCommandList.cpp`.
+
+**Counts, by suite, because the comparison with Task 3 is otherwise misleading.** Task 3's "109
+device-free cases and 504 assertions" was `Monarc.RHI` (51 / 174) plus `Monarc.RHI.Vulkan`
+(58 / 330) and did not include `Monarc.Host.Windowed`, which had three cases at the time. Now:
+
+| suite | cases | assertions |
+|---|---|---|
+| `Monarc.RHI.Tests` | 55 | 189 |
+| `Monarc.RHI.Vulkan.Tests` | 58 | 330 |
+| `Monarc.Host.Windowed.Tests` | 18 | 98 |
+| `Monarc.RHI.Vulkan.DeviceTests` | 38 | 384 |
+| `Monarc.Host.Windowed.DeviceTests` | 15 | 884 |
+
+So **131 device-free cases / 617 assertions** and **53 device-required / 1268** across the three
+A3 modules. All ten CTest entries pass on all six presets with zero warnings, and both `gpu`
+entries report **Skipped** when `--vulkan-library=` is pointed at a name that cannot resolve.
 
 ## Verification gates
 
