@@ -70,20 +70,31 @@ TEST_CASE("generation zero is a real build generation") {
 // last.
 //
 // **Measured, three ways, on both compilers.** Each of these was compiled as its own
-// translation unit under the same flags the module uses, and each is an error:
+// translation unit under the same flags the module uses, on MSVC 19.51 and clang-cl 22.1, and
+// each is an error:
 //
 // - `id = handle;` -- MSVC `error C2679: binary '=': no operator found which takes a
 //   right-hand operand of type 'Monarc::RHI::TextureHandle'`; clang-cl `error: no viable
 //   overloaded '='` with `note: candidate function (the implicit copy assignment operator)
 //   not viable: no known conversion from 'RHI::TextureHandle' (aka 'Handle<Detail::TextureTag>')
 //   to 'const ResourceId<Monarc::Render::Detail::TextureTag>'`.
-// - `id == handle` -- MSVC `error C2678: binary '==': no operator found which takes a
-//   left-hand operand of type 'Monarc::RHI::TextureHandle'`; clang-cl `error: invalid operands
-//   to binary expression ('TextureId' ... and 'RHI::TextureHandle' ...)`. **clang's two notes
-//   are the ones worth reading, because they name the mechanism**: `candidate template ignored:
-//   could not match 'Handle' against 'ResourceId'` and `candidate template ignored: could not
-//   match 'ResourceId' against 'Handle'` -- the two comparison templates each deduce their
-//   single `Tag` from both operands and discard themselves.
+// - `id == handle` -- MSVC `error C2676: binary '==': 'Monarc::Render::TextureId' does not
+//   define this operator or a conversion to a type acceptable to the predefined operator`;
+//   clang-cl `error: invalid operands to binary expression ('TextureId' (aka
+//   'ResourceId<Detail::TextureTag>') and 'TextureHandle' (aka 'Handle<Detail::TextureTag>'))`.
+//   Reversed to `handle == id` it is the same C2676 on MSVC with the other type named, and the
+//   same clang-cl error with the operands swapped: the message names whichever operand stands
+//   on the left, and neither order produces C2678. **This bullet previously recorded a C2678
+//   naming `TextureHandle` as the left-hand operand of `id == handle`, which corresponds to no
+//   compilation of either order** -- it was re-measured rather than reasoned about, and the
+//   text above is what came back.
+//   **Both compilers then name the mechanism in their notes, which is the half worth
+//   reading.** clang: `candidate template ignored: could not match 'Handle' against
+//   'ResourceId'` and `candidate template ignored: could not match 'ResourceId' against
+//   'Handle'`. MSVC says the same thing at more length: `could not deduce template argument
+//   for 'const Monarc::RHI::Handle<Tag> &' from 'Monarc::Render::TextureId'`, and the
+//   mirrored note for `ResourceId`. Either way it is the two comparison templates each
+//   deducing their single `Tag` from both operands and discarding themselves.
 // - `Takes(TextureId{})` where `Takes` wants an `RHI::TextureHandle` -- MSVC `error C2664:
 //   'void Takes(Monarc::RHI::TextureHandle)': cannot convert argument 1 from
 //   'Monarc::Render::TextureId' to 'Monarc::RHI::TextureHandle'`; clang-cl `error: no matching

@@ -94,10 +94,9 @@ template <typename Tag>
 using TextureId = ResourceId<Detail::TextureTag>;
 
 // **There is deliberately no `BufferId`, and the rule that decides it is not the one
-// `Access.h` follows.** Two membership rules are in force in this codebase and they disagree
-// here on purpose. `Monarc/RHI/Barrier.h`'s rule -- the barrier model arrives whole, because
-// an unused stage or access bit costs one row in one switch -- is what `ResourceAccess` in
-// Access.h follows, which is why that enum names buffer accesses (`IndirectRead`) that no
+// `Access.h` follows.** `Monarc/RHI/Barrier.h`'s rule -- the barrier model arrives whole,
+// because an unused stage or access bit costs one row in one switch -- is what `ResourceAccess`
+// in Access.h follows, which is why that enum names buffer accesses (`IndirectRead`) that no
 // resource can carry yet. A resource *kind* is not one switch row: it is a declaration call,
 // an inspection row, a lifetime, an alias group and a barrier type, so it follows the other
 // rule -- the one `Handles.h` states for its own absent handle types, that a resource type
