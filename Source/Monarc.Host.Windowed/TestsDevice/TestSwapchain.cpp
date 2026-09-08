@@ -684,20 +684,43 @@ TEST_CASE("THE SCREEN CAPTURE: the window's own pixels are the clear colour") {
     // of them -- which is exactly what happened: a stable `(106, 71, 35)`, the expected bytes
     // at 55%, from a layered topmost `Shell_SystemDim`.
     //
-    // Reported and skipped rather than asserted through, and **not** softened to a tolerance:
-    // where the window is the top one at that pixel the bytes below are exact, and where it is
-    // not the log names who was in the way. The swapchain readback is the assertion that needs
-    // nothing of the desktop.
+    // **Asserted and not skipped, and that is a correction to how this case first shipped.**
+    // It used to `return` here, which meant a desktop with an overlay over the window reported
+    // this case green having asserted nothing at all about its own subject. Measured rather
+    // than argued: forcing `PointOwner::isOurs` to false in `WindowAtClientPoint` left
+    // `ctest -R Monarc.Host.Windowed.DeviceTests --output-on-failure` printing `Passed` and
+    // nothing else, 15 of 15 cases green, and the only trace was the assertion total dropping
+    // from 884 to 881 -- the three exact-byte checks below, which are the entire reason this
+    // case exists. A three-in-884 drop is invisible without diffing two runs.
+    //
+    // So the two facts the capture depends on are `REQUIRE`s. A desktop that got in the way is
+    // now a red case whose log names the tenant, which is a finding; the bytes below are
+    // unchanged, so this is a refusal to decline quietly rather than a widened tolerance. The
+    // swapchain readback above remains the assertion that needs nothing of the desktop.
+    //
+    // **Two assertions and not one, because they are two different failures** -- and the single
+    // line that reported both said something self-contradictory whenever only the second was
+    // false: "the topmost window at the capture point is `Monarc.Host.Windowed.Window` and not
+    // Monarc's on any monitor tried". `onTop` is about the candidate loop above; `owner.isOurs`
+    // is about this instant, several hundred presented frames later, during which something
+    // could have come over a window that had been on top when it was positioned.
     const WindowTestHooks::PointOwner owner =
         WindowTestHooks::WindowAtClientPoint(*harness.window, centreX, centreY);
-    if (!onTop || !owner.isOurs) {
-        MONARC_LOG(SwapchainTest, Warning,
-                   "the topmost window at the capture point is \"{}\" and not Monarc's on any "
-                   "monitor tried, so the screen reading is not Monarc's to assert about; it "
-                   "read ({}, {}, {}, {})",
+    if (!onTop) {
+        MONARC_LOG(SwapchainTest, Error,
+                   "the window was not the top one at the capture point on any monitor tried, "
+                   "so the screen reading is not Monarc's; \"{}\" was there at the last look, "
+                   "and the reading was ({}, {}, {}, {})",
                    owner.className, pixel[0], pixel[1], pixel[2], pixel[3]);
-        return;
+    } else if (!owner.isOurs) {
+        MONARC_LOG(SwapchainTest, Error,
+                   "the window was the top one where it was positioned, but \"{}\" is over the "
+                   "capture point now, so the screen reading is not Monarc's; it read "
+                   "({}, {}, {}, {})",
+                   owner.className, pixel[0], pixel[1], pixel[2], pixel[3]);
     }
+    REQUIRE(onTop);
+    REQUIRE(owner.isOurs);
 
     // Blue, green and red exactly. **The alpha byte is deliberately not asserted**: a 32-bit
     // `BI_RGB` device-independent bitmap has an unused fourth byte with no defined value, so
@@ -848,28 +871,52 @@ TEST_CASE("a window moved to another monitor keeps presenting") {
                "{} monitor(s); the window starts on the one at ({}, {})-({}, {}) at {} DPI",
                first.monitorCount, first.left, first.top, first.right, first.bottom, first.dpi);
 
-    if (first.monitorCount < 2) {
-        MONARC_LOG(SwapchainTest, Warning,
-                   "this machine reports one monitor, so the monitor-drag half of this case did "
-                   "not run");
-        return;
-    }
+    // **A second monitor is a requirement this case declares, not a condition it declines
+    // on.** It used to `return` here on `monitorCount < 2`, which is the same silent-green
+    // shape the screen-capture case had: everything below is the case's whole subject, so a
+    // one-monitor machine reported it green having asserted nothing about a monitor change.
+    // Forcing `MonitorInfo::monitorCount` to 1 in `WindowTestHooks::Monitors` was enough to
+    // make the case pass with two assertions instead of nine.
+    //
+    // A `CHECK` rather than a `REQUIRE`, because the presenting half below does not need a
+    // second monitor and is worth running either way -- so a one-monitor machine gets one
+    // named failure here plus the whole present loop, rather than a green case and a warning
+    // nobody diffs. That is a deliberate trade: this suite already requires a GPU and an
+    // interactive session, and declaring the second monitor alongside them is cheaper than a
+    // coverage hole that only shows up as a smaller assertion count.
+    CHECK(first.monitorCount >= 2);
+    const bool crossMonitor = first.monitorCount >= 2;
 
-    WindowTestHooks::MoveTo(*harness.window, first.left - 1000, first.top + 100);
+    // Off to the left, which on this machine is `\\.\DISPLAY5` at `(-1920, 0)`; within the one
+    // monitor there is where the count says there is only one, so the present loop below
+    // exercises a move on any machine.
+    WindowTestHooks::MoveTo(*harness.window, crossMonitor ? first.left - 1000 : first.left + 200,
+                            first.top + 100);
     Settle(*harness.window);
 
     const WindowTestHooks::MonitorInfo second = WindowTestHooks::Monitors(*harness.window);
     MONARC_LOG(SwapchainTest, Info,
                "after the move it is on the one at ({}, {})-({}, {}) at {} DPI", second.left,
                second.top, second.right, second.bottom, second.dpi);
-    REQUIRE(second.left != first.left);
 
-    // **Both monitors report the same DPI here, so this does not exercise WM_DPICHANGED**, and
-    // that is stated rather than implied: the window keeps its client size, so the swapchain
-    // does not even need recreating. What the case does cover is a present to a surface whose
-    // window has moved to a different display -- which some drivers answer with
-    // `VK_SUBOPTIMAL_KHR`, and the loop below handles that the way a frame loop must.
-    CHECK(second.dpi == first.dpi);
+    if (crossMonitor) {
+        REQUIRE(second.left != first.left);
+
+        // **Both monitors report the same DPI here, so this does not exercise WM_DPICHANGED**,
+        // and that is stated rather than implied: the window keeps its client size, so the
+        // swapchain does not even need recreating. What the case does cover is a present to a
+        // surface whose window has moved to a different display -- which some drivers answer
+        // with `VK_SUBOPTIMAL_KHR`, and the loop below handles that the way a frame loop must.
+        CHECK(second.dpi == first.dpi);
+    } else {
+        MONARC_LOG(SwapchainTest, Warning,
+                   "this machine reports one monitor, so the move above was within it and the "
+                   "cross-monitor half of this case is unexercised here -- the failed CHECK "
+                   "above is what says so, rather than a return nobody sees");
+        // The move stayed on the one monitor, which is the only thing there is to assert about
+        // it -- and it is an assertion rather than nothing.
+        CHECK(second.left == first.left);
+    }
 
     Monarc::u32 recreations = 0;
     for (int frame = 0; frame < 10; ++frame) {
@@ -926,6 +973,73 @@ TEST_CASE("acquiring twice without presenting is refused rather than leaking a s
     // exactly what the refusals are protecting. `Recreate` would do it too; this does it the
     // ordinary way.
     REQUIRE(RecordFrame(**commands, first->texture, harness.swapchain->Extent(),
+                        Monarc::RHI::BufferHandle{})
+                .has_value());
+    REQUIRE(harness.swapchain->SubmitForPresent(harness.device->GraphicsQueue(), **commands)
+                .has_value());
+    REQUIRE(harness.swapchain->Present().has_value());
+    REQUIRE(harness.device->WaitIdle().has_value());
+}
+
+TEST_CASE("acquiring without a BeginFrame in between is what the acquire-slot wait is for") {
+    // **The sequence that reaches `AcquireSlot::consumedByTimelineValue`'s wait with nothing
+    // else having covered it**, walked here because the comment beside that wait used to
+    // justify it with a case that cannot happen. `BeginFrame` advances the device's frame index
+    // on every success and `acquireCursor` only on a successful acquire, so the frame index runs
+    // ahead of the cursor and never behind -- and ahead means `BeginFrame`'s wait is on a
+    // timeline value at least as new as the one the reused acquire slot recorded. The "drifted"
+    // case is therefore the one that *cannot* strain the wait.
+    //
+    // What can is this: `Acquire` never consults the device's frame state, and `phase` is
+    // `Idle` again after `Present`, so acquiring before this frame's `BeginFrame` -- or without
+    // one at all -- is not refused. After two ordinary frames each acquire slot holds a
+    // recorded value and *neither* frame slot has been waited on, so the third acquire finds
+    // slot 0's value uncovered.
+    //
+    // **What this case asserts is that the sequence exists and completes** -- not that the wait
+    // blocked, which depends on how far the GPU has got and is not something this machine
+    // produces on demand. The queue's completed value is logged immediately before the third
+    // acquire so the record says how close it came. Twelve runs in isolation: the recorded
+    // value is always 1 and the queue has always submitted up to 2, and the completed value
+    // read 2 ten times and 1 twice -- so the *second* frame's submission was still in flight
+    // twice, one step from the first frame's being in flight too. A reading of 0 is what would
+    // make the wait block; it did not occur.
+    REQUIRE_FALSE(Adapters().IsEmpty());
+
+    Harness harness;
+    REQUIRE(harness.Open(Adapters()[0], false).has_value());
+
+    Monarc::u64 firstValue = 0;
+    for (int frame = 0; frame < 2; ++frame) {
+        harness.window->PumpEvents();
+        const FrameResult result = PresentOneFrame(harness, Monarc::RHI::BufferHandle{});
+        REQUIRE(result.presented);
+        if (frame == 0) {
+            firstValue = result.timelineValue;
+        }
+    }
+    REQUIRE(firstValue != 0);
+
+    // The value the guard is about to wait on is the first frame's, because the acquire cursor
+    // has two slots and has just wrapped back to the one that frame used.
+    const Monarc::Result<Monarc::u64> completed =
+        harness.device->GraphicsQueue().CompletedValue();
+    REQUIRE(completed.has_value());
+    MONARC_LOG(SwapchainTest, Info,
+               "before an acquire with no BeginFrame in front of it: the acquire slot recorded "
+               "{}, the queue has submitted up to {} and completed {}",
+               firstValue, harness.device->GraphicsQueue().LastSubmittedValue(), *completed);
+
+    const Monarc::Result<Monarc::RHI::AcquiredImage> acquired = harness.swapchain->Acquire();
+    REQUIRE(acquired.has_value());
+    CHECK(acquired->outcome == Monarc::RHI::AcquireOutcome::Acquired);
+
+    // And the frame finishes, which is what makes this a usable sequence rather than a call
+    // that merely was not refused -- the list comes from a `BeginFrame` taken *after* the
+    // acquire.
+    const Monarc::Result<Monarc::RHI::ICommandList*> commands = harness.device->BeginFrame();
+    REQUIRE(commands.has_value());
+    REQUIRE(RecordFrame(**commands, acquired->texture, harness.swapchain->Extent(),
                         Monarc::RHI::BufferHandle{})
                 .has_value());
     REQUIRE(harness.swapchain->SubmitForPresent(harness.device->GraphicsQueue(), **commands)
@@ -1104,6 +1218,13 @@ TEST_CASE("a swapchain is refused what it cannot honour") {
     base.extent  = window->ClientSize();
     base.format  = kSwapchainFormat;
 
+    // **Counted, because three of these four refusals are machine-independent and the fourth
+    // is not.** The fourth declines on this machine -- see below -- and a case that quietly
+    // dropped one of the other three would look exactly like this one does today. The count is
+    // asserted before the base attempt, so a block that stopped running is a failure rather
+    // than a smaller assertion total nobody diffs.
+    Monarc::u32 refusals = 0;
+
     {
         // No window. `SurfaceDescription::IsEmpty()` is what refuses it, before any Vulkan call.
         Monarc::RHI::SwapchainDescription description = base;
@@ -1111,6 +1232,7 @@ TEST_CASE("a swapchain is refused what it cannot honour") {
         const auto refused                           = attempt(description);
         REQUIRE_FALSE(refused.has_value());
         CHECK(refused.error().code == Monarc::ErrorCode::InvalidArgument);
+        ++refusals;
     }
     {
         // An empty extent, which is the minimised case arriving through creation rather than
@@ -1120,6 +1242,7 @@ TEST_CASE("a swapchain is refused what it cannot honour") {
         const auto refused                            = attempt(description);
         REQUIRE_FALSE(refused.has_value());
         CHECK(refused.error().code == Monarc::ErrorCode::InvalidArgument);
+        ++refusals;
     }
     {
         Monarc::RHI::SwapchainDescription description = base;
@@ -1127,27 +1250,43 @@ TEST_CASE("a swapchain is refused what it cannot honour") {
         const auto refused                           = attempt(description);
         REQUIRE_FALSE(refused.has_value());
         CHECK(refused.error().code == Monarc::ErrorCode::InvalidArgument);
+        ++refusals;
     }
+
+    // Three, and they are the three that do not depend on what this surface offers.
+    CHECK(refusals == 3);
+
     {
         // A format the surface does not offer. **Refused rather than substituted**, which is
         // what keeps every byte this suite asserts a statement about the format that was asked
-        // for. `R8G8B8A8_UNORM` is a real format that Windows surfaces do not present in.
+        // for.
+        //
+        // **This half does not run on this machine, and the code says so rather than leaving
+        // it to Task 4's report.** `R8G8B8A8_UNORM` was picked as a format Windows surfaces do
+        // not present in; both adapters here offer it, so `attempt` succeeds and the refusal
+        // is unexercised. The branch is therefore not a skip: a surface that offers the format
+        // has to *honour* it exactly, which is the same "no silent substitution" guarantee
+        // seen from the other side, so one of the two branches asserts about Monarc either
+        // way and neither returns.
         Monarc::RHI::SwapchainDescription description = base;
         description.format                           = Monarc::RHI::Format::R8G8B8A8_UNORM;
-        const auto refused                           = attempt(description);
-        if (refused.has_value()) {
-            // A finding rather than a failure: a surface that *does* offer it is allowed to,
-            // and the assertion below would then be wrong about this machine rather than about
-            // Monarc.
+        auto       attempted                         = attempt(description);
+        if (attempted.has_value()) {
             MONARC_LOG(SwapchainTest, Warning,
                        "this surface offers R8G8B8A8_UNORM, so the format-refusal half of this "
-                       "case did not run");
+                       "case is unexercised on this machine; what is asserted instead is that "
+                       "the format asked for is the format that came back");
+            CHECK(attempted->ImageFormat() == Monarc::RHI::Format::R8G8B8A8_UNORM);
+            // Before the base attempt below, so two swapchains never name this window at once.
+            // `~VulkanSwapchain` would do it, and the explicit call is what makes the ordering
+            // a statement rather than a side effect of scope.
+            attempted->Shutdown();
         } else {
-            CHECK(refused.error().code == Monarc::ErrorCode::Unsupported);
+            CHECK(attempted.error().code == Monarc::ErrorCode::Unsupported);
         }
     }
 
-    // And the base description still works, so the four refusals are not passing because
+    // And the base description still works, so the refusals above are not passing because
     // swapchain creation is broken.
     Monarc::Result<Monarc::RHI::VulkanSwapchain> ok = attempt(base);
     REQUIRE(ok.has_value());
