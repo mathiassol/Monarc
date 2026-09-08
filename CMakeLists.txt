@@ -108,7 +108,13 @@ if(MONARC_BUILD_TESTS)
                 "${CMAKE_SOURCE_DIR}/Tools/check_architecture.py"
                 "${CMAKE_BINARY_DIR}/module-graph.json"
                 "${CMAKE_SOURCE_DIR}")
-    set_tests_properties(Architecture.Gates PROPERTIES LABELS "architecture")
+    # TIMEOUT for the reason CMake/MonarcTest.cmake gives at length: CTest's own default is
+    # 1500 seconds, so anything that hangs costs 25 minutes per preset before it is reported.
+    # Both gate entries are string-matching over the source tree and run in about 0.25 s on
+    # every preset, so 60 s is 240x the measured worst.
+    set_tests_properties(Architecture.Gates PROPERTIES
+        LABELS "architecture"
+        TIMEOUT ${MONARC_TEST_TIMEOUT_SECONDS})
 
     # The gates are string-matching over source trees -- the kind of code that regresses
     # silently, and which has already needed two non-obvious fixes. These tests build real
@@ -117,5 +123,7 @@ if(MONARC_BUILD_TESTS)
         NAME Architecture.GateTests
         COMMAND ${Python3_EXECUTABLE}
                 "${CMAKE_SOURCE_DIR}/Tools/test_check_architecture.py")
-    set_tests_properties(Architecture.GateTests PROPERTIES LABELS "architecture")
+    set_tests_properties(Architecture.GateTests PROPERTIES
+        LABELS "architecture"
+        TIMEOUT ${MONARC_TEST_TIMEOUT_SECONDS})
 endif()

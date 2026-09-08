@@ -24,6 +24,16 @@ jobs:
   build:
     name: ${{ matrix.preset }}
     runs-on: windows-latest
+
+    # A ceiling against a hang, not a performance target -- and it is deliberately generous,
+    # because the only measured input is local: a clean configure and build of one preset takes
+    # two to four minutes on a developer machine, and a runner adds checkout, a doctest fetch,
+    # and possibly a `choco install llvm`. GitHub's default is 360 minutes, which is a whole
+    # afternoon of runner time for a job that will never finish. Per-*test* hangs are bounded
+    # separately and much more tightly by the CTest TIMEOUT properties in
+    # CMake/MonarcTest.cmake; this catches the configure and build steps, which no CTest
+    # property can.
+    timeout-minutes: 45
     strategy:
       # Never cancel the other legs: when MSVC and Clang disagree, seeing *both*
       # results is the entire point of running both. clang-asan catches the aliasing
@@ -115,6 +125,7 @@ jobs:
   docs:
     name: docs
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7

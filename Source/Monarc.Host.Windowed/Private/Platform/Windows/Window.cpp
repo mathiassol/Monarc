@@ -529,6 +529,19 @@ void WindowPlatform::Pump(Window& window, bool wait) {
     if (handle == nullptr) {
         // Nothing to pump, and nothing to clear either: a closed window's last events stay
         // readable, which is what lets a loop see the close request that closed it.
+        //
+        // **Load-bearing, and two experiments say how.** Forced past -- `if (false && handle
+        // == nullptr)` -- the window suite hangs rather than failing: `WaitMessage` on a
+        // closed window blocks in the kernel forever, and nothing in the process wakes it.
+        // That is why both test suites now carry a CTest `TIMEOUT` (CMake/MonarcTest.cmake);
+        // without one, CTest's own default is 1500 seconds and a hang costs 25 minutes per
+        // preset before it is even reported.
+        //
+        // Deleting the guard outright does not compile, which is a small guarantee nobody
+        // asked for: `handle` is not referenced again in this function -- `PeekMessageW` is
+        // deliberately given `nullptr` -- so `/W4 /WX` answers with `warning C4189: 'handle':
+        // local variable is initialized but not referenced`, fatal through `error C2220`.
+        // Measured on MSVC 19.51.
         return;
     }
 

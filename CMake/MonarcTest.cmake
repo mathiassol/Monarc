@@ -1,6 +1,32 @@
 include_guard(GLOBAL)
 include(MonarcTargetOptions)
 
+# **Every CTest entry gets a TIMEOUT, because a hang is a failure mode this tree has already
+# produced and nothing was bounding it.** Disabling `WindowPlatform::Pump`'s null-handle guard
+# makes `Monarc.Host.Windowed.Tests` block forever in `WaitMessage`; CTest does report that as
+# `(Timeout)` rather than as slowness, but only after **its own default of 1500 seconds** --
+# so a single hang cost 25 minutes per preset, six presets deep in CI, and
+# .github/workflows/ci.yml sets no `timeout-minutes` either.
+#
+# The numbers are measured, not guessed. Slowest real run of each kind across all six presets
+# (msvc-debug/release, clang-debug/release/asan/ubsan) on this machine:
+#
+#   Monarc.Host.Windowed.DeviceTests   8.79 s   <- slowest of all; presents ~90 frames
+#   Monarc.RHI.Vulkan.DeviceTests      2.64 s
+#   Monarc.Host.Windowed.Tests         1.00 s   <- slowest unit suite; opens real windows
+#   Monarc.RHI.Vulkan.Probe            0.45 s
+#   every other unit suite            <0.25 s
+#
+# The device figure understates the *worst* case and the headroom is sized for that rather than
+# for what was observed. The screen-capture case presents in batches until two readings agree,
+# up to 25 batches of 20 frames; it settled after 2 here, so the same suite can legitimately
+# present about 580 frames instead of about 90. Under FIFO that is display-rate bound: roughly
+# 18 s at 60 Hz and 27 s at 30 Hz. 180 s is therefore ~20x the measured run and ~6.7x that
+# worst case, which leaves a hang detectable in three minutes instead of twenty-five while
+# still not policing a slow machine. 60 s for the rest is 60x their measured worst.
+set(MONARC_TEST_TIMEOUT_SECONDS 60)
+set(MONARC_DEVICE_TEST_TIMEOUT_SECONDS 180)
+
 # The shared body of monarc_test_module() and monarc_device_test_module(): build one test
 # executable from `source_dir` under the calling module's directory, link doctest and the
 # module, and hand it back through `out_target`. Nothing is registered with CTest here --
@@ -57,7 +83,9 @@ function(monarc_test_module module)
     endif()
 
     add_test(NAME ${_target} COMMAND ${_target})
-    set_tests_properties(${_target} PROPERTIES LABELS "unit")
+    set_tests_properties(${_target} PROPERTIES
+        LABELS "unit"
+        TIMEOUT ${MONARC_TEST_TIMEOUT_SECONDS})
 endfunction()
 
 # Builds a module's device-required tests, from its TestsDevice/ directory, as a **separate
@@ -86,7 +114,8 @@ function(monarc_device_test_module module)
     add_test(NAME ${_target} COMMAND ${_target})
     set_tests_properties(${_target} PROPERTIES
         LABELS "gpu"
-        SKIP_RETURN_CODE 77)
+        SKIP_RETURN_CODE 77
+        TIMEOUT ${MONARC_DEVICE_TEST_TIMEOUT_SECONDS})
 endfunction()
 
 # Registers a CTest entry whose job is to print, not to assert.
@@ -114,5 +143,7 @@ function(monarc_probe_test name)
     endif()
 
     add_test(NAME ${name} COMMAND ${ARGN})
-    set_tests_properties(${name} PROPERTIES LABELS "probe")
+    set_tests_properties(${name} PROPERTIES
+        LABELS "probe"
+        TIMEOUT ${MONARC_TEST_TIMEOUT_SECONDS})
 endfunction()
