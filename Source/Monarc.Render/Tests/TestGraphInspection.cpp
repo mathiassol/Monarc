@@ -271,7 +271,7 @@ TEST_CASE("the FirstLight frame renders exactly this text") {
           "resource 0 import texture=4:1 "
           "incoming=Undefined/ColorAttachmentOutput(0x20)/None(0x0) "
           "outgoing=PresentSource/None(0x0)/None(0x0)\n"
-          "access 0 pass=0 resource=0:0 access=ColorAttachmentWrite\n");
+          "access 0 decl-pass=0 resource=0:0 access=ColorAttachmentWrite\n");
 }
 
 TEST_CASE("the same declaration renders identically from two graphs") {
@@ -309,13 +309,13 @@ TEST_CASE("a transient renders no import line") {
           "pass 0 order=0 queue=Graphics culled=no record=no name=\"Offscreen\"\n"
           "resource 0 id=0:0 origin=Transient format=B8G8R8A8_UNORM extent=1280x720 usage=0x1 "
           "lifetime=none..none alias=none name=\"Target\"\n"
-          "access 0 pass=0 resource=0:0 access=ColorAttachmentWrite\n");
+          "access 0 decl-pass=0 resource=0:0 access=ColorAttachmentWrite\n");
 }
 
 TEST_CASE("an access line renders its pass, not its own row number") {
-    // **The `access` line's `pass=` field had no text coverage until this case.** Every other
-    // exact-text case here declares one access from pass 0, so the row index and the pass index
-    // are both `0` and a rendering that emitted either would produce the same report --
+    // **The `access` line's `decl-pass=` field had no text coverage until this case.** Every
+    // other exact-text case here declares one access from pass 0, so the row index and the pass
+    // index are both `0` and a rendering that emitted either would produce the same report --
     // replacing `access.pass` with the loop counter passed the whole suite. The data is covered
     // structurally in TestPassDeclaration.cpp; this is the projection.
     //
@@ -345,8 +345,55 @@ TEST_CASE("an access line renders its pass, not its own row number") {
           "pass 1 order=1 queue=Graphics culled=no record=no name=\"Consumer\"\n"
           "resource 0 id=0:0 origin=Transient format=B8G8R8A8_UNORM extent=1280x720 usage=0x1 "
           "lifetime=none..none alias=none name=\"Target\"\n"
-          "access 0 pass=1 resource=0:0 access=ColorAttachmentWrite\n"
-          "access 1 pass=1 resource=0:0 access=ColorAttachmentRead\n");
+          "access 0 decl-pass=1 resource=0:0 access=ColorAttachmentWrite\n"
+          "access 1 decl-pass=1 resource=0:0 access=ColorAttachmentRead\n");
+}
+
+TEST_CASE("the resource lines render their own row number, not the id's index") {
+    // **The same hole as the case above, on the other line that has its shape -- and the fix
+    // that closed the `access` line landed on only one of the two.** Replacing the `resource`
+    // line's row number with `resource.id.index` passed the whole suite.
+    //
+    // **A second resource does not close it, which is what makes this case hand-built.**
+    // `DeclareTransient` and `DeclareImport` both hand out `{m_resources.Size(), generation}`,
+    // so in any graph a declaration can produce a resource's id index *is* its row -- with two
+    // resources, with twenty. The two numbers are equal by construction, and a rendering that
+    // emitted either produces identical text. Separating them needs an inspection nothing
+    // declared, exactly as the execution-order case does.
+    //
+    // Both lines take the row number, so both are pinned: the imported resource is row 1 and
+    // carries id index 2, and its `import` line has to say 1 as well.
+    Monarc::Render::ResourceInspection resources[2] = {};
+    resources[0].name        = "Scratch";
+    resources[0].id          = TextureId::ForTesting(5, 3);
+    resources[0].origin      = ResourceOrigin::Transient;
+    resources[0].description = kSwapchainDescription;
+    resources[1].name            = "Swapchain";
+    resources[1].id              = TextureId::ForTesting(2, 3);
+    resources[1].origin          = ResourceOrigin::Imported;
+    resources[1].description     = kSwapchainDescription;
+    resources[1].importedTexture = TextureHandle::ForTesting(4, 1);
+    resources[1].incoming        = TextureState{TextureLayout::Undefined,
+                                                PipelineStage::ColorAttachmentOutput, Access::None};
+    resources[1].outgoing =
+        TextureState{TextureLayout::PresentSource, PipelineStage::None, Access::None};
+
+    GraphInspection inspection{};
+    inspection.phase           = GraphPhase::Compiled;
+    inspection.buildGeneration = 3;
+    inspection.resources       = resources;
+
+    char buffer[2048] = {};
+    CHECK(Render(inspection, buffer) ==
+          "graph build=3 phase=Compiled\n"
+          "counts passes=0 resources=2 accesses=0 barriers=0 diagnostics=0 dropped=0\n"
+          "resource 0 id=5:3 origin=Transient format=B8G8R8A8_UNORM extent=1280x720 usage=0x1 "
+          "lifetime=none..none alias=none name=\"Scratch\"\n"
+          "resource 1 id=2:3 origin=Imported format=B8G8R8A8_UNORM extent=1280x720 usage=0x1 "
+          "lifetime=none..none alias=none name=\"Swapchain\"\n"
+          "resource 1 import texture=4:1 "
+          "incoming=Undefined/ColorAttachmentOutput(0x20)/None(0x0) "
+          "outgoing=PresentSource/None(0x0)/None(0x0)\n");
 }
 
 TEST_CASE("the pass lines come out in execution order, culled passes last") {
@@ -421,9 +468,69 @@ TEST_CASE("a refused declaration renders as a diagnostic line") {
           "graph build=0 phase=CompileFailed\n"
           "counts passes=1 resources=0 accesses=0 barriers=0 diagnostics=1 dropped=0\n"
           "pass 0 order=none queue=Graphics culled=no record=no name=\"Consumer\"\n"
-          "diagnostic 0 kind=UnknownResource code=NotFound pass=0 resource=7:0 "
+          "diagnostic 0 kind=UnknownResource code=NotFound decl-pass=0 resource=7:0 group=none "
           "message=\"PassBuilder::Read/Write: that id names no resource in the current "
           "build\"\n");
+}
+
+TEST_CASE("diagnostics of one report carry their group, and overlapping reports stay apart") {
+    // **The case that makes `GraphDiagnostic::group`'s claim checkable rather than asserted.**
+    // That field exists so that Task 2's "report a dependency cycle naming the passes" has
+    // somewhere to go, and its comment argues a group id against a second `pass` field and
+    // against an inline pass list. What decides it is the case below: two cycles that *share* a
+    // pass. Under one `pass` field per row these four rows are four unrelated refusals and no
+    // reader can reassemble either cycle; under a group id they are two reports of two passes
+    // each, and pass 2 appearing in both is expressible rather than a contradiction.
+    //
+    // Hand-built, because nothing detects a cycle yet -- Task 2 does -- and carrying an
+    // existing `kind`, because Task 2 brings its own enumerator and this module does not add
+    // enumerators nothing emits. What is under test here is the grouping and its rendering, not
+    // the kind.
+    //
+    // The standalone row beside them is the shape every refusal a *declaration* produces has:
+    // `group=none`, because it is about one pass. And `dropped=2` is there because the two
+    // accountings have to coexist -- a clipped report still says which group each surviving row
+    // belonged to, which is the property an inline pass list would have had to reproduce inside
+    // a single row.
+    Monarc::Render::GraphDiagnostic diagnostics[5] = {};
+    for (int i = 0; i < 4; ++i) {
+        diagnostics[i].kind    = DiagnosticKind::UnknownPass;
+        diagnostics[i].code    = Monarc::ErrorCode::NotFound;
+        diagnostics[i].message = "in a cycle";
+    }
+    diagnostics[0].pass  = 1;
+    diagnostics[0].group = 0;
+    diagnostics[1].pass  = 2;
+    diagnostics[1].group = 0;
+    diagnostics[2].pass  = 2;
+    diagnostics[2].group = 1;
+    diagnostics[3].pass  = 3;
+    diagnostics[3].group = 1;
+    diagnostics[4].kind     = DiagnosticKind::DuplicateAccess;
+    diagnostics[4].code     = Monarc::ErrorCode::AlreadyExists;
+    diagnostics[4].message  = "on its own";
+    diagnostics[4].pass     = 0;
+    diagnostics[4].resource = TextureId::ForTesting(1, 0);
+
+    GraphInspection inspection{};
+    inspection.phase              = GraphPhase::CompileFailed;
+    inspection.diagnostics        = diagnostics;
+    inspection.diagnosticsDropped = 2;
+
+    char buffer[2048] = {};
+    CHECK(Render(inspection, buffer) ==
+          "graph build=0 phase=CompileFailed\n"
+          "counts passes=0 resources=0 accesses=0 barriers=0 diagnostics=5 dropped=2\n"
+          "diagnostic 0 kind=UnknownPass code=NotFound decl-pass=1 resource=none group=0 "
+          "message=\"in a cycle\"\n"
+          "diagnostic 1 kind=UnknownPass code=NotFound decl-pass=2 resource=none group=0 "
+          "message=\"in a cycle\"\n"
+          "diagnostic 2 kind=UnknownPass code=NotFound decl-pass=2 resource=none group=1 "
+          "message=\"in a cycle\"\n"
+          "diagnostic 3 kind=UnknownPass code=NotFound decl-pass=3 resource=none group=1 "
+          "message=\"in a cycle\"\n"
+          "diagnostic 4 kind=DuplicateAccess code=AlreadyExists decl-pass=0 resource=1:0 "
+          "group=none message=\"on its own\"\n");
 }
 
 TEST_CASE("a hand-built inspection renders its Task 2 and Task 3 fields") {
@@ -483,10 +590,11 @@ TEST_CASE("a hand-built inspection renders its Task 2 and Task 3 fields") {
           "pass 1 order=none queue=Graphics culled=yes record=no name=\"Culled\"\n"
           "resource 0 id=0:3 origin=Transient format=B8G8R8A8_UNORM extent=1280x720 usage=0x1 "
           "lifetime=0..1 alias=2 name=\"Depth\"\n"
-          "barrier 0 resource=0:3 before-pass=none layout=ColorAttachment->PresentSource "
+          "barrier 0 resource=0:3 before-order=none layout=ColorAttachment->PresentSource "
           "sync=ColorAttachmentOutput(0x20)->None(0x0) "
           "access=ColorAttachmentWrite(0x100)->None(0x0) "
-          "cause=PassAccess:0:ColorAttachmentWrite->ImportOutgoing:none:ColorAttachmentRead\n");
+          "cause=PassAccess:order=0:ColorAttachmentWrite->"
+          "ImportOutgoing:order=none:ColorAttachmentRead\n");
 }
 
 TEST_CASE("the widest ids and sentinels render without being clipped") {

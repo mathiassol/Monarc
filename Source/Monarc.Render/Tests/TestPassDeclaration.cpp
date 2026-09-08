@@ -460,6 +460,14 @@ TEST_CASE("importing the same texture twice is refused") {
     // The diagnostic names the id the *first* import produced, which is what a reader needs in
     // order to find the declaration that already owns the handle.
     CHECK(inspection.diagnostics[0].resource == *once);
+    // **And it names the pass that made the refused declaration, which is pass 1 here.** This
+    // is the one case in the suite that refuses from a non-zero pass, and until this line every
+    // assertion on `GraphDiagnostic::pass` anywhere checked `== 0` -- so `RenderGraph::Refuse`
+    // could have hard-coded zero and the whole suite would have agreed with it.
+    CHECK(inspection.diagnostics[0].pass == 1u);
+    // Every refusal a declaration produces is about one pass, so none of them belongs to a
+    // multi-row report. See `GraphDiagnostic::group`.
+    CHECK(inspection.diagnostics[0].group == Monarc::Render::kNoDiagnosticGroup);
 
     // A different texture imports fine, which is what stops the rule from being "one import
     // per build".

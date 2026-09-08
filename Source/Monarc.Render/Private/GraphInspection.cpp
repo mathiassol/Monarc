@@ -300,9 +300,15 @@ void WriteResourceLines(TextWriter& writer, usize index, const ResourceInspectio
 }
 
 void WriteBarrierLine(TextWriter& writer, usize index, const DerivedBarrier& barrier) {
-    writer.Line("barrier {} resource={} before-pass={} layout={}->{} "
+    // `before-order=` and the `order=` inside each cause are execution positions, where the
+    // `decl-pass=` on an access or diagnostic line is a declaration index. Every pass number
+    // in this format says which of the two it is -- see `WriteInspectionText`'s comment, and
+    // note that the two coincide until Task 2 reorders something, so the naming is what stops
+    // a reader from learning the wrong one first. Only the numbers are marked: `PassAccess`
+    // and `ColorAttachmentWrite` in a cause triple cannot be mistaken for an index.
+    writer.Line("barrier {} resource={} before-order={} layout={}->{} "
                 "sync={}(0x{:x})->{}(0x{:x}) access={}(0x{:x})->{}(0x{:x}) "
-                "cause={}:{}:{}->{}:{}:{}\n",
+                "cause={}:order={}:{}->{}:order={}:{}\n",
                 index, Describe(barrier.resource).Get(),
                 DescribeOptional(barrier.emittedBeforePass, kNoPass).Get(),
                 RHI::ToString(barrier.layoutBefore), RHI::ToString(barrier.layoutAfter),
@@ -342,7 +348,7 @@ InspectionText WriteInspectionText(const GraphInspection& inspection, std::span<
 
     for (usize i = 0; i < inspection.accesses.size(); ++i) {
         const AccessInspection& access = inspection.accesses[i];
-        writer.Line("access {} pass={} resource={} access={}\n", i, access.pass,
+        writer.Line("access {} decl-pass={} resource={} access={}\n", i, access.pass,
                     Describe(access.resource).Get(), ToString(access.access));
     }
 
@@ -352,9 +358,12 @@ InspectionText WriteInspectionText(const GraphInspection& inspection, std::span<
 
     for (usize i = 0; i < inspection.diagnostics.size(); ++i) {
         const GraphDiagnostic& diagnostic = inspection.diagnostics[i];
-        writer.Line("diagnostic {} kind={} code={} pass={} resource={} message=\"{}\"\n", i,
-                    ToString(diagnostic.kind), Monarc::ToString(diagnostic.code),
-                    DescribeOptional(diagnostic.pass, kNoPass).Get(), Describe(diagnostic.resource).Get(),
+        writer.Line("diagnostic {} kind={} code={} decl-pass={} resource={} group={} "
+                    "message=\"{}\"\n",
+                    i, ToString(diagnostic.kind), Monarc::ToString(diagnostic.code),
+                    DescribeOptional(diagnostic.pass, kNoPass).Get(),
+                    Describe(diagnostic.resource).Get(),
+                    DescribeOptional(diagnostic.group, kNoDiagnosticGroup).Get(),
                     diagnostic.message);
     }
 

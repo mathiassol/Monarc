@@ -169,7 +169,13 @@ made it fail on purpose, and gate 3 had nothing real to forbid until A3.
 All of this is pure computation over declarations. If any of it needs a device, stop and say so.
 
 - [ ] Build the dependency graph from declared reads and writes. Detect a cycle and report it
-      naming the passes, rather than looping or asserting.
+      naming the passes, rather than looping or asserting. **The vehicle exists**: one
+      `GraphDiagnostic` per pass in the cycle, all carrying the same `group`, plus a new
+      `DiagnosticKind`. `GraphDiagnostic::group` argues why a group id and not a second `pass`
+      field or an inline pass list, and *"diagnostics of one report carry their group, and
+      overlapping reports stay apart"* in Tests/TestGraphInspection.cpp already renders the
+      shape by hand — including two cycles that share a pass, which is the case one `pass` field
+      per row cannot express.
 - [ ] Cull passes whose outputs nothing consumes, transitively. A pass writing only to a
       culled pass's input is itself culled; a pass writing an *imported* resource is never
       culled, because something outside the graph consumes it.
@@ -187,7 +193,11 @@ All of this is pure computation over declarations. If any of it needs a device, 
 - [ ] Aliasing: two non-overlapping lifetimes group; two overlapping do not; two
       non-overlapping with incompatible descriptions do not; and a resource never read groups
       with nothing.
-- [ ] Cycles: a two-pass cycle and a three-pass cycle each report the passes involved.
+- [ ] Cycles: a two-pass cycle and a three-pass cycle each report the passes involved, one
+      diagnostic per member sharing a `group`; and two cycles in one graph stay apart. A cycle
+      longer than the diagnostics pool has room for must still leave every surviving row
+      grouped, with `diagnosticsDropped` non-zero — the accounting the group id was chosen to
+      compose with.
 
 **Every one of these must be able to fail.** Six cases were deleted on the A3 branch for
 reporting green having asserted nothing, and 45 assertions for being tautologies. Before

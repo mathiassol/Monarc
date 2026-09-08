@@ -46,6 +46,10 @@ inline constexpr u32 kNoPass = static_cast<u32>(-1);
 /// No aliasing group -- a resource that shares memory with nothing.
 inline constexpr u32 kNoAliasGroup = static_cast<u32>(-1);
 
+/// No diagnostic group -- a refusal that stands alone rather than being one row of a report
+/// about several passes at once. See `GraphDiagnostic::group`.
+inline constexpr u32 kNoDiagnosticGroup = static_cast<u32>(-1);
+
 /// How far through the three phases a graph is.
 enum class GraphPhase : u32 {
     /// Accepting declarations. Where a graph is after construction and after `Reset`.
@@ -369,8 +373,29 @@ enum class DiagnosticKind : u32 {
 /// So every refusal is *also* recorded here, structurally: the kind, the code and literal the
 /// caller was handed, and the pass and resource involved.
 ///
-/// Task 2's requirement that a dependency cycle be "reported naming the passes" is the same
-/// problem and wants the same vehicle, and this is where its answer goes.
+/// **Task 2's requirement that a dependency cycle be "reported naming the passes" is the same
+/// problem and wants the same vehicle, and `group` below is what makes this struct able to
+/// carry it.** One `pass` field cannot. A cycle's identity is the *set* of passes in it, so one
+/// diagnostic per member loses the grouping -- two overlapping cycles arrive as six unrelated
+/// rows -- and a cycle longer than the room `maxDiagnostics` has left is cut in half, at which
+/// point `diagnosticsDropped` says a number and nothing says which cycle the missing rows
+/// belonged to.
+///
+/// **A group id rather than a second `pass` field or an inline pass list, because a cycle's
+/// length is not bounded by anything this type is in a position to pick.** A second field caps
+/// the expressible cycle at two passes. An inline list caps it at whatever N is chosen and then
+/// needs its own truncation accounting *inside* one row -- a second copy of the thing
+/// `diagnosticsDropped` already does once for the list -- and pays for N passes in all
+/// thirty-two rows of a pool where one kind of refusal uses them. A `u32` costs neither, keeps
+/// this type trivially copyable and defaulted-comparable -- which both suites that assert on it
+/// rely on -- and composes with the truncation the list already reports: a reader of a clipped
+/// report still sees that the surviving rows of group 0 name passes 3 and 7, and that something
+/// was dropped.
+///
+/// What it does **not** express is the order round the cycle -- only membership, which is what
+/// "naming the passes" asks for. Rows render in the order they were recorded, so a detector
+/// that pushes a cycle's members in cycle order gets the order out of the list's own order for
+/// nothing; one that does not has lost nothing this field promised.
 struct GraphDiagnostic {
     DiagnosticKind kind = DiagnosticKind::PassPoolExhausted;
 
@@ -386,6 +411,17 @@ struct GraphDiagnostic {
     /// The resource involved, or an invalid id where none is. For `UnknownResource` this is
     /// the id that failed to resolve, which is the "naming it" half of the report.
     TextureId resource = {};
+
+    /// Which multi-row report this row is one of, or `kNoDiagnosticGroup` for a refusal that
+    /// stands alone.
+    ///
+    /// **`kNoDiagnosticGroup` on every diagnostic Task 1 records, and that is not a stub.**
+    /// Every refusal a declaration can produce is about one pass and one resource, so every one
+    /// of them stands alone; the field is here because the first refusal that is *not* -- Task
+    /// 2's cycle -- would otherwise need this type changed underneath the two suites that
+    /// already assert on it field by field. See the note above for why this shape and not the
+    /// two others.
+    u32 group = kNoDiagnosticGroup;
 
     constexpr bool operator==(const GraphDiagnostic&) const = default;
 };
@@ -466,6 +502,19 @@ struct InspectionText {
 /// sort to the end and stay marked in place. Everything else -- resources, accesses, barriers,
 /// diagnostics -- renders in the order its own array holds, and the leading number on each line
 /// is that array index. `WritePassLines` in Private/GraphInspection.cpp argues it at length.
+///
+/// **Two index spaces name passes, and every number that is in one of them says which.** A
+/// pass has a declaration index (`PassInspection::index`, and its position in `passes`) and an
+/// execution position (`PassInspection::executionOrder`), and they are different numbers the
+/// moment Task 2 reorders or culls anything. `decl-pass=` is always the first;
+/// `order=` -- on the pass line, on the barrier line's `before-order=`, and inside a barrier
+/// cause -- is always the second. Nothing renders a bare number for a pass, and the leading
+/// number on every line is a row in that line's own array rather than either space.
+///
+/// The distinction is *invisible* in Task 1, because a compiled graph's two spaces coincide.
+/// Which is the reason to spell it now: the first report where the same printed number in two
+/// lines meant two different passes would be a report somebody had already learned to read
+/// the other way.
 ///
 /// Written through `std::format_to_n`, which is ADR-0003's condition on `<format>` in runtime
 /// code, and through `std::formatted_size` for the counting-only call -- see

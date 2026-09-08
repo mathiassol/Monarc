@@ -121,6 +121,11 @@ Error RenderGraph::Refuse(DiagnosticKind kind, ErrorCode code, const char* messa
                pass, resource.index, resource.generation, message);
 
     if (m_diagnostics.Size() < m_config.maxDiagnostics) {
+        // `group` is deliberately left at its default rather than assigned like the five fields
+        // below it: every refusal a *declaration* can produce is about one pass and one
+        // resource, so every row this function writes stands alone, and a redundant write would
+        // read as though something here chose a group. Task 2's cycle report is the first
+        // caller with a reason to set one -- see `GraphDiagnostic::group`.
         GraphDiagnostic diagnostic{};
         diagnostic.kind     = kind;
         diagnostic.code     = code;
