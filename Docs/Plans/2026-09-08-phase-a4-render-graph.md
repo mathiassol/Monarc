@@ -320,6 +320,19 @@ say nothing about whether it is fast.
   around this rendering pass" into a device-free assertion, which is strictly stronger than
   inspecting the derivation and hoping execution matches it. Decide it in Task 3, where the
   first thing worth asserting about recording exists.
+
+  **The dead surface is wider than `Execute`'s four lines, and Task 3 should inherit the whole
+  list rather than a corner of it.** A review of Task 1 walked it: nothing anywhere constructs
+  a `PassCommandList`, so its private constructor and its `Commands()` accessor are uncalled
+  too — both are pinned by `static_assert`s, which is a different thing from being run.
+  `Detail::IPassRecord::Invoke` and `Detail::PassRecord::Invoke` are uncalled for the same
+  reason: nothing has a `PassCommandList&` to invoke a callback with. What *is* covered is the
+  stored callable's construction and destruction — `PassBuilder::Record`'s placement new and
+  the slot's occupancy by the round-trip case, and `DestroyRecords`' virtual destructor call by
+  *"a recording callback is destroyed by Reset and by the destructor"*, whose `Witness` counts
+  its own destructions. So the gap is precisely the invocation path and nothing either side of
+  it. One stub `ICommandList` closes all five at once, which is part of why it is worth
+  building.
 - **Whether the recording callback can be given a barrier-free command list cheaply.** Worth
   attempting in Task 1 and abandoning if it distorts the interface — but a compiler-enforced
   version of ADR-0006's central promise is worth an attempt.
