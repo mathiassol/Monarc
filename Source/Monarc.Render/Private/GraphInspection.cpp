@@ -78,6 +78,27 @@ namespace {
 // runtime code: format into a fixed buffer, never allocate a `std::string`.
 // `Monarc::Detail::Format` in Monarc/Core/Log.h and `Describe` in Monarc.RHI/Private/Barrier.cpp
 // are the precedents.
+//
+// **What this file actually allocates, measured rather than asserted.** Every call below was
+// run under a counting global `operator new` on MSVC 19.51 and clang-cl 22.1, with the exact
+// format strings and argument types used here. Both `std::format_to_n` and
+// `std::formatted_size` allocate nothing for every field rendered -- **except** that an integer
+// given an explicit presentation type allocates exactly one 16-byte block, freed inside the
+// same call. `{:x}`, `{:d}`, `{:o}` and `{:b}` all do it; a plain `{}` never does, whatever its
+// type. So it is the presentation type that buys the allocation, not the entry point: the count
+// is identical on the two, and identical on the two compilers, which share the MSVC STL.
+//
+// **It is the debug standard library's checked-iterator container proxy, not `<format>`
+// producing storage**, and the flag is `_ITERATOR_DEBUG_LEVEL` rather than the runtime library:
+// measured at 1 allocation under `/MDd` and `/MTd`, 0 under `/MD` and `/MT`, 0 under `/MDd`
+// with `_ITERATOR_DEBUG_LEVEL=0`, and back to 1 under `/MD` with `_ITERATOR_DEBUG_LEVEL=1`.
+// Of the six presets, the two that compile `-MDd` -- msvc-debug and clang-debug -- are the ones
+// where the `usage=0x{:x}` on a resource line, and the four `0x{:x}` fields a barrier line will
+// have once Task 3 lands, cost one transient proxy each. msvc-release, clang-release and
+// clang-asan are `-MD` and clang-ubsan is `-MT`, so on those four the report allocates nothing
+// at all.
+//
+// Recorded because this file said "allocates nothing" before anything measured it.
 // ---------------------------------------------------------------------------------------
 
 /// Appends formatted text to a caller's buffer, counting what fitted and what there was.
@@ -94,9 +115,22 @@ public:
     void Line(std::format_string<Args...> format, Args&&... args) {
         const usize room = m_out.size() - m_written;
         if (room == 0) {
-            // `std::formatted_size` counts through a counting iterator and allocates nothing.
-            // Used rather than a zero-count `format_to_n` so that no pointer is formed from an
-            // empty span's null `data()`.
+            // `std::formatted_size` counts through a counting iterator and produces no output
+            // storage of its own. Used rather than a zero-count `format_to_n` so that no
+            // pointer is formed from an empty span's null `data()`.
+            //
+            // **The one `<format>` entry point in this tree that is not `std::format_to_n`,
+            // and it satisfies ADR-0003's condition rather than sidestepping it.** That
+            // amendment permits `<format>` in runtime code "on the condition that it formats
+            // into a fixed buffer via `std::format_to_n` rather than allocating a
+            // `std::string`" -- the mechanism and its purpose in one sentence, and the purpose
+            // is what this meets: the call returns a `usize` and formats into nothing at all,
+            // which is a strict subset of what the condition permits. Read as a whitelist of
+            // one function name it would forbid `std::format_to` into a fixed array too, which
+            // nobody intends. Noted here rather than by a fresh ADR amendment because the
+            // decision has not changed and its wording is not wrong about the tree -- an
+            // amendment would have nothing to restate. See the file header for what both entry
+            // points were measured to allocate, which is the same for each.
             m_needed += std::formatted_size(format, std::forward<Args>(args)...);
             return;
         }

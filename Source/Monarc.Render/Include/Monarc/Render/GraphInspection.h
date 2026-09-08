@@ -458,8 +458,12 @@ struct InspectionText {
 /// order that depends on a hash. Two builds that declared the same thing render identically,
 /// which is what makes a diff meaningful.
 ///
-/// Never allocates: written through `std::format_to_n`, which is ADR-0003's condition on
-/// `<format>` in runtime code. The output is **not** NUL-terminated; `written` is the length,
+/// Written through `std::format_to_n`, which is ADR-0003's condition on `<format>` in runtime
+/// code, and through `std::formatted_size` for the counting-only call -- see
+/// Private/GraphInspection.cpp, which argues that the second meets the same condition and
+/// records what each was *measured* to allocate. The short version: nothing at all under a
+/// release standard library, and one transient 16-byte checked-iterator proxy per `{:x}` field
+/// under a debug one. The output is **not** NUL-terminated; `written` is the length,
 /// and `std::string_view(buffer, result.written)` is how to read it back. Truncation is
 /// reported rather than silent -- a report that could be clipped without saying so would be
 /// worse than no report, since the clipping falls at the end where the barriers are.
