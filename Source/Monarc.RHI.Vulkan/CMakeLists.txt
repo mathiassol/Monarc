@@ -71,3 +71,35 @@ foreach(_test_target Monarc.RHI.Vulkan.Tests Monarc.RHI.Vulkan.DeviceTests)
         target_compile_definitions(${_test_target} PRIVATE VK_NO_PROTOTYPES)
     endif()
 endforeach()
+
+# The three fatal guards in this module that a test can reach, one CTest entry each.
+#
+# GPU, so each one carries the `gpu` label and SKIP_RETURN_CODE 77 -- the child is the device
+# suite's own binary, whose main already returns 77 for a missing Vulkan runtime, a failed
+# instance or an empty adapter list, and Tools/run_death_test.py propagates that. A machine with
+# no device reports these Skipped, never Passed.
+#
+# The debug messenger's own fatal path has no entry. TestsDevice/TestVulkanDevice.cpp says why
+# at the head of its death-guard section: the callback is a file-static in an anonymous
+# namespace, reaching it means provoking a real validation finding rather than calling anything,
+# and it exists only in Debug with the layer installed.
+monarc_death_test(
+    NAME   Monarc.RHI.Vulkan.Death.BarrierInsideRendering
+    TARGET Monarc.RHI.Vulkan.DeviceTests
+    GUARD  barrier-inside-rendering
+    EXPECT "ICommandList::Barrier(GlobalBarrier) on a list that cannot record one"
+    GPU)
+
+monarc_death_test(
+    NAME   Monarc.RHI.Vulkan.Death.BufferBarrierStaleHandle
+    TARGET Monarc.RHI.Vulkan.DeviceTests
+    GUARD  buffer-barrier-stale-handle
+    EXPECT "ICommandList::Barrier(BufferBarrier) names a buffer this device does not have"
+    GPU)
+
+monarc_death_test(
+    NAME   Monarc.RHI.Vulkan.Death.TextureBarrierStaleHandle
+    TARGET Monarc.RHI.Vulkan.DeviceTests
+    GUARD  texture-barrier-stale-handle
+    EXPECT "ICommandList::Barrier(TextureBarrier) names a texture this device does not have"
+    GPU)

@@ -17,6 +17,14 @@ include(MonarcTargetOptions)
 #   Monarc.RHI.Vulkan.Probe            0.45 s
 #   every other unit suite            <0.25 s
 #
+# A3 Task 5 added a *ninth* kind, and it is slower than it looks: a death test's child ends at
+# an unhandled debug break, and Windows Error Reporting spends about two and a half seconds on
+# that before the process is gone. Measured on msvc-debug -- the device-free entries 2.4 to
+# 2.7 s each and the three device ones 3.6 to 5.4 s, the difference being Vulkan bring-up. So
+# 60 s is ~11x the slowest of them, and Tools/run_death_test.py's own 30 s timeout fires first
+# anyway, which is deliberate: the harness's message about a guard that hung is more use than
+# CTest's about an entry that took too long.
+#
 # The device figure understates the *worst* case and the headroom is sized for that rather than
 # for what was observed. The screen-capture case presents in batches until two readings agree,
 # up to 25 batches of 20 frames; it settled after 2 here, so the same suite can legitimately
@@ -133,6 +141,69 @@ function(monarc_device_test_module module)
         LABELS "gpu"
         SKIP_RETURN_CODE 77
         TIMEOUT ${MONARC_DEVICE_TEST_TIMEOUT_SECONDS})
+endfunction()
+
+# Registers one CTest entry per fatal guard: a child process that invokes the guard, and a
+# harness that asserts the process died with the guard's own message.
+#
+# **Monarc's guards that deliberately end the process had no case in any suite until A3 Task 5**,
+# and they cannot have an in-process one: the assertion is that the process stops. Each was
+# verified once by hand with a scratch program that was then deleted, which is exactly the shape
+# of evidence three separate reviews on this branch have caught decaying in other forms.
+#
+# `TARGET` is an existing test binary -- a mode flag on one is far cheaper than a target per
+# guard, and it means the guard is reached through the same linkage the rest of the suite
+# already has. `GUARD` names the case its `Tests/TestDeathGuards.cpp` registers; `EXPECT` is a
+# substring of what the child must print, and is the guard's own `MONARC_CHECK` literal so that
+# the test says *which* guard fired.
+#
+# `GPU` puts the entry behind the `gpu` label and SKIP_RETURN_CODE 77, the same treatment
+# monarc_device_test_module() gives a device suite: the harness propagates a child's 77, so a
+# machine with no adapter reports Skipped rather than Passed. Without GPU the entry is labelled
+# `unit` and runs in CI, which is where most of these belong -- five of the eight guards that
+# can be reached at all need no GPU.
+#
+# Tools/run_death_test.py holds the four conditions and why each is load-bearing. Its own
+# timeout is shorter than the TIMEOUT set here so that a guard edited into a hang is reported by
+# the harness's message rather than by CTest's.
+function(monarc_death_test)
+    if(NOT MONARC_BUILD_TESTS)
+        return()
+    endif()
+
+    cmake_parse_arguments(ARG "GPU" "NAME;TARGET;GUARD;EXPECT" "" ${ARGN})
+    if(ARG_UNPARSED_ARGUMENTS)
+        list(JOIN ARG_UNPARSED_ARGUMENTS " " _unparsed)
+        message(FATAL_ERROR "monarc_death_test(${ARG_NAME}): unrecognised arguments: ${_unparsed}")
+    endif()
+    foreach(_required NAME TARGET GUARD EXPECT)
+        if(NOT ARG_${_required})
+            message(FATAL_ERROR "monarc_death_test: ${_required} is required")
+        endif()
+    endforeach()
+    if(NOT TARGET ${ARG_TARGET})
+        message(FATAL_ERROR
+            "monarc_death_test(${ARG_NAME}): ${ARG_TARGET} is not a target. Death tests run an "
+            "existing test binary in a child process, so the binary has to exist first.")
+    endif()
+
+    add_test(NAME ${ARG_NAME}
+        COMMAND ${MONARC_PYTHON_EXECUTABLE}
+                "${MONARC_TOOLS_DIR}/run_death_test.py"
+                "$<TARGET_FILE:${ARG_TARGET}>"
+                "${ARG_GUARD}"
+                "${ARG_EXPECT}")
+
+    if(ARG_GPU)
+        set_tests_properties(${ARG_NAME} PROPERTIES
+            LABELS "gpu"
+            SKIP_RETURN_CODE 77
+            TIMEOUT ${MONARC_TEST_TIMEOUT_SECONDS})
+    else()
+        set_tests_properties(${ARG_NAME} PROPERTIES
+            LABELS "unit"
+            TIMEOUT ${MONARC_TEST_TIMEOUT_SECONDS})
+    endif()
 endfunction()
 
 # Registers a CTest entry whose job is to print, not to assert.

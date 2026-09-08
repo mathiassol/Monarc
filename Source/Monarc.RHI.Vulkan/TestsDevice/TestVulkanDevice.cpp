@@ -39,6 +39,7 @@
 #include <Loader.h>
 #include <LoaderTables.h>
 
+#include <cstdio>
 #include <string_view>
 #include <utility>
 
@@ -1765,13 +1766,256 @@ TEST_CASE("a build that asked for validation actually has a messenger") {
     }
 }
 
+// ---------------------------------------------------------------------------------------
+// Death guards
+//
+// **Three of Monarc's fatal guards need a device, and these are they.** The mechanism, the
+// declining assert handler, and why the mode is handled before doctest starts are all written
+// down once in Monarc.Core/Tests/TestDeathGuards.cpp; only what is different about needing a
+// device is argued here.
+//
+// They live in *this* binary rather than a fourth one, so that "no device" is already answered
+// before a guard is reached: main below returns 77 for a missing runtime, a failed instance or
+// an empty adapter list, and Tools/run_death_test.py propagates that 77 -- so on a machine with
+// no GPU these three CTest entries report Skipped through the same mechanism the rest of the
+// suite uses, and never Passed.
+//
+// **What is deliberately not covered.** The debug messenger's own fatal path
+// (VulkanBackend.cpp) has no entry. Its callback is a file-static in an anonymous namespace, so
+// nothing can call it; reaching it means provoking a real VALIDATION-severity finding, which
+// means deliberately misusing Vulkan in a way Monarc's own guards do not already refuse first.
+// It is also Debug-only (MONARC_VULKAN_VALIDATION) and depends on the validation layer being
+// installed, so it could run on neither Release nor a machine without the SDK. What that path
+// does have is a measurement, in Docs/Rendering/RHI.md: with the messenger's create-info left
+// out of VkInstanceCreateInfo::pNext, an invalid VkApplicationInfo::sType reaches stderr and
+// vkCreateInstance *succeeds*; with it chained, the process stops.
+// ---------------------------------------------------------------------------------------
+
+namespace {
+
+constexpr std::string_view kGuardOption    = "--monarc-death-guard=";
+constexpr std::string_view kEnteredMarker  = "MONARC_DEATH_GUARD_ENTERED";
+constexpr std::string_view kSurvivedMarker = "MONARC_DEATH_GUARD_SURVIVED";
+
+bool DeclineToBreak(const char* expression, const char* file, int line, const char* message) {
+    std::fprintf(stderr, "[declining assert handler] %s:%d: (%s) %s\n", file, line, expression,
+                 message != nullptr ? message : "");
+    std::fflush(stderr);
+    return false;
+}
+
+/// `VulkanCommandList::FailInsideRenderingPass`, through `CanRecordBarrier`'s `Rendering` cell.
+///
+/// `vkCmdPipelineBarrier2` may not be called inside a rendering instance at all, so there is no
+/// legal call to record and nothing the void `Barrier` could do instead -- which is why this
+/// one cell of the table is fatal where the other four return. With the guard turned into a
+/// plain `return false` the barrier is *skipped*, which is the synchronisation hole
+/// Monarc/RHI/Device.h argues about at length, and the child then reaches the survived marker.
+void BarrierInsideRendering() {
+    DeviceUnderTest held(Adapters()[0]);
+    if (!held.created) {
+        std::fprintf(stderr, "could not create a device\n");
+        return;
+    }
+    Monarc::RHI::IDevice& device = *held.created;
+
+    Monarc::RHI::TextureDescription attachment{};
+    attachment.extent = kReadbackExtent;
+    attachment.format = kReadbackFormat;
+    attachment.usage  = Monarc::RHI::TextureUsage::ColorAttachment;
+
+    const Monarc::Result<Monarc::RHI::TextureHandle> texture = device.CreateTexture(attachment);
+    if (!texture) {
+        std::fprintf(stderr, "could not create the attachment\n");
+        return;
+    }
+
+    const Monarc::Result<Monarc::RHI::ICommandList*> commands = device.BeginFrame();
+    if (!commands || *commands == nullptr) {
+        std::fprintf(stderr, "could not begin a frame\n");
+        return;
+    }
+    Monarc::RHI::ICommandList& list = **commands;
+    if (!list.Begin()) {
+        std::fprintf(stderr, "could not begin recording\n");
+        return;
+    }
+
+    list.Barrier(Monarc::RHI::TextureBarrier(
+        *texture, Monarc::RHI::TextureLayout::Undefined,
+        Monarc::RHI::TextureLayout::ColorAttachment, Monarc::RHI::PipelineStage::None,
+        Monarc::RHI::PipelineStage::ColorAttachmentOutput, Monarc::RHI::Access::None,
+        Monarc::RHI::Access::ColorAttachmentWrite));
+
+    const Monarc::RHI::ColorAttachment attachments[1] = {
+        {*texture, Monarc::RHI::LoadOp::Clear, Monarc::RHI::StoreOp::Store, kClearColor}};
+    Monarc::RHI::RenderingDescription rendering{};
+    rendering.extent           = kReadbackExtent;
+    rendering.colorAttachments = attachments;
+    if (!list.BeginRendering(rendering)) {
+        std::fprintf(stderr, "could not begin rendering\n");
+        return;
+    }
+
+    // The call that must not return.
+    list.Barrier(Monarc::RHI::GlobalBarrier{});
+
+    // Reached only with the guard removed. Unwound rather than abandoned: nothing was
+    // submitted, so tearing down mid-rendering would leave the fatal debug messenger to end
+    // the process on a VUID -- and a death test that a *validation error* satisfied would
+    // report the guard as caught when it was not.
+    list.EndRendering();
+    (void)list.End();
+    held.created->Shutdown();
+}
+
+/// `Barrier(BufferBarrier)`'s stale-handle refusal, through a destroyed buffer's handle.
+///
+/// ADR-0002's generation check is what makes the handle stale rather than a pointer to the
+/// slot's next occupant; `Resolve` returns null and there is no `Status` to refuse through, so
+/// a plain `return` here would skip the barrier and record the rest of the frame without it.
+void BufferBarrierStaleHandle() {
+    DeviceUnderTest held(Adapters()[0]);
+    if (!held.created) {
+        std::fprintf(stderr, "could not create a device\n");
+        return;
+    }
+    Monarc::RHI::IDevice& device = *held.created;
+
+    Monarc::RHI::BufferDescription description{};
+    description.size     = ReadbackByteCount();
+    description.usage    = Monarc::RHI::BufferUsage::TransferDestination;
+    description.location = Monarc::RHI::MemoryLocation::HostVisible;
+
+    const Monarc::Result<Monarc::RHI::BufferHandle> buffer = device.CreateBuffer(description);
+    if (!buffer) {
+        std::fprintf(stderr, "could not create the buffer\n");
+        return;
+    }
+    const Monarc::RHI::BufferHandle stale = *buffer;
+    device.DestroyBuffer(stale);
+
+    const Monarc::Result<Monarc::RHI::ICommandList*> commands = device.BeginFrame();
+    if (!commands || *commands == nullptr) {
+        std::fprintf(stderr, "could not begin a frame\n");
+        return;
+    }
+    Monarc::RHI::ICommandList& list = **commands;
+    if (!list.Begin()) {
+        std::fprintf(stderr, "could not begin recording\n");
+        return;
+    }
+
+    list.Barrier(Monarc::RHI::BufferBarrier{stale, Monarc::RHI::PipelineStage::Copy,
+                                            Monarc::RHI::PipelineStage::Host,
+                                            Monarc::RHI::Access::TransferWrite,
+                                            Monarc::RHI::Access::HostRead});
+
+    (void)list.End();
+    held.created->Shutdown();
+}
+
+/// `Barrier(TextureBarrier)`'s stale-handle refusal, through a destroyed texture's handle.
+///
+/// The same refusal, and the worse half of the argument: a layout transition dropped silently
+/// leaves the image in whatever layout it was in and the next command reads it as though the
+/// transition had happened. Task 4 gave this refusal a second population to protect --
+/// swapchain images, which `ISwapchain::Recreate` releases, so a handle held across a resize is
+/// stale.
+void TextureBarrierStaleHandle() {
+    DeviceUnderTest held(Adapters()[0]);
+    if (!held.created) {
+        std::fprintf(stderr, "could not create a device\n");
+        return;
+    }
+    Monarc::RHI::IDevice& device = *held.created;
+
+    Monarc::RHI::TextureDescription description{};
+    description.extent = kReadbackExtent;
+    description.format = kReadbackFormat;
+    description.usage  = Monarc::RHI::TextureUsage::ColorAttachment;
+
+    const Monarc::Result<Monarc::RHI::TextureHandle> texture = device.CreateTexture(description);
+    if (!texture) {
+        std::fprintf(stderr, "could not create the texture\n");
+        return;
+    }
+    const Monarc::RHI::TextureHandle stale = *texture;
+    device.DestroyTexture(stale);
+
+    const Monarc::Result<Monarc::RHI::ICommandList*> commands = device.BeginFrame();
+    if (!commands || *commands == nullptr) {
+        std::fprintf(stderr, "could not begin a frame\n");
+        return;
+    }
+    Monarc::RHI::ICommandList& list = **commands;
+    if (!list.Begin()) {
+        std::fprintf(stderr, "could not begin recording\n");
+        return;
+    }
+
+    list.Barrier(Monarc::RHI::TextureBarrier(
+        stale, Monarc::RHI::TextureLayout::Undefined,
+        Monarc::RHI::TextureLayout::ColorAttachment, Monarc::RHI::PipelineStage::None,
+        Monarc::RHI::PipelineStage::ColorAttachmentOutput, Monarc::RHI::Access::None,
+        Monarc::RHI::Access::ColorAttachmentWrite));
+
+    (void)list.End();
+    held.created->Shutdown();
+}
+
+struct Guard {
+    std::string_view name;
+    void (*invoke)();
+};
+
+constexpr Guard kGuards[] = {
+    {"barrier-inside-rendering", &BarrierInsideRendering},
+    {"buffer-barrier-stale-handle", &BufferBarrierStaleHandle},
+    {"texture-barrier-stale-handle", &TextureBarrierStaleHandle},
+};
+
+int RunGuard(std::string_view name) {
+    for (const Guard& guard : kGuards) {
+        if (guard.name != name) {
+            continue;
+        }
+        Monarc::SetAssertHandler(&DeclineToBreak);
+
+        std::printf("%.*s %.*s\n", static_cast<int>(kEnteredMarker.size()),
+                    kEnteredMarker.data(), static_cast<int>(name.size()), name.data());
+        std::fflush(stdout);
+
+        guard.invoke();
+
+        // Flushed explicitly on both sides: MONARC_DEBUG_BREAK() ends the process without
+        // flushing stdio, so a buffered marker would be lost on the run that must print it.
+        std::printf("%.*s %.*s\n", static_cast<int>(kSurvivedMarker.size()),
+                    kSurvivedMarker.data(), static_cast<int>(name.size()), name.data());
+        std::fflush(stdout);
+        return 0;
+    }
+
+    std::fprintf(stderr, "no such death guard: %.*s\nknown guards:\n",
+                 static_cast<int>(name.size()), name.data());
+    for (const Guard& guard : kGuards) {
+        std::fprintf(stderr, "  %.*s\n", static_cast<int>(guard.name.size()),
+                     guard.name.data());
+    }
+    std::fflush(stderr);
+    return 2;
+}
+
+}  // namespace
+
 int main(int argc, char** argv) {
-    const char* libraryName = nullptr;
+    const char*      libraryName = nullptr;
+    std::string_view deathGuard;
 
     // doctest's own option parsing would object to an argument it does not recognise, so
-    // --vulkan-library is stripped out here and everything else is handed through unchanged.
-    // Filtering rather than rejecting, so `ctest` and a developer running the binary by hand
-    // can both still pass doctest's flags.
+    // --vulkan-library and --monarc-death-guard are stripped out here and everything else is
+    // handed through unchanged. Filtering rather than rejecting, so `ctest` and a developer
+    // running the binary by hand can both still pass doctest's flags.
     Monarc::SystemAllocator allocator;
     Monarc::Array<char*>    forwarded(allocator);
     forwarded.Reserve(static_cast<Monarc::usize>(argc));
@@ -1779,6 +2023,10 @@ int main(int argc, char** argv) {
         const std::string_view argument(argv[i]);
         if (argument.starts_with(kLibraryOption)) {
             libraryName = argv[i] + kLibraryOption.size();
+            continue;
+        }
+        if (argument.starts_with(kGuardOption)) {
+            deathGuard = argument.substr(kGuardOption.size());
             continue;
         }
         forwarded.Push(argv[i]);
@@ -1846,6 +2094,19 @@ int main(int argc, char** argv) {
     g_backend     = &backend;
     g_rawAdapters = &rawAdapters;
     g_adapters    = &adapters;
+
+    // **After every 77 above and before doctest exists**, which is the whole of the ordering
+    // this mode needs. After, so that a machine with no device reports Skipped rather than
+    // running a guard it cannot reach; before, because doctest installs an SEH filter and would
+    // catch the debug break a guard raises, reporting it as a failed assertion at exit 1
+    // instead of letting the process die at 0x80000003.
+    if (!deathGuard.empty()) {
+        const int status = RunGuard(deathGuard);
+        g_adapters       = nullptr;
+        g_rawAdapters    = nullptr;
+        g_backend        = nullptr;
+        return status;
+    }
 
     doctest::Context context;
     context.applyCommandLine(static_cast<int>(forwarded.Size()), forwarded.Data());

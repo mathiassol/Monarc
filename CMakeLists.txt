@@ -88,6 +88,16 @@ if(MONARC_BUILD_TESTS)
         GIT_SHALLOW    TRUE
         SYSTEM)
     FetchContent_MakeAvailable(doctest)
+
+    # Found here rather than beside the gate entries at the foot of this file, because
+    # monarc_death_test() needs it from inside a module's own CMakeLists.txt -- which is
+    # processed by the add_subdirectory() calls below. Three Python interpreters exist on the
+    # development machine and CI uses a fourth, so which one runs the tooling is CMake's
+    # decision to record rather than the invocation's to guess.
+    find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
+    set(MONARC_PYTHON_EXECUTABLE "${Python3_EXECUTABLE}")
+    set(MONARC_TOOLS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/Tools")
+
     include(MonarcTest)
 endif()
 
@@ -101,10 +111,9 @@ add_subdirectory(Source/Monarc.FirstLight)
 monarc_validate_modules()
 
 if(MONARC_BUILD_TESTS)
-    find_package(Python3 3.10 REQUIRED COMPONENTS Interpreter)
     add_test(
         NAME Architecture.Gates
-        COMMAND ${Python3_EXECUTABLE}
+        COMMAND ${MONARC_PYTHON_EXECUTABLE}
                 "${CMAKE_SOURCE_DIR}/Tools/check_architecture.py"
                 "${CMAKE_BINARY_DIR}/module-graph.json"
                 "${CMAKE_SOURCE_DIR}")
@@ -121,7 +130,7 @@ if(MONARC_BUILD_TESTS)
     # violating trees and assert each gate fires.
     add_test(
         NAME Architecture.GateTests
-        COMMAND ${Python3_EXECUTABLE}
+        COMMAND ${MONARC_PYTHON_EXECUTABLE}
                 "${CMAKE_SOURCE_DIR}/Tools/test_check_architecture.py")
     set_tests_properties(Architecture.GateTests PROPERTIES
         LABELS "architecture"
