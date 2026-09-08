@@ -220,10 +220,25 @@ TEST_CASE("a VkResult outside Monarc's table says so rather than guessing") {
           "VK_ERROR_MEMORY_MAP_FAILED");
     CHECK(std::string_view(ToString(VK_ERROR_DEVICE_LOST)) == "VK_ERROR_DEVICE_LOST");
 
+    // The three Task 4 added. **The line above this one used to read
+    // `CHECK(ToString(VK_ERROR_SURFACE_LOST_KHR) == unknown)`, with a note saying "belongs to
+    // the swapchain, which is Task 4's; when that call arrives, this line is where it says
+    // so" -- and the call arrived without anyone coming back here.** What found it was a new
+    // device case destroying a window under a live surface: the refusal logged
+    // `<VkResult not in Monarc's table> (-1000000000)`. So these three are measured or
+    // named-at-a-call-site rather than added on principle; Translate.cpp says which is which.
+    CHECK(std::string_view(ToString(VK_ERROR_SURFACE_LOST_KHR)) ==
+          "VK_ERROR_SURFACE_LOST_KHR");
+    CHECK(std::string_view(ToString(VK_ERROR_NATIVE_WINDOW_IN_USE_KHR)) ==
+          "VK_ERROR_NATIVE_WINDOW_IN_USE_KHR");
+    CHECK(std::string_view(ToString(VK_NOT_READY)) == "VK_NOT_READY");
+
     // And one that is still absent, so the fallback stays exercised by a real result rather
-    // than only by the cast above. VK_ERROR_SURFACE_LOST_KHR belongs to the swapchain, which
-    // is Task 4's; when that call arrives, this line is where it says so.
-    CHECK(std::string_view(ToString(VK_ERROR_SURFACE_LOST_KHR)) == unknown);
+    // than only by the cast above. VK_ERROR_FRAGMENTED_POOL comes from descriptor-pool
+    // allocation, which no call in this module makes yet; when one does, this line is where
+    // it says so -- and the paragraph above is the reason to believe that promise less than
+    // the assertion.
+    CHECK(std::string_view(ToString(VK_ERROR_FRAGMENTED_POOL)) == unknown);
 }
 
 TEST_CASE("a result meaning the capability is absent is Unsupported, not BackendFailure") {
@@ -256,6 +271,15 @@ TEST_CASE("every other result the backend can receive stays BackendFailure") {
     // number nobody recognised.
     CHECK(ToErrorCode(static_cast<VkResult>(-987654)) == Monarc::ErrorCode::BackendFailure);
     CHECK(ToErrorCode(VK_ERROR_DEVICE_LOST) == Monarc::ErrorCode::BackendFailure);
+
+    // **And a surface that has stopped working, which is the tempting one to get wrong.** It
+    // arrives from every surface query the swapchain makes -- measured, by destroying a window
+    // under a live surface -- and "this surface is gone" reads like a capability being absent.
+    // It is not: `Unsupported` means asking differently might work, and there is no different
+    // way to ask about a window that no longer exists. Only a fresh window and a fresh
+    // `CreateSwapchain` will do, which is what `ISwapchain::Recreate` refusing a shut-down
+    // swapchain says from the other side.
+    CHECK(ToErrorCode(VK_ERROR_SURFACE_LOST_KHR) == Monarc::ErrorCode::BackendFailure);
 }
 
 TEST_CASE("an extension is found by its whole name and never by a prefix of one") {

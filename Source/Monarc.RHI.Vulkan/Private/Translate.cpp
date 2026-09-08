@@ -103,6 +103,26 @@ const char* ToString(VkResult result) {
         case VK_ERROR_TOO_MANY_OBJECTS:         return "VK_ERROR_TOO_MANY_OBJECTS";
         case VK_ERROR_MEMORY_MAP_FAILED:        return "VK_ERROR_MEMORY_MAP_FAILED";
         case VK_ERROR_DEVICE_LOST:              return "VK_ERROR_DEVICE_LOST";
+
+        // Added in Task 4, on the same rule, and the first of them was found the hard way: a
+        // device case that destroys a window under a live surface and then recreates logged
+        // `<VkResult not in Monarc's table> (-1000000000)`, which is
+        // VK_ERROR_SURFACE_LOST_KHR arriving from
+        // vkGetPhysicalDeviceSurfaceCapabilitiesKHR. Every surface and swapchain query in
+        // VulkanSwapchain.cpp can return it. VK_ERROR_NATIVE_WINDOW_IN_USE_KHR comes from
+        // vkCreateWin32SurfaceKHR and vkCreateSwapchainKHR, both of which stringify their
+        // result; VK_NOT_READY comes from vkAcquireNextImageKHR, which `Acquire` already
+        // names beside VK_TIMEOUT in a log line of its own.
+        //
+        // **VK_ERROR_OUT_OF_DATE_KHR and VK_SUBOPTIMAL_KHR are deliberately not here.** Both
+        // are produced by vkAcquireNextImageKHR and vkQueuePresentKHR, and both are handled
+        // by name at both call sites before any path that stringifies a result -- they are
+        // outcomes rather than failures, which is `AcquireOutcome::OutOfDate` and
+        // `NeedsRecreation()`. A row for either would be the speculative entry the rule above
+        // exists to keep out.
+        case VK_NOT_READY:                      return "VK_NOT_READY";
+        case VK_ERROR_SURFACE_LOST_KHR:         return "VK_ERROR_SURFACE_LOST_KHR";
+        case VK_ERROR_NATIVE_WINDOW_IN_USE_KHR: return "VK_ERROR_NATIVE_WINDOW_IN_USE_KHR";
         default:                                return "<VkResult not in Monarc's table>";
     }
 }

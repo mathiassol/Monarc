@@ -74,11 +74,21 @@ namespace Monarc::RHI::Detail {
 /// claim of completeness nothing verifies. So this one has a `default`, and the fallback says
 /// it does not know rather than guessing.
 ///
-/// The numeric value is not lost when the fallback is hit: every call site in VulkanBackend
-/// formats the result's integer value into the message alongside this string, which is what
-/// makes an unrecognised result still actionable. The list grows when a call that can return
-/// something new is added -- Tasks 3 and 4 bring `VK_ERROR_DEVICE_LOST`,
-/// `VK_ERROR_OUT_OF_DATE_KHR` and `VK_SUBOPTIMAL_KHR` with them.
+/// The numeric value is not lost when the fallback is hit: every failure path that formats
+/// this string -- `VulkanBackend`'s call sites, `VulkanDeviceState::FailVk`,
+/// `VulkanSwapchainState::FailVk`, `CreatePlatformSurface`, and the teardown's
+/// `vkDeviceWaitIdle` -- puts the result's integer value beside it, which is what makes an
+/// unrecognised result still actionable. The one exception is `ISwapchain::Acquire`'s
+/// timed-out branch, which names `VK_TIMEOUT` and `VK_NOT_READY` and nothing else, and both
+/// are in the table.
+///
+/// The list grows when a call that can return something new is added. Task 3 brought
+/// `VK_ERROR_DEVICE_LOST` and four others; **Task 4 brought `VK_ERROR_SURFACE_LOST_KHR`,
+/// `VK_ERROR_NATIVE_WINDOW_IN_USE_KHR` and `VK_NOT_READY`, and this sentence used to predict
+/// `VK_ERROR_OUT_OF_DATE_KHR` and `VK_SUBOPTIMAL_KHR` instead.** Neither of those is in the
+/// table and neither should be: both are handled by name at every call site that can produce
+/// them -- they are outcomes, not failures -- so no path stringifies either. Translate.cpp
+/// says so where the rows are.
 [[nodiscard]] const char* ToString(VkResult result);
 
 /// The `ErrorCode` a failed Vulkan call deserves.
