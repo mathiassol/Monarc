@@ -5,6 +5,7 @@
 #include <Monarc/Core/Log.h>
 #include <Monarc/Core/Memory/SystemAllocator.h>
 #include <Monarc/RHI/Capabilities.h>
+#include <Monarc/RHI/Device.h>
 #include <Monarc/RHI/Types.h>
 
 #include <Translate.h>
@@ -381,4 +382,168 @@ TEST_CASE("no severity maps to Debug or Fatal, which is what the callback's swit
     // at Trace -- the quietest level, which is the right place for something unrecognised.
     CHECK(SeverityToLogLevel(static_cast<VkDebugUtilsMessageSeverityFlagBitsEXT>(0x40000)) ==
           Monarc::LogLevel::Trace);
+}
+
+// ---------------------------------------------------------------------------------------
+// Swapchain negotiation.
+//
+// **The half of swapchain creation CI can run, and until a review nothing ran it.**
+// Private/Translate.h's justification for extracting these two functions at all is that a
+// swapchain needs a window, a surface, a device and a presenting queue family, none of which a
+// GitHub runner has -- "but the arithmetic that turns `VkSurfaceCapabilitiesKHR` into an image
+// count and an extent needs none of them, and it is the part with edge cases: an unbounded
+// maximum, a maximum equal to the minimum, the 'surface has no preference' sentinel, and
+// clamping a requested size into a range. Every one of those is a driver behaviour this machine
+// does not exhibit, so a device test could not reach them even with a GPU present."
+//
+// `grep -rn "ChooseSwapchain" Source/` returned two declarations, two definitions and two call
+// sites, and no test. Two mutations measured what that cost. `ChooseSwapchainExtent` rewritten
+// to `return requested;` -- ignoring `capabilities.currentExtent` entirely, which is the branch
+// the header calls decisive -- left CTest 10 of 10 green and the device suite byte-identical at
+// 16 of 926, and took the `chosen.IsEmpty()` guard in `VulkanSwapchain.cpp` with it as dead
+// code nobody noticed. `ChooseSwapchainImageCount`'s clamp changed to `maxImageCount + 7` left
+// the same numbers.
+//
+// These are here rather than in TestVulkanBarrierTranslate.cpp, where `FindMemoryType` is
+// tested: that file is the barrier model's by its own opening line, and swapchain negotiation
+// is no part of it. This one is Translate.h's general pure surface.
+// ---------------------------------------------------------------------------------------
+
+namespace {
+
+using Monarc::RHI::Extent2D;
+using Monarc::RHI::Detail::ChooseSwapchainExtent;
+using Monarc::RHI::Detail::ChooseSwapchainImageCount;
+
+/// Vulkan's spelling of "this surface has no preferred extent; pick one in range".
+constexpr Monarc::u32 kNoPreference = 0xFFFFFFFFU;
+
+/// The capabilities a surface would report, as much of them as these two functions read.
+[[nodiscard]] VkSurfaceCapabilitiesKHR Capabilities(VkExtent2D current, VkExtent2D minimum,
+                                                    VkExtent2D maximum) {
+    VkSurfaceCapabilitiesKHR capabilities{};
+    capabilities.currentExtent  = current;
+    capabilities.minImageExtent = minimum;
+    capabilities.maxImageExtent = maximum;
+    return capabilities;
+}
+
+}  // namespace
+
+TEST_CASE("the surface's own extent wins wherever it reports one") {
+    // **The branch that decides every swapchain on Windows**, where `currentExtent` is always
+    // the window's client rect -- so a swapchain created at any other size is
+    // `VUID-VkSwapchainCreateInfoKHR-imageExtent-01274`. The request is deliberately nothing
+    // like the surface's answer, so a function that returned it is red rather than
+    // coincidentally right.
+    const VkSurfaceCapabilitiesKHR capabilities =
+        Capabilities(VkExtent2D{640, 360}, VkExtent2D{1, 1}, VkExtent2D{4096, 4096});
+
+    CHECK(ChooseSwapchainExtent(capabilities, Extent2D{1920, 1080}) == Extent2D{640, 360});
+    // Including when the request is itself in range and perfectly legal, which is the case
+    // that makes this about the surface deciding rather than about the request being bad.
+    CHECK(ChooseSwapchainExtent(capabilities, Extent2D{800, 600}) == Extent2D{640, 360});
+    // And when nothing was requested at all.
+    CHECK(ChooseSwapchainExtent(capabilities, Extent2D{}) == Extent2D{640, 360});
+}
+
+TEST_CASE("a surface reporting no area comes back empty rather than with a size invented") {
+    // A minimised window, which on Windows reports 0 x 0. `VulkanSwapchainState::BringUp`
+    // refuses an empty answer by name -- the difference between a `Status` a frame loop can
+    // park on and `VUID-VkSwapchainCreateInfoKHR-imageExtent-01689` stopping the process -- so
+    // this function has to hand the emptiness through rather than clamp it up to
+    // `minImageExtent`. That guard is what a `return requested;` mutation made dead.
+    const VkSurfaceCapabilitiesKHR minimised =
+        Capabilities(VkExtent2D{0, 0}, VkExtent2D{1, 1}, VkExtent2D{4096, 4096});
+
+    CHECK(ChooseSwapchainExtent(minimised, Extent2D{640, 360}).IsEmpty());
+    CHECK(ChooseSwapchainExtent(minimised, Extent2D{640, 360}) == Extent2D{});
+}
+
+TEST_CASE("the no-preference sentinel clamps the request into the surface's range") {
+    // **Unreachable on Windows and written because it is reachable elsewhere** -- Wayland
+    // reports the sentinel -- which is exactly why it needs a device-free case: no test on this
+    // machine can reach it through a real surface.
+    const VkSurfaceCapabilitiesKHR free = Capabilities(
+        VkExtent2D{kNoPreference, kNoPreference}, VkExtent2D{64, 32}, VkExtent2D{1024, 768});
+
+    // In range, so the request is honoured exactly.
+    CHECK(ChooseSwapchainExtent(free, Extent2D{800, 600}) == Extent2D{800, 600});
+    // Below the minimum in both dimensions, and above the maximum in both.
+    CHECK(ChooseSwapchainExtent(free, Extent2D{16, 8}) == Extent2D{64, 32});
+    CHECK(ChooseSwapchainExtent(free, Extent2D{4096, 4096}) == Extent2D{1024, 768});
+    // Exactly on each bound, which is where an off-by-one in the clamp lives.
+    CHECK(ChooseSwapchainExtent(free, Extent2D{64, 32}) == Extent2D{64, 32});
+    CHECK(ChooseSwapchainExtent(free, Extent2D{1024, 768}) == Extent2D{1024, 768});
+    // **The two dimensions clamp independently**, which one clamp applied to both would get
+    // wrong: this request is over the maximum in width and under the minimum in height at once.
+    CHECK(ChooseSwapchainExtent(free, Extent2D{4096, 8}) == Extent2D{1024, 32});
+
+    // A minimum of zero is not a size a swapchain can be created at, so an empty request under
+    // an empty minimum stays empty and the caller refuses it -- the same refusal the minimised
+    // window gets, arriving down the other branch.
+    const VkSurfaceCapabilitiesKHR fromZero = Capabilities(
+        VkExtent2D{kNoPreference, kNoPreference}, VkExtent2D{0, 0}, VkExtent2D{1024, 768});
+    CHECK(ChooseSwapchainExtent(fromZero, Extent2D{}).IsEmpty());
+}
+
+TEST_CASE("a mixed sentinel pair takes the surface's numbers rather than half of each") {
+    // Translate.cpp tests both dimensions and says why: the spec pairs them, so a surface
+    // reporting a real width beside a sentinel height is malformed rather than half free.
+    // Testing one dimension -- the shape the code invites -- would take the clamping branch
+    // with `0xFFFFFFFF` standing in for the other dimension's current extent, and `4294967295`
+    // is not a size. Falling through keeps the mistake local: the caller gets an extent it can
+    // refuse, and these two assertions are what say which way it falls.
+    const VkSurfaceCapabilitiesKHR widthFree =
+        Capabilities(VkExtent2D{kNoPreference, 360}, VkExtent2D{64, 32}, VkExtent2D{1024, 768});
+    CHECK(ChooseSwapchainExtent(widthFree, Extent2D{800, 600}) == Extent2D{kNoPreference, 360});
+
+    const VkSurfaceCapabilitiesKHR heightFree =
+        Capabilities(VkExtent2D{640, kNoPreference}, VkExtent2D{64, 32}, VkExtent2D{1024, 768});
+    CHECK(ChooseSwapchainExtent(heightFree, Extent2D{800, 600}) ==
+          Extent2D{640, kNoPreference});
+}
+
+TEST_CASE("an image count is one more than the minimum, so a frame can be worked on") {
+    // The minimum alone leaves the CPU blocked in `vkAcquireNextImageKHR` for most of every
+    // frame. `maxImageCount` of zero is Vulkan's spelling of "no limit" and must not be clamped
+    // to: a `std::min` against zero asks for no images at all, which is
+    // `VUID-VkSwapchainCreateInfoKHR-minImageCount-01271`. Neither local surface reports zero,
+    // so this is a driver behaviour only a device-free case can reach.
+    CHECK(ChooseSwapchainImageCount(2, 0) == 3);
+    CHECK(ChooseSwapchainImageCount(1, 0) == 2);
+
+    // **And it is not derived from `kFramesInFlight`, which is the claim Translate.h makes and
+    // nothing checked.** A driver reporting a minimum of 3 gets 4 images against the same 2
+    // frames in flight; code that had tied the two together would be wrong only on that
+    // machine, which is the machine nobody has.
+    CHECK(ChooseSwapchainImageCount(3, 0) == 4);
+}
+
+TEST_CASE("an image count is clamped to a maximum the surface does report") {
+    // The clamp bites in two shapes and neither occurs here: both local surfaces report a
+    // maximum far above `minImageCount + 1`.
+    //
+    // A maximum equal to the minimum -- there is no room for the extra image, so the minimum is
+    // what has to be asked for.
+    CHECK(ChooseSwapchainImageCount(2, 2) == 2);
+    CHECK(ChooseSwapchainImageCount(1, 1) == 1);
+    // A maximum exactly at `minImageCount + 1`: the boundary, where an off-by-one in the
+    // comparison shows and where `maxImageCount + 7` does not.
+    CHECK(ChooseSwapchainImageCount(2, 3) == 3);
+    // And a maximum below the minimum, which is malformed. Nothing here can repair that; what
+    // it must not do is ask for more than the surface said it would give.
+    CHECK(ChooseSwapchainImageCount(4, 2) == 2);
+}
+
+TEST_CASE("the image counts this machine's two surfaces actually produce") {
+    // The device measurement, restated where CI can check it -- and it is the one case in this
+    // section whose inputs are readings rather than constructions. Both local surfaces report
+    // `minImageCount` 2; the maxima differ by vendor, 8 on the NVIDIA surface and 64 on the
+    // Intel one, from `VulkanSwapchain.cpp`'s own creation log. Both give 3 images against 2
+    // frames in flight, which is the pair of counts the device suite asserts from the other
+    // side with `CHECK(ImageCount() > kFramesInFlight)`.
+    CHECK(ChooseSwapchainImageCount(2, 8) == 3);
+    CHECK(ChooseSwapchainImageCount(2, 64) == 3);
+    CHECK(ChooseSwapchainImageCount(2, 8) > Monarc::RHI::kFramesInFlight);
 }
