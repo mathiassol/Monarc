@@ -1390,7 +1390,7 @@ recompiled rather than reporting "no work to do", and reverted afterwards:
 | the acquire-semaphore reuse wait disabled | **no validation error and no red assertion that detects it** — see below |
 | `ISwapchain`'s two `= default` move operations commented out | `error C2280: 'ISwapchain::ISwapchain(const ISwapchain&)': attempting to reference a deleted function` at both of `VulkanSwapchain.cpp`'s move operations — so they are load-bearing, not decoration |
 | `WindowPlatform::Pump`'s null-handle guard disabled | the suite **hangs**: `WaitMessage` on a closed window blocks forever. A finding stated in the case rather than an assertion claimed |
-| `ReleaseClassIfUnused`'s count check dropped | **nothing red**, twelve `ERROR_CLASS_HAS_WINDOWS` warnings. Windows refuses the unregister itself, so the count is not observable by assertion — two comments that claimed otherwise were corrected |
+| `ReleaseClassIfUnused`'s count check dropped | **nothing red** — 18 cases, 98 assertions, all green — and eighteen `ERROR_CLASS_HAS_WINDOWS` warnings. Windows refuses the unregister itself, so the count is not observable by assertion; two comments that claimed otherwise were corrected |
 
 **One guard has no observable failure, and saying so is the extent of the claim made for it.**
 Removing the wait that retires an acquire semaphore before it is reused produced no validation

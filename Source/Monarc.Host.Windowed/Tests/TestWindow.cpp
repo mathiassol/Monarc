@@ -184,7 +184,8 @@ TEST_CASE("a window created and destroyed leaves no registered class behind") {
 TEST_CASE("the window class survives one of two windows closing") {
     // **This case's first draft claimed to catch the reference count going, and measuring said
     // otherwise.** With the count dropped from `ReleaseClassIfUnused` -- unregister on any
-    // close -- this suite stays entirely green and logs twelve `ERROR_CLASS_HAS_WINDOWS`
+    // close -- this suite stays entirely green at 18 cases and 98 assertions, and logs
+    // eighteen `ERROR_CLASS_HAS_WINDOWS`
     // warnings instead: Windows refuses to unregister a class while a window of it exists, so
     // it protects the surviving window whether Monarc's bookkeeping does or not.
     //

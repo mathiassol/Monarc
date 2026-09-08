@@ -71,7 +71,8 @@ constexpr int kMaxTitleWide = 256;
 /// to, because Windows decides that itself.** `UnregisterClassW` refuses with
 /// `ERROR_CLASS_HAS_WINDOWS` (1412) while any window of the class exists, and measuring that is
 /// what corrected this comment: with the count dropped from `ReleaseClassIfUnused`, the window
-/// suite stays entirely green and logs twelve of those warnings. So the count buys a quiet log
+/// suite stays entirely green -- 18 cases, 98 assertions -- and logs eighteen of those
+/// warnings, one per attempt. So the count buys a quiet log
 /// and an honest "release when the last one goes", and **no assertion in the suite can tell it
 /// from Windows' own refusal.** That is stated rather than dressed up as coverage.
 ///
