@@ -297,7 +297,7 @@ static_assert(std::is_trivially_copyable_v<AccessRequirement>);
 static_assert(std::is_trivially_copyable_v<TextureState>);
 
 int main(int argc, char** argv) {
-    // **Installed before any case runs, and never restored, because the process ends here.**
+    // **Installed before any case runs, and put back below rather than left in place.**
     // `RenderGraph::Refuse` logs at `Error` beside every diagnostic it records, and this suite
     // refuses about thirty times on purpose -- printed, that is thirty `[Error]` lines in a
     // green CI run, which is exactly how the word stops meaning anything. `LogCapture`'s own

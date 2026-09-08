@@ -25,6 +25,9 @@ CaptureState& State() {
 void CaptureSink(const LogRecord& record) {
     CaptureState& state = State();
     if (state.count == LogCapture::kMaxLines) {
+        // The *newest* line is what goes, and `LogCapture::kMaxLines` says so. Counted rather
+        // than dropped silently, which is the same rule `GraphInspection::diagnosticsDropped`
+        // follows one layer up.
         ++state.dropped;
         return;
     }
@@ -62,17 +65,6 @@ std::string_view LogCapture::Line(usize index) {
         return {};
     }
     return std::string_view(state.lines[index], state.lengths[index]);
-}
-
-bool LogCapture::Contains(std::string_view needle) {
-    const CaptureState& state = State();
-    for (usize i = 0; i < state.count; ++i) {
-        if (std::string_view(state.lines[i], state.lengths[i]).find(needle) !=
-            std::string_view::npos) {
-            return true;
-        }
-    }
-    return false;
 }
 
 }  // namespace Monarc::Render::TestSupport

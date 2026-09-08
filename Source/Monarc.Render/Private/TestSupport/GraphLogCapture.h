@@ -32,12 +32,14 @@ namespace Monarc::Render::TestSupport {
 class LogCapture {
 public:
     /// Longest line kept. Longer lines are stored truncated, and `Truncated()` says whether
-    /// any was -- a silently clipped line would make `Contains` answer "no" for a line that
-    /// did contain what was asked about.
+    /// any was -- a case reads a line back with `Line()` and searches it, so a silently
+    /// clipped line would answer "no" for a line that did contain what was asked about.
     static constexpr usize kMaxLineLength = 256;
 
-    /// How many lines are kept. Beyond this the oldest is dropped and `Dropped()` counts it,
-    /// so a case cannot read a partial history as a complete one.
+    /// How many lines are kept. **Beyond this the *newest* is dropped, not the oldest: this is
+    /// a fixed array that stops filling, not a ring buffer.** So an overflowed capture holds
+    /// the head of the log and `Dropped()` counts what never got in, which is what stops a
+    /// case from reading a partial history as a complete one.
     static constexpr usize kMaxLines = 64;
 
     /// Installs the capturing sink and returns the one it replaced.
@@ -52,14 +54,23 @@ public:
     static void Clear();
 
     [[nodiscard]] static usize Count();
+
+    /// How many lines never got in because `kMaxLines` was already reached. The partner of
+    /// `Truncated()`: that one says a line was clipped, this one says a whole line was lost,
+    /// and a case that asserts "these are all the lines" needs both to be answered.
     [[nodiscard]] static usize Dropped();
-    [[nodiscard]] static bool  Truncated();
+
+    [[nodiscard]] static bool Truncated();
 
     /// Line `index`, or an empty view if there is no such line.
     [[nodiscard]] static std::string_view Line(usize index);
 
-    /// Whether any captured line contains `needle`.
-    [[nodiscard]] static bool Contains(std::string_view needle);
+    // **There is deliberately no `Contains(needle)`.** There was, with no caller anywhere: the
+    // one case that reads the log takes `Line(0)` and searches it, because it asserts about a
+    // *particular* line rather than about the run's whole output. The rule the module applies
+    // to its own enumerators, handle types and accessors -- arrive with the first caller --
+    // applies to test support too, and a convenience nothing needed was the more misleading
+    // for having comments justify themselves by its behaviour.
 };
 
 }  // namespace Monarc::Render::TestSupport

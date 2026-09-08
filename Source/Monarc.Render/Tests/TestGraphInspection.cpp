@@ -700,9 +700,18 @@ TEST_CASE("a whole report that exactly fits is not reported as truncated") {
     CHECK(clipped.written == counted.needed - 1);
 }
 
-// A lifetime that names no pass is empty, whichever end is missing. `IsEmpty` reads only
-// `firstPass`, which is right -- a resource with a first write always has a last use -- and
-// this is where that premise is written down rather than assumed.
+// `IsEmpty` reads `firstPass` and only `firstPass`, which is right -- a resource with a first
+// write always has a last use -- and **the two half-empty lifetimes are what actually pin it.**
+// The four assertions below them do not: every one of them holds unchanged if `IsEmpty()` is
+// rewritten to read `lastPass`, because in all four both ends agree. So the premise was
+// written down and not asserted until these two lines existed.
+//
+// The senses are opposite on purpose, and each fails under the swap on its own: a lifetime with
+// no first pass *is* empty however late its last use, and one with a first pass is *not* empty
+// however missing its last.
+static_assert(ResourceLifetime{kNoPass, 5}.IsEmpty());
+static_assert(!ResourceLifetime{0, kNoPass}.IsEmpty());
+
 static_assert(ResourceLifetime{}.IsEmpty());
 static_assert(ResourceLifetime{kNoPass, kNoPass}.IsEmpty());
 static_assert(!ResourceLifetime{0, 0}.IsEmpty());

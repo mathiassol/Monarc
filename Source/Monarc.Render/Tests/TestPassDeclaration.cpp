@@ -293,7 +293,13 @@ TEST_CASE("a refusal is logged with the detail its Error cannot carry") {
                                  ResourceAccess::SampledRead));
 
     REQUIRE(LogCapture::Count() == 1u);
+    // **The two ways a capture can be incomplete, both answered.** `Truncated()` says a line was
+    // clipped at `kMaxLineLength`, which would make the four searches below answer "no" about a
+    // line that did say the thing; `Dropped()` says a whole line never got in at `kMaxLines`,
+    // which is what would make "one refusal, one line" read as true when it was not. Asserting
+    // the count alone cannot separate "one line and nothing lost" from "one line and more lost".
     CHECK_FALSE(LogCapture::Truncated());
+    CHECK(LogCapture::Dropped() == 0u);
     const std::string_view line = LogCapture::Line(0);
     CAPTURE(line);
     // The three things the `Error` could not say: which kind of refusal, which pass, and which
@@ -321,6 +327,63 @@ TEST_CASE("a refusal is logged with the detail its Error cannot carry") {
     CHECK(small.Inspect().diagnostics.size() == 1u);
     CHECK(small.Inspect().diagnosticsDropped == 2u);
     CHECK(LogCapture::Count() == 3u);
+    CHECK(LogCapture::Dropped() == 0u);
+}
+
+TEST_CASE("an overflowing log capture keeps the head of the run and counts the rest") {
+    // **The drop policy, held by a case rather than by a comment.** `GraphLogCapture.h` said
+    // "beyond this the oldest is dropped", which is the opposite of what `CaptureSink` does: it
+    // is a fixed array that stops filling, not a ring buffer, so what an overflow loses is the
+    // *newest* lines and what survives is the head. A reader who trusted the old sentence would
+    // have gone looking in `Line(0)` for the last thing that happened.
+    //
+    // Nothing else in the suite reaches `kMaxLines` -- the most any case captures is three -- so
+    // the bound and the counter were both described and neither was run.
+    using Monarc::Render::TestSupport::LogCapture;
+
+    SystemAllocator     allocator;
+    RenderGraph::Config config{};
+    // Every refusal logs whether or not it is recorded, which is the half of the record that
+    // never truncates; zero here just keeps the diagnostics pool out of the way.
+    config.maxDiagnostics = 0;
+    RenderGraph graph(allocator, config);
+
+    Result<PassBuilder> pass = graph.AddPass("Pass");
+    REQUIRE(pass.has_value());
+
+    // No resource is declared, so every id below names nothing and every `Read` is refused.
+    // The ids ascend so that each line is distinguishable from every other -- which is what
+    // makes "the head survived" an assertion rather than a count.
+    constexpr Monarc::usize kOverflow = 6;
+    LogCapture::Clear();
+    for (Monarc::u32 i = 0; i < LogCapture::kMaxLines + kOverflow; ++i) {
+        static_cast<void>(
+            pass->Read(TextureId::ForTesting(i, graph.BuildGeneration()),
+                       ResourceAccess::SampledRead));
+    }
+
+    CHECK(LogCapture::Count() == LogCapture::kMaxLines);
+    CHECK(LogCapture::Dropped() == kOverflow);
+    CHECK_FALSE(LogCapture::Truncated());
+
+    // The first line emitted is the first line kept, and the last line kept is the
+    // `kMaxLines`-th emitted. A ring buffer would have left line 6 at index 0 and line 69 at
+    // the end, so these two are what tell the two policies apart.
+    const std::string_view first = LogCapture::Line(0);
+    const std::string_view last  = LogCapture::Line(LogCapture::kMaxLines - 1);
+    CAPTURE(first);
+    CAPTURE(last);
+    // The literal below is `kMaxLines - 1` written out, because there is no formatting into a
+    // `std::string_view` here to build it with. Asserted rather than assumed, so that raising
+    // the bound is a compile error naming this line instead of a puzzling `find` failure.
+    static_assert(LogCapture::kMaxLines == 64);
+    CHECK(first.find("resource 0:0") != std::string_view::npos);
+    CHECK(last.find("resource 63:0") != std::string_view::npos);
+    CHECK(LogCapture::Line(LogCapture::kMaxLines).empty());
+
+    // Left empty for whichever case reads the log next, which asserts its own count.
+    LogCapture::Clear();
+    CHECK(LogCapture::Dropped() == 0u);
 }
 
 TEST_CASE("an id from a previous build is refused") {
