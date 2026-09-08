@@ -1373,7 +1373,7 @@ One caveat worth stating: the captures show
 `Monarc.FirstLight` asks for colour-attachment only. RenderDoc patches the transfer-source bit in
 so that it can save the backbuffer; that value is RenderDoc's, not Monarc's.
 
-**Mutation experiments.** Each was rebuilt from a touched source, with `ninja` confirmed to have
+**Mutation experiments, thirteen of them.** Each was rebuilt from a touched source, with `ninja` confirmed to have
 recompiled rather than reporting "no work to do", and reverted afterwards:
 
 | mutation | result |
@@ -1388,6 +1388,9 @@ recompiled rather than reporting "no work to do", and reverted afterwards:
 | `ToVulkan(Format::B8G8R8A8_UNORM)` returns `VK_FORMAT_R8G8B8A8_UNORM` | both readbacks `(64, 128, 192, 255)`, **0 of 230400 pixels exact** |
 | the test's clear colour changed to `(200, 30, 10)` | 11 assertions red across both readbacks and the screen capture, every reading `(10, 30, 200, 255)` |
 | the acquire-semaphore reuse wait disabled | **no validation error and no red assertion that detects it** — see below |
+| `ISwapchain`'s two `= default` move operations commented out | `error C2280: 'ISwapchain::ISwapchain(const ISwapchain&)': attempting to reference a deleted function` at both of `VulkanSwapchain.cpp`'s move operations — so they are load-bearing, not decoration |
+| `WindowPlatform::Pump`'s null-handle guard disabled | the suite **hangs**: `WaitMessage` on a closed window blocks forever. A finding stated in the case rather than an assertion claimed |
+| `ReleaseClassIfUnused`'s count check dropped | **nothing red**, twelve `ERROR_CLASS_HAS_WINDOWS` warnings. Windows refuses the unregister itself, so the count is not observable by assertion — two comments that claimed otherwise were corrected |
 
 **One guard has no observable failure, and saying so is the extent of the claim made for it.**
 Removing the wait that retires an acquire semaphore before it is reused produced no validation
@@ -1416,6 +1419,14 @@ same reason), and `Private/WindowPlatform.h` in `Monarc.Host.Windowed` (which is
 live in `Monarc.Host.Windowed/TestsDevice/` rather than beside the swapchain, because they need
 both the backend and a window they can drive, and a tier-3 test reaching down to tier 2 is the
 direction the module graph allows.
+
+One thing the plan puts in `VulkanSurface.cpp` is deliberately not there: the queue-family
+presentation-support query. `vkGetPhysicalDeviceSurfaceSupportKHR` belongs to `VK_KHR_surface`
+rather than to any platform's extension, so it needs neither `<Windows.h>` nor
+`VK_USE_PLATFORM_WIN32_KHR` — putting it in a per-platform directory would put
+platform-*neutral* code there, which is the mistake ADR-0016's exemption note warns about from
+the other side. It lives in the two places that ask: `VulkanBackend::AdapterCanPresent` and
+`VulkanSwapchainFactory::Create`.
 
 **Checkable claims.**
 `grep -rniE '^[[:space:]]*#[[:space:]]*include[[:space:]]*<windows\.h>' Source/` matches seven

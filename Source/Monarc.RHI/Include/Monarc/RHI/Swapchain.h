@@ -205,6 +205,14 @@ public:
 
     /// Whether an acquired image can be copied into a buffer -- `allowReadback` was asked for
     /// **and** the surface offered it. False on a swapchain that did not ask.
+    ///
+    /// **This has no caller in shipped code, which is stated rather than left to be noticed** --
+    /// the exception `IQueue::CompletedValue` and `LastSubmittedValue` in Device.h already make,
+    /// and for a related reason. Its only caller is the swapchain readback in
+    /// `Monarc.Host.Windowed`'s device suite, and being *asked* is the whole point of it: a
+    /// surface is not required to offer `VK_IMAGE_USAGE_TRANSFER_SRC_BIT`, and a suite that
+    /// asserted about a copy the surface never permitted would be asserting about nothing. A
+    /// shipped screenshot feature is its second caller and arrives with the feature.
     [[nodiscard]] virtual bool ReadbackAvailable() const = 0;
 
     /// Whether the swapchain has reported that it no longer matches its surface.

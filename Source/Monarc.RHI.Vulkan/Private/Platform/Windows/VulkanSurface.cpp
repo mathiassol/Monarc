@@ -24,6 +24,15 @@
 // only the current platform's Private/Platform/<Platform>/ tree, so a Linux build never sees
 // this one rather than compiling it out of a conditional.
 //
+// **One thing the plan's checkbox puts here is deliberately elsewhere: the queue-family
+// presentation-support query.** `vkGetPhysicalDeviceSurfaceSupportKHR` belongs to
+// `VK_KHR_surface`, not to any platform's extension, so it needs neither `<Windows.h>` nor
+// `VK_USE_PLATFORM_WIN32_KHR` -- putting it in this directory would put platform-*neutral* code
+// in a per-platform tree, which is the mistake ADR-0016's own exemption note warns about from
+// the other side. It lives in the two places that ask the question:
+// `VulkanBackend::AdapterCanPresent`, which a caller asks before choosing a device, and
+// `VulkanSwapchainFactory::Create`, which asks again because a caller is not obliged to have.
+//
 // **The define comes before every include, and that is load-bearing.**
 // `VK_USE_PLATFORM_WIN32_KHR` is what makes `vulkan.h` pull in `vulkan_win32.h`, and
 // `vulkan.h` has an include guard: if any header reached it first, the macro would be defined
