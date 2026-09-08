@@ -122,12 +122,19 @@ struct PassInspection {
     u32 index = 0;
 
     /// This pass's position among the passes that will actually run, or `kNoPass` when
-    /// `culled`.
+    /// `culled` -- and `kNoPass` also while the graph is still declaring, because nothing has
+    /// settled an order yet.
     ///
-    /// **Equal to `index` for every pass in Phase A4 Task 1**, because nothing reorders and
-    /// nothing culls yet: execution order is declaration order. Task 2 is what makes the two
-    /// diverge.
-    u32 executionOrder = 0;
+    /// **Equal to `index` for every pass of a *compiled* graph in Phase A4 Task 1**, because
+    /// nothing reorders and nothing culls yet: execution order is declaration order. Task 2 is
+    /// what makes the two diverge. The qualification matters -- `AddPass` writes `kNoPass` on
+    /// purpose so that a graph inspected mid-declaration cannot be read as though its order
+    /// were decided, and Tests/TestPassDeclaration.cpp asserts exactly that before it compiles.
+    ///
+    /// **Defaulted to `kNoPass` and not to zero**, which is the sentinel convention every other
+    /// "no pass here" field in this header follows. A default-constructed `PassInspection` that
+    /// claimed to run first would be a hand-built report saying something its author did not.
+    u32 executionOrder = kNoPass;
 
     /// Whether nothing consumes this pass's outputs, so it will not run.
     ///
@@ -149,6 +156,16 @@ struct PassInspection {
 };
 
 /// One declared resource.
+///
+/// **No declaring pass, and that is a decision rather than an omission.** "Which pass created
+/// this transient" is a declaration fact this report deliberately cannot emit: creating a
+/// resource is not accessing it -- `PassBuilder::CreateTexture` states that rule, and
+/// `AccessInspection` is where every pass-to-resource edge lives -- so a `createdBy` field
+/// would be the one edge in the report that is not an access. It would also tie a resource to a
+/// pass that Task 2 may cull, leaving a live resource pointing at a pass that does not run, and
+/// the derivation has no use for it: a barrier comes from two *accesses*. If a debug view ever
+/// wants the answer, the declaring pass is recoverable from nothing today, which is the honest
+/// cost of this and is why it is written down here.
 struct ResourceInspection {
     /// Non-owning; `PassInspection::name`'s note applies.
     std::string_view name = {};

@@ -717,10 +717,20 @@ static_assert(ResourceLifetime{kNoPass, kNoPass}.IsEmpty());
 static_assert(!ResourceLifetime{0, 0}.IsEmpty());
 static_assert(!ResourceLifetime{3, 7}.IsEmpty());
 
-// The two sentinels are deliberately named separately -- one is a pass index and one is a
-// group number -- and there is no assertion that they are equal. Pinning that would forbid a
-// change either is entitled to make on its own, which is the opposite of what naming them
-// separately was for.
+// The three sentinels are deliberately named separately -- one is a pass index, one a group of
+// aliased resources, one a group of diagnostic rows -- and there is no assertion that they are
+// equal. Pinning that would forbid a change any of them is entitled to make on its own, which
+// is the opposite of what naming them separately was for.
+
+// **Every "no pass here" field defaults to the sentinel rather than to zero**, which is what
+// stops a hand-built report from claiming a pass runs first, or a diagnostic from claiming
+// membership in report zero, merely because nobody assigned the field. `RenderGraph::Refuse`
+// relies on the last of these directly -- it leaves `group` alone and says why; the other two
+// matter to a report built by hand, which is how every case in this file that renders a Task 2
+// or Task 3 field produces one.
+static_assert(Monarc::Render::PassInspection{}.executionOrder == kNoPass);
+static_assert(Monarc::Render::GraphDiagnostic{}.pass == kNoPass);
+static_assert(Monarc::Render::GraphDiagnostic{}.group == Monarc::Render::kNoDiagnosticGroup);
 
 // Every inspection type is a plain aggregate a test can build by hand, which is what the
 // hand-built case above depends on and what "structured first, text second" means in practice.

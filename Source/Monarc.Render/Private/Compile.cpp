@@ -74,6 +74,12 @@ Status RenderGraph::Compile() {
     // pass list rather than left to `AddPass`'s defaults so that Task 2 replaces one thing
     // instead of reconciling two: `AddPass` leaves `executionOrder` at `kNoPass`, and this is
     // the only place an order is ever assigned.
+    //
+    // **The `culled` write is a placeholder and is provably a no-op today**, which is worth
+    // saying so that it does not read as load-bearing: `AddPass` already writes `false` and
+    // nothing anywhere writes `true`, so removing this line changes no value. It is kept
+    // because it is the line Task 2's culling replaces, and a loop that settled order without
+    // mentioning culling would make the two look like separate decisions.
     for (usize i = 0; i < m_passes.Size(); ++i) {
         m_passes[i].executionOrder = static_cast<u32>(i);
         m_passes[i].culled         = false;

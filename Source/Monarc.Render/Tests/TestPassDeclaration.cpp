@@ -570,7 +570,8 @@ TEST_CASE("importing an invalid handle is refused") {
     Result<PassBuilder> pass = graph.AddPass("Present");
     REQUIRE(pass.has_value());
 
-    const Result<TextureId> imported = pass->ImportTexture("Nothing", SwapchainImport(TextureHandle{}));
+    const Result<TextureId> imported =
+        pass->ImportTexture("Nothing", SwapchainImport(TextureHandle{}));
     REQUIRE_FALSE(imported.has_value());
     CHECK(imported.error().code == ErrorCode::InvalidArgument);
 
@@ -1223,16 +1224,29 @@ TEST_CASE("a pass with no declarations at all is not an error") {
 // `RHI::ICommandList&` stood open, and opening only `m_commands` did the same. Both are now
 // detected on their own; see `kCanGetCommandList`.
 //
-// **The audit that produced those two turned up nothing else, and the class is small enough to
-// enumerate.** Its declared members are the four deleted copy and move operations, the private
-// constructor, `Commands()` and `m_commands`, plus an implicit destructor. Only the last three
-// can yield an `RHI::ICommandList&`, and all three are now pinned -- the constructor by
-// `is_constructible_v`, the other two by the requirements below. The four deleted operations
-// yield nothing whatever their access: a deleted function is a diagnostic wherever it is named,
-// and even undeleted, assignment needs a `PassCommandList` on both sides and so hands a pass no
-// list it did not already have. The destructor produces no reference at all. There is no
-// `operator RHI::ICommandList&`, which `is_convertible_v` covers, and no base class, which
-// `is_base_of_v` covers.
+// **What these guards cover is the class as it is declared today, and two of them cover it by
+// name.** The audit enumerated the declared members -- the four deleted copy and move
+// operations, the private constructor, `Commands()` and `m_commands`, plus an implicit
+// destructor -- and only the last three can yield an `RHI::ICommandList&`. All three are
+// pinned: the constructor by `is_constructible_v`, the other two by the requirements below. The
+// four deleted operations yield nothing whatever their access -- a deleted function is a
+// diagnostic wherever it is named, and even undeleted, assignment needs a `PassCommandList` on
+// both sides and so hands a pass no list it did not already have. The destructor produces no
+// reference at all. There is no `operator RHI::ICommandList&`, which `is_convertible_v` covers,
+// and no base class, which `is_base_of_v` covers.
+//
+// **The limit worth stating plainly: `kCanGetCommandList` and `kCanReachCommandListPointer`
+// name `Commands()` and `m_commands`, so they detect *those two* being re-exposed and nothing
+// else.** A newly named public accessor returning `RHI::ICommandList&` -- `List()`,
+// `Underlying()`, `operator->` -- would be invisible to every assertion in this block, because
+// `is_convertible_v` catches only a conversion operator and the rest name members that would
+// still be private. So this is an enumeration that was true when it was written rather than a
+// property the compiler maintains.
+//
+// **Task 4 is when to re-run it**, and the plan says so: `Execute` is what first constructs a
+// `PassCommandList` and first has a reason to forward something through it, and a forwarding
+// method is exactly the edit that adds a member this block does not know about. Re-enumerate
+// the class then rather than reading these assertions as coverage of whatever it has grown.
 //
 // **The diagnostics, measured on both compilers, because a `static_assert` says the property
 // holds and not what a caller who breaks it is told.** Each was compiled as its own

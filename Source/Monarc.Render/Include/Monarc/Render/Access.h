@@ -27,9 +27,9 @@ namespace Monarc::Render {
 ///
 /// **What that rule does *not* claim, and `TextureLayout`'s note in Barrier.h is where it is
 /// counted.** Three of the layouts these accesses ask for -- `ShaderReadOnly`,
-/// `DepthStencilAttachment` and `DepthStencilReadOnly` -- name a transition no texture
-/// `IDevice::CreateTexture` can make may legally be put into, because `RHI::TextureUsage` has
-/// two bits and neither is `Sampled` nor a depth-stencil attachment. So `SampledRead` and the
+/// `DepthStencilAttachment` and `DepthStencilReadOnly` -- name a transition that is illegal for
+/// every texture `IDevice::CreateTexture` can make, because `RHI::TextureUsage` has two bits
+/// and neither is `Sampled` nor a depth-stencil attachment. So `SampledRead` and the
 /// two depth accesses are derivable and inspectable now, and become *executable* when the
 /// usage bits that permit them arrive with the first shader that binds one. That is the same
 /// disclosure `TextureLayout` makes about itself, one level up.

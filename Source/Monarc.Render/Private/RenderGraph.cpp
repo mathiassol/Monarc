@@ -132,9 +132,14 @@ Error RenderGraph::Refuse(DiagnosticKind kind, ErrorCode code, const char* messa
     // and therefore a string literal, so "an error naming the resource" cannot be said through
     // the returned `Error` at all. The log is for a human; the diagnostic is what a test
     // asserts on.
+    //
+    // `Monarc::ToString` qualified where `ToString(kind)` is not: the unqualified name finds
+    // this module's overload set, and `ErrorCode`'s lives in `Monarc`, so the second call
+    // reaches it only through ADL. It works, and saying which namespace answers is worth more
+    // than the four characters -- the same spelling Private/GraphInspection.cpp uses.
     MONARC_LOG(LogCategories::RenderGraph, Error,
-               "refused: {} ({}) pass {} resource {}:{} -- {}", ToString(kind), ToString(code),
-               pass, resource.index, resource.generation, message);
+               "refused: {} ({}) pass {} resource {}:{} -- {}", ToString(kind),
+               Monarc::ToString(code), pass, resource.index, resource.generation, message);
 
     if (m_diagnostics.Size() < m_config.maxDiagnostics) {
         // `group` is deliberately left at its default rather than assigned like the five fields

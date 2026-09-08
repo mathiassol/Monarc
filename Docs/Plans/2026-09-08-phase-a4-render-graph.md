@@ -248,6 +248,15 @@ that would hurt most.
       contribute only their callbacks.
 - [ ] Transient resources are created and destroyed around the frame, each with its own
       allocation, with the aliasing gap stated where the allocation happens.
+- [ ] **Re-run `PassCommandList`'s member enumeration, because this task is the edit that
+      invalidates it.** The `static_assert`s in Tests/TestPassDeclaration.cpp that keep
+      ADR-0006's central promise are *name-based*: `kCanGetCommandList` and
+      `kCanReachCommandListPointer` detect `Commands()` and `m_commands` being re-exposed, and
+      `is_convertible_v` catches a conversion operator — but a **newly named** public accessor
+      returning `RHI::ICommandList&` is invisible to all of them. Task 4 is when `Execute`
+      first constructs one of these and first has a reason to forward a recording call through
+      it, so adding a forwarding method is the moment to enumerate the class again rather than
+      to read a green suite as coverage. Add a guard per new member that can yield a list.
 - [ ] `Monarc.FirstLight` **stops writing barriers and stops calling `BeginRendering`
       directly.** It declares a pass that writes the imported swapchain image with a clear
       load-op, and the graph does the rest. Deleting that hand-written code is the point of the
