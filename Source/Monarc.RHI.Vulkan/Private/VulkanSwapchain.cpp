@@ -104,9 +104,18 @@ constexpr VkPresentModeKHR kPresentMode = VK_PRESENT_MODE_FIFO_KHR;
 /// **That last argument is the accepted pattern rather than a spec guarantee, and it is worth
 /// saying so.** Vulkan has no direct signal for "the present's semaphore wait completed"; the
 /// airtight version needs `VK_EXT_swapchain_maintenance1`'s present fences, which A3 does not
-/// enable. What A3 does instead is destroy and rebuild every semaphore in `Recreate`, after a
-/// device wait -- so the one path where the argument could be strained, a swapchain torn down
-/// mid-flight, has no semaphore history to strain.
+/// enable.
+///
+/// **The teardown reduces that exposure rather than removing it, and an earlier version of this
+/// comment claimed removal.** `Recreate` destroys and rebuilds every semaphore, so no semaphore
+/// is carried across a recreation and the reuse argument above never has to hold across one.
+/// What it does *not* do is retire a present whose semaphore wait is still outstanding:
+/// `TearDownSwapchain`'s `vkDeviceWaitIdle` waits on queue operations, and a presentation
+/// engine's wait is not a queue operation. The best available ordering is what is done there --
+/// `vkDestroySwapchainKHR` before the semaphores it presented with, so the one call known to
+/// end the presentation engine's interest happens first -- and closing the gap properly still
+/// needs maintenance1, which Docs/Status.md records under "A3 Task 4 delivered" as reduced
+/// rather than closed.
 struct SwapchainImage {
     VkImage       image          = VK_NULL_HANDLE;
     TextureHandle texture        = {};
@@ -131,10 +140,32 @@ struct AcquireSlot {
     ///
     /// Indexing by frame in flight, as the plan asks, is what makes that wait free in the
     /// steady state: `IDevice::BeginFrame` has already waited on the same or a later value
-    /// before the frame got here, so `vkWaitSemaphores` returns immediately. Deriving the
-    /// index from the *device's* frame counter would have been the other way to do it, and it
-    /// breaks the moment the two drift -- an out-of-date acquire skips a submission, and from
-    /// then on the two counters disagree. A recorded value cannot drift.
+    /// before the frame got here, so `vkWaitSemaphores` returns immediately.
+    ///
+    /// **What the wait is actually for was re-derived after a review, and it is not what an
+    /// earlier version of this comment said.** That version justified it by "the drifted case
+    /// -- an out-of-date acquire skips a submission and the two counters stop agreeing", and
+    /// the drifted case is the one case that cannot strain the wait. `BeginFrame` advances
+    /// `frameIndex` on every success; `acquireCursor` advances only on a *successful* acquire;
+    /// so the frame index can run ahead of the cursor and never behind. Ahead means
+    /// `BeginFrame` waits on a frame slot holding a submission at least as recent as the one
+    /// this acquire slot recorded, and the timeline counter only increases -- so reaching the
+    /// newer value has already reached the older one.
+    ///
+    /// The sequence that *does* reach this wait with nothing having covered it is a caller
+    /// that acquires **without a `BeginFrame` in between**, which nothing in the API refuses:
+    /// `phase` is `Idle` again after `Present`, and `Acquire` never consults the device's frame
+    /// state. Two ordinary frames put a recorded value in each of the two slots and leave both
+    /// frame slots un-waited; a third acquire taken before that frame's `BeginFrame` then finds
+    /// slot 0's value with no `BeginFrame` having waited on it, and this wait is the only thing
+    /// keeping the reuse legal. `acquiring without a BeginFrame in between is what the
+    /// acquire-slot wait is for`, in Monarc.Host.Windowed's device suite, walks exactly that
+    /// sequence and logs how far the timeline had actually got.
+    ///
+    /// So: unreachable as *work* under the pacing rule `ISwapchain`'s class comment documents,
+    /// reachable the moment a caller departs from it. A recorded value is also what keeps the
+    /// slot index honest -- deriving it from the device's frame counter would tie the two
+    /// cursors together exactly where they are allowed to differ.
     u64 consumedByTimelineValue = 0;
 };
 
@@ -568,6 +599,27 @@ void VulkanSwapchainState::TearDownSwapchain() {
         if (TextureSlot* slot = device->Resolve(entry.texture); slot != nullptr) {
             device->ReleaseTextureSlot(*slot);
         }
+    }
+
+    // After the views, because a view outliving its image is
+    // `VUID-vkDestroyImage-image-01000`'s shape and the images belong to this swapchain.
+    //
+    // **Before both semaphore loops below, and that ordering is the correction a review
+    // forced.** The wait above is `vkDeviceWaitIdle`, which retires *queue* operations -- and
+    // a presentation engine's wait on a binary semaphore is not one. So a semaphore destroyed
+    // between the device wait and this call could still be one the presentation engine has not
+    // finished waiting on; `vkDestroySwapchainKHR` is what ends its interest in the images and
+    // therefore in the semaphores those presents waited on. Doing it in this order does not
+    // make the ordering *provable* -- Vulkan has no direct signal for "the present's semaphore
+    // wait completed", which is the gap `VK_EXT_swapchain_maintenance1`'s present fences exist
+    // to close and A3 does not enable them -- but it does put the one thing that is known to
+    // end the presentation engine's use of them first instead of last.
+    if (swapchain != VK_NULL_HANDLE) {
+        device->functions.vkDestroySwapchainKHR(device->device, swapchain, nullptr);
+        swapchain = VK_NULL_HANDLE;
+    }
+
+    for (SwapchainImage& entry : images) {
         if (entry.renderFinished != VK_NULL_HANDLE) {
             device->functions.vkDestroySemaphore(device->device, entry.renderFinished, nullptr);
         }
@@ -577,22 +629,16 @@ void VulkanSwapchainState::TearDownSwapchain() {
     for (AcquireSlot& slot : acquireSlots) {
         if (slot.semaphore != VK_NULL_HANDLE) {
             // **Destroyed and rebuilt rather than carried across a recreation, which is what
-            // makes the semaphore hazard disappear instead of being reasoned about.** An
+            // keeps the reuse argument from having to hold across a recreation as well.** An
             // acquire that succeeded and was never submitted leaves its semaphore signalled,
             // and reusing that one is a validation error; a fresh semaphore has no history to
             // be in the wrong state. Legal to destroy in either state: a signalled binary
-            // semaphore with no pending operation is not "in use", and the device wait above
-            // is what retired the operations there were.
+            // semaphore with no pending operation is not "in use", the device wait above is
+            // what retired the operations there were, and the swapchain whose presentation
+            // engine could still have signalled one is already gone.
             device->functions.vkDestroySemaphore(device->device, slot.semaphore, nullptr);
         }
         slot = AcquireSlot{};
-    }
-
-    // After the views, because a view outliving its image is
-    // `VUID-vkDestroyImage-image-01000`'s shape and the images belong to this swapchain.
-    if (swapchain != VK_NULL_HANDLE) {
-        device->functions.vkDestroySwapchainKHR(device->device, swapchain, nullptr);
-        swapchain = VK_NULL_HANDLE;
     }
 
     extent        = Extent2D{};

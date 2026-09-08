@@ -279,9 +279,15 @@ public:
 
     /// Destroys the swapchain and builds another for `extent`, keeping the surface.
     ///
-    /// **This is where resize, maximise and restore all land, and it waits for the device to
-    /// go idle before touching anything.** Destroying a swapchain whose images a submitted
-    /// frame is still rendering into is undefined behaviour; the wait is not a convenience.
+    /// **This is where resize, maximise and restore all land, and nothing is destroyed until
+    /// the device has gone idle.** Destroying a swapchain whose images a submitted frame is
+    /// still rendering into is undefined behaviour; the wait is not a convenience.
+    ///
+    /// It is *not* the first thing this call does, which an earlier version of this sentence
+    /// implied by saying it waits "before touching anything": the wait lives in the teardown,
+    /// on the far side of the four refusals below. A call that is refused -- an empty extent
+    /// most of all -- therefore waits for nothing and destroys nothing, which is exactly what
+    /// a frame loop that asked at the wrong moment needs.
     ///
     /// Every `TextureHandle` this swapchain issued is stale afterwards, by the generation rule
     /// `IDevice::DestroyTexture` states: the slots change hands, so a handle held across this
