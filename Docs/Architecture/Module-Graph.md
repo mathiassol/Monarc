@@ -176,7 +176,10 @@ These are build failures or test failures, not conventions:
 3. **Kind containment.** A `Runtime` module may not depend on a `Tool` or `Editor` module.
 4. **Renderer package boundary.** No Tier 2 translation unit may include a header from a
    Tier 1 or Tier 3 module — today `Monarc.World`, `Monarc.Assets` and
-   `Monarc.Host.Windowed`.
+   `Monarc.Host.Windowed`. **A module's own code only**: gate 3 walks `Include/` and
+   `Private/` and does not read `Tests/` or `TestsDevice/`, because a test target is not a
+   module. Rule 10 is what covers the test directories, and it does so on the link line
+   rather than on the includes.
 5. **Headless purity.** The headless host binary contains no RHI or graphics-API symbols.
 6. **Export purity.** A shipped game binary contains no `Monarc::Editor` or `Monarc::Cook`
    symbols.
@@ -186,17 +189,61 @@ These are build failures or test failures, not conventions:
 8. **Apps are leaves.** No module may list an app in `PUBLIC_DEPS` or `PRIVATE_DEPS`.
 9. **Layout.** Every module has a `Private/` directory; a library has an `Include/`
    directory and an app does not.
+10. **Test targets link only what their module may depend on.** A test target is not a module
+    and nothing may depend on one, but its link line is still governed: the test binary for a
+    module at tier *T* may link a Monarc module only where a module at tier *T* could depend
+    on it — downward by tier, inside the Tier 2 package boundary, and never an app.
+
+## What the rules say about test directories
+
+Rule 10 exists because rule 4 stops at a module's own code, and the gap that leaves is
+specific enough to write down.
+
+`Tests/` and `TestsDevice/` are outside every source-reading gate **by design**: a test target
+is not a module, nothing may depend on one, and a test is entitled to do things module code may
+not — exercise a platform `#ifdef`, or reach across a tier to test a boundary. So gate 3 cannot
+see a *Tier 2* test that includes `Monarc/Host/`.
+
+Until Phase A3 Task 5 nothing else could either. What stopped such a test was that
+`_monarc_add_test_binary()` links only the module under test, so `Monarc/Host/Window.h` was not
+on a `Monarc.RHI.Vulkan` test's include path — **protection by a missing link line rather than
+by a rule**, and one `target_link_libraries` away from gone. Measured: adding that line to
+`Monarc.RHI.Vulkan.DeviceTests` and then including `<Monarc/Host/Window.h>` in it *compiles
+clean*, and gate 3 reports PASS while it does.
+
+Rule 10 polices the link line, because the link line is the lever. Three consequences worth
+stating:
+
+- `Monarc.Host.Windowed.DeviceTests` linking `Monarc.RHI.Vulkan` stays legal — Tier 3 reaching
+  down to Tier 2 is the direction dependencies already run, and that suite exists precisely to
+  build a swapchain against a real window.
+- The reverse, a `Monarc.RHI.Vulkan` test linking `Monarc.Host.Windowed`, is now a gate failure
+  rather than a link error nobody arranged.
+- **Rule 10 is not a superset of rule 4.** A test that reached a forbidden header through a
+  hand-written `target_include_directories`, without linking the module, would pass. It would
+  still have to link something to resolve a symbol, so the residue is a header-only reach across
+  the boundary — small, and recorded rather than claimed away.
+
+An include rule for test directories was the alternative, and it was rejected: it would be a
+*different* rule from the one gate 3 implements — one that had to distinguish downward includes
+from upward ones — and Monarc would then have two boundary rules to keep in agreement instead of
+one boundary and one lever.
 
 All of these would decay silently without automation, and all but rule 2 have a numbered gate
 in [M0](../Milestones/M0-First-Light.md#verification-gates): rule 6 is gate 1, rules 1 and 3
-share gate 2, rule 4 is gate 3, rule 5 is gate 9, rule 7 is gate 10, rule 8 is gate 12 and
-rule 9 is gate 13. Rule 2 is the exception because CMake refuses it at configure time, which
-is earlier than a gate could catch it.
+share gate 2, rule 4 is gate 3, rule 5 is gate 9, rule 7 is gate 10, rule 8 is gate 12, rule 9
+is gate 13 and rule 10 is gate 14. Rule 2 is the exception because CMake refuses it at configure
+time, which is earlier than a gate could catch it.
 
 The two mechanisms divide the rules as follows. `monarc_validate_modules()` refuses rules 2,
 3 and 8 at configure time, which is where a developer wants to hear about them.
-`Tools/check_architecture.py` checks rules 1, 4, 7, 8 and 9 against the emitted
+`Tools/check_architecture.py` checks rules 1, 4, 7, 8, 9 and 10 against the emitted
 `module-graph.json` and the source tree, and runs under `ctest`.
+
+`module-graph.json` carries a `testTargets` array alongside `modules` for rule 10's sake: which
+libraries a test target links is something only CMake knows, and gate 14 has to read it back.
+Test targets are a sibling key and not module rows, because `monarc explain` answers a question
+no test target participates in.
 
 **Rule 8 is the one checked in both places, deliberately.** `module-graph.json` is the
 product [`monarc explain`](../Product/Build-And-Export.md) reads, so a stale or hand-edited

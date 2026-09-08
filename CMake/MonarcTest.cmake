@@ -67,6 +67,23 @@ function(_monarc_add_test_binary module source_dir target_suffix out_target)
     monarc_set_target_options(${_target})
     set_target_properties(${_target} PROPERTIES FOLDER "Tests")
 
+    # Recorded so that gate 14 can read this target's link line back.
+    #
+    # **The link line is the whole lever, which is why this exists.** Every source-reading gate
+    # skips Tests/ and TestsDevice/ by design (see MODULE_SOURCE_DIRS in
+    # Tools/check_architecture.py): test targets are not modules. Gate 3 therefore cannot see a
+    # tier-2 *test* that includes Monarc/Host/ -- and what stopped one was not a rule but an
+    # accident, that _monarc_add_test_binary links only the module under test, so the header is
+    # not on the include path. One target_link_libraries line lifts that, exactly as
+    # Monarc.Host.Windowed/CMakeLists.txt already does in the allowed direction. Recording the
+    # link line turns the accident into a checkable rule; A3 Task 5's entry in Docs/Status.md
+    # weighs this against the two alternatives.
+    #
+    # The links themselves are read at emission time rather than here, because a module's
+    # CMakeLists.txt adds to them *after* this function returns.
+    set_property(GLOBAL APPEND PROPERTY MONARC_ALL_TEST_TARGETS ${_target})
+    set_property(GLOBAL PROPERTY MONARC_TEST_${_target}_MODULE "${module}")
+
     set(${out_target} "${_target}" PARENT_SCOPE)
 endfunction()
 

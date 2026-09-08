@@ -33,6 +33,19 @@ FORBIDDEN_INCLUDES = {
     ],
 }
 
+# The same rule in the other vocabulary: for each tier, the tiers it may not *link*.
+#
+# Two constants and not one, because the two gates read different things. Gate 3 reads
+# `#include` lines, which carry a path prefix and no tier, so it cannot be expressed on tiers;
+# gate 14 reads a link line, which carries a target name whose tier the graph knows, so it
+# cannot be expressed on prefixes. FORBIDDEN_INCLUDES above lists the *headers* of exactly the
+# tiers named here, and test_check_architecture.py asserts the two agree on which tiers are
+# policed at all -- which catches the realistic drift, a new boundary added to one and
+# forgotten in the other.
+FORBIDDEN_LINK_TIERS = {
+    2: {1, 3},
+}
+
 # Rule 7: platform-conditional compilation is confined to per-platform source directories.
 #
 # **Path-shaped and module-agnostic, which is not what this gate's name said until A3 Task 5.**
@@ -191,6 +204,67 @@ def gate_package_boundary(modules: dict, root: pathlib.Path) -> Gate:
     return gate
 
 
+def illegal_dependency(source: dict, target: dict) -> str | None:
+    """Why a module shaped like `source` may not depend on `target`, or None if it may.
+
+    The tier-shaped half of the graph's rules, in one place: downward only (rule 2), the
+    renderer package boundary (rule 4) and apps are leaves (rule 8). Kind containment (rule 3)
+    is deliberately absent -- it is about what may ship in a game, and a test target ships in
+    nothing, so `Test` is permitted to reach a `Tool` or `Editor` module.
+    """
+    if target.get("app", False):
+        return "is an app, and apps are graph leaves"
+    if target["tier"] > source["tier"]:
+        return f"is tier {target['tier']}, above tier {source['tier']}"
+    forbidden = FORBIDDEN_LINK_TIERS.get(source["tier"])
+    if forbidden is not None and target["tier"] in forbidden:
+        return (f"is tier {target['tier']}, which tier {source['tier']} may not see "
+                f"(renderer package boundary)")
+    return None
+
+
+def gate_test_links(modules: dict, test_targets: list) -> Gate:
+    """Rule 10 of Module-Graph.md: a test target links only what its module may depend on.
+
+    **Gate 3's companion, and the reason it needs one.** Every source-reading gate walks only
+    Include/ and Private/ (see MODULE_SOURCE_DIRS), so gate 3 cannot see a *tier-2 test* that
+    includes Monarc/Host/. Until A3 Task 5 the only thing stopping one was that
+    _monarc_add_test_binary links just the module under test, so the header was not on the
+    include path -- protection by a missing link line rather than by a rule, and one
+    target_link_libraries line away from gone.
+
+    This polices the link line instead of inventing an include rule for test directories that
+    would differ from the one gate 3 implements. It is not a superset of gate 3: a test that
+    reached a forbidden header through a hand-written target_include_directories, without
+    linking the module, would pass here. That case still has to link something to resolve a
+    symbol, and a header-only reach across the boundary is the residue -- stated rather than
+    claimed away.
+
+    Direct link libraries only. A transitive edge is some module's own dependency and is
+    already refused by monarc_validate_modules() and by gate 2. Entries that are not Monarc
+    modules -- doctest, Vulkan::Headers -- have no tier and are ADR-0014's business, not this
+    gate's.
+    """
+    gate = Gate(14, "test targets link only what their module may depend on")
+    for test in test_targets:
+        owner = modules.get(test["module"])
+        if owner is None:
+            # A test whose module is not in the graph cannot exist: _monarc_add_test_binary is
+            # called by the module's own CMakeLists.txt. Skipped rather than reported for the
+            # reason gates 2 and 12 skip an edge pointing outside the graph -- that is CMake's
+            # to reject, and this gate has one job.
+            continue
+        for linked in test["links"]:
+            target = modules.get(linked)
+            if target is None:
+                continue
+            reason = illegal_dependency(owner, target)
+            if reason is not None:
+                gate.fail(f"{test['name']} links {linked}, which {reason} "
+                          f"({test['module']} is tier {owner['tier']})")
+    return gate
+
+
 def gate_platform_containment(modules: dict, root: pathlib.Path) -> Gate:
     gate = Gate(10, "platform conditionals only under Private/Platform/<Platform>/, in any module")
     for mod in modules.values():
@@ -246,8 +320,14 @@ def main() -> int:
     graph_path, root = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]).resolve()
     graph = json.loads(graph_path.read_text(encoding="utf-8"))
     modules = {m["name"]: m for m in graph["modules"]}
+    # `.get` for the reason gate 13 uses it on "app": a module-graph.json written before the
+    # key existed still loads. An absent key means "no test targets", which is also what a
+    # -DMONARC_BUILD_TESTS=OFF configure emits -- gate 14 then has nothing to check and says
+    # so by passing, which is correct rather than vacuous: there is no link line to police.
+    test_targets = graph.get("testTargets", [])
 
-    print(f"Monarc architecture gates | {len(modules)} module(s) | engine {graph['engineVersion']}")
+    print(f"Monarc architecture gates | {len(modules)} module(s), "
+          f"{len(test_targets)} test target(s) | engine {graph['engineVersion']}")
 
     # Reported in gate-number order, so the output reads as a checklist rather than as
     # whatever order the functions happen to be defined in. Kept by writing the list in that
@@ -259,6 +339,7 @@ def main() -> int:
         gate_platform_containment(modules, root),  # 10
         gate_app_leaves(modules),  # 12
         gate_layout(modules, root),  # 13
+        gate_test_links(modules, test_targets),  # 14
     ]
 
     results = [g.report() for g in gates]

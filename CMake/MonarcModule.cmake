@@ -12,6 +12,9 @@ set(MONARC_KIND_ALLOWED_Test    Runtime Tool Editor Test)
 define_property(GLOBAL PROPERTY MONARC_ALL_MODULES
     BRIEF_DOCS "Names of every module declared through monarc_module or monarc_app")
 
+define_property(GLOBAL PROPERTY MONARC_ALL_TEST_TARGETS
+    BRIEF_DOCS "Names of every test executable built by CMake/MonarcTest.cmake")
+
 # Declares a static library that participates in the module graph.
 function(monarc_module)
     _monarc_declare(LIBRARY ${ARGN})
@@ -266,13 +269,57 @@ function(monarc_validate_modules)
     endforeach()
     list(JOIN _entries ",\n" _entries)
 
+    # Test targets, and the link line each one actually has.
+    #
+    # **Not part of the graph, and deliberately a sibling key rather than a module row.** A test
+    # target is not a module: nothing may depend on one, it has no tier of its own, and
+    # `monarc explain` reads the "modules" array to answer why something is in an export -- a
+    # question no test target participates in. It is recorded because gate 14 needs it: the only
+    # thing that stops a tier-2 test from reaching a tier-3 header is which libraries it links,
+    # and CMake is the only place that knows.
+    #
+    # Read here rather than in _monarc_add_test_binary because a module's CMakeLists.txt appends
+    # to the link line after that function returns -- Monarc.Host.Windowed's device suite and
+    # Monarc.RHI.Vulkan's two suites all do. This function runs once from the top-level
+    # CMakeLists after every add_subdirectory, which is the first moment the answer is final.
+    #
+    # LINK_LIBRARIES is the *direct* link line, which is the right granularity: a transitive
+    # edge belongs to some module's own dependencies and is already policed above. Everything on
+    # it is emitted, Monarc module or not (doctest::doctest, Vulkan::Headers), because this key
+    # says what the target links and the gate decides what that means -- a filter here that was
+    # wrong would leave the gate reading an empty list and passing vacuously.
+    set(_test_entries "")
+    get_property(_test_targets GLOBAL PROPERTY MONARC_ALL_TEST_TARGETS)
+    foreach(_t IN LISTS _test_targets)
+        get_property(_owner GLOBAL PROPERTY MONARC_TEST_${_t}_MODULE)
+        get_target_property(_links ${_t} LINK_LIBRARIES)
+        set(_linkjson "")
+        if(_links)
+            foreach(_l IN LISTS _links)
+                list(APPEND _linkjson "\"${_l}\"")
+            endforeach()
+        endif()
+        list(JOIN _linkjson ", " _linkjson)
+        list(APPEND _test_entries
+"    {
+      \"name\": \"${_t}\",
+      \"module\": \"${_owner}\",
+      \"links\": [${_linkjson}]
+    }")
+    endforeach()
+    list(JOIN _test_entries ",\n" _test_entries)
+    if(_test_entries)
+        set(_test_entries "\n${_test_entries}\n  ")
+    endif()
+
     file(WRITE "${CMAKE_BINARY_DIR}/module-graph.json"
 "{
   \"engineVersion\": \"${PROJECT_VERSION}\",
   \"generator\": \"monarc_validate_modules\",
   \"modules\": [
 ${_entries}
-  ]
+  ],
+  \"testTargets\": [${_test_entries}]
 }
 ")
 

@@ -234,6 +234,109 @@ class TestPackageBoundary(FixtureTest):
         )
 
 
+def test_target(name, owner, links):
+    return {"name": name, "module": owner, "links": links}
+
+
+class TestTestLinks(FixtureTest):
+    """Gate 14: a test target links only what its own module may depend on.
+
+    Every case here builds the real tree's shape, because the rule exists for one real
+    situation: Monarc.Host.Windowed.DeviceTests links Monarc.RHI.Vulkan, and that has to stay
+    legal while the reverse direction becomes an error.
+    """
+
+    #: Tiers as A3 declares them, so a case reads as the tree rather than as a fixture.
+    REAL = graph(
+        module("Monarc.Core", tier=0, directory="Source/Monarc.Core"),
+        module("Monarc.Assets", tier=1, directory="Source/Monarc.Assets"),
+        module("Monarc.RHI", tier=2, directory="Source/Monarc.RHI"),
+        module("Monarc.RHI.Vulkan", tier=2, directory="Source/Monarc.RHI.Vulkan"),
+        module("Monarc.Host.Windowed", tier=3, directory="Source/Monarc.Host.Windowed"),
+        module("Monarc.FirstLight", tier=3, directory="Source/Monarc.FirstLight", app=True),
+    )
+
+    def test_no_test_targets_passes(self):
+        # -DMONARC_BUILD_TESTS=OFF emits no testTargets, and a graph written before the key
+        # existed carries none either.
+        self.assertGatePasses(ca.gate_test_links(self.REAL, []))
+
+    def test_a_tier3_test_linking_a_tier2_module_is_accepted(self):
+        # The tree as it actually is: Monarc.Host.Windowed.DeviceTests links Monarc.RHI.Vulkan
+        # so that a swapchain can be built against a real window. Tier 3 reaching down to
+        # tier 2 is the direction the graph already allows dependencies to run, and a rule
+        # that broke this would be a rule nobody could keep.
+        self.assertGatePasses(ca.gate_test_links(self.REAL, [
+            test_target("Monarc.Host.Windowed.DeviceTests", "Monarc.Host.Windowed",
+                        ["Monarc.Host.Windowed", "doctest::doctest", "Monarc.RHI.Vulkan"]),
+        ]))
+
+    def test_a_tier2_test_linking_a_tier3_module_is_rejected(self):
+        # The case gate 3 cannot see. Putting the swapchain cases in
+        # Monarc.RHI.Vulkan/TestsDevice/ instead would need this link line, and the include of
+        # Monarc/Host/Window.h that follows it is invisible to every source-reading gate.
+        self.assertGateFails(ca.gate_test_links(self.REAL, [
+            test_target("Monarc.RHI.Vulkan.DeviceTests", "Monarc.RHI.Vulkan",
+                        ["Monarc.RHI.Vulkan", "Monarc.Host.Windowed"]),
+        ]), "Monarc.Host.Windowed")
+
+    def test_a_tier2_test_linking_a_tier1_module_is_rejected(self):
+        # Downward by tier alone would permit this, and it must not: ADR-0007's package
+        # boundary is what gate 3 implements, and tier 1 is on the wrong side of it just as
+        # tier 3 is. A link rule that only refused *upward* edges would be a different rule
+        # from the one it is meant to complete.
+        self.assertGateFails(ca.gate_test_links(self.REAL, [
+            test_target("Monarc.RHI.Tests", "Monarc.RHI",
+                        ["Monarc.RHI", "Monarc.Assets"]),
+        ]), "renderer package boundary")
+
+    def test_a_tier2_test_linking_another_tier2_module_is_accepted(self):
+        # Inside the package. Nothing does this today; Monarc.RHI's tests linking
+        # Monarc.RHI.Vulkan to check the abstraction against a backend is the obvious future
+        # caller, and the rule has to let it through.
+        self.assertGatePasses(ca.gate_test_links(self.REAL, [
+            test_target("Monarc.RHI.Tests", "Monarc.RHI",
+                        ["Monarc.RHI", "Monarc.RHI.Vulkan"]),
+        ]))
+
+    def test_a_tier0_test_linking_a_tier0_module_is_accepted(self):
+        self.assertGatePasses(ca.gate_test_links(self.REAL, [
+            test_target("Monarc.Core.Tests", "Monarc.Core", ["Monarc.Core"]),
+        ]))
+
+    def test_a_test_linking_an_app_is_rejected(self):
+        # A second main(), and the linker would say so -- but rule 8 says it first, and a
+        # test target is exactly the place someone would try it to get at an app's internals.
+        self.assertGateFails(ca.gate_test_links(self.REAL, [
+            test_target("Monarc.Host.Windowed.Tests", "Monarc.Host.Windowed",
+                        ["Monarc.Host.Windowed", "Monarc.FirstLight"]),
+        ]), "apps are graph leaves")
+
+    def test_non_module_link_entries_are_ignored(self):
+        # doctest and Vulkan::Headers have no tier. They are emitted into module-graph.json
+        # because that key records what the target links, and skipped here because this gate
+        # is about the module graph -- third-party dependencies are ADR-0014's business.
+        self.assertGatePasses(ca.gate_test_links(self.REAL, [
+            test_target("Monarc.RHI.Vulkan.Tests", "Monarc.RHI.Vulkan",
+                        ["Monarc.RHI.Vulkan", "doctest::doctest", "Vulkan::Headers"]),
+        ]))
+
+    def test_a_test_whose_module_is_absent_from_the_graph_is_ignored(self):
+        # Cannot happen -- _monarc_add_test_binary is called by the module's own
+        # CMakeLists.txt -- and must not crash if it ever does. Gates 2 and 12 treat an edge
+        # pointing outside the graph the same way.
+        self.assertGatePasses(ca.gate_test_links(self.REAL, [
+            test_target("Ghost.Tests", "Ghost", ["Monarc.Host.Windowed"]),
+        ]))
+
+    def test_the_two_forbidden_tables_police_the_same_tiers(self):
+        # FORBIDDEN_INCLUDES names header prefixes and FORBIDDEN_LINK_TIERS names tiers, so
+        # they cannot be one constant. This catches the drift that matters: a boundary added
+        # to one table and forgotten in the other, which would leave gate 3 and gate 14
+        # disagreeing about which tier is inside the package.
+        self.assertEqual(sorted(ca.FORBIDDEN_INCLUDES), sorted(ca.FORBIDDEN_LINK_TIERS))
+
+
 class TestLayout(FixtureTest):
     def test_both_directories_present_passes(self):
         self.tree.mkdir("M/Include")

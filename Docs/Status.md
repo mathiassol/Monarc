@@ -1962,9 +1962,10 @@ which remains a Task 5 checkbox with its measurement.
 
 ## Verification gates
 
-Five of M0's thirteen gates are implemented and running under CTest as
-`Architecture.Gates`: acyclicity (2), renderer package boundary (3), platform containment
-(10), apps are graph leaves (12), and module layout (13).
+Six of M0's fourteen gates are implemented and running under CTest as `Architecture.Gates`:
+acyclicity (2), renderer package boundary (3), platform containment (10), apps are graph
+leaves (12), module layout (13), and test-target link direction (14). Every one has been
+observed failing on purpose.
 
 **Gate 3 stopped passing vacuously in A3 Task 1.** It had nothing real to forbid until then:
 every include prefix in its list named a module Monarc had not written. `Monarc.RHI` and
