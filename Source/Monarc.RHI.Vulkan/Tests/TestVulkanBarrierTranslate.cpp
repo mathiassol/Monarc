@@ -102,7 +102,165 @@ constexpr TextureLayout kAllLayouts[] = {
     TextureLayout::ShaderReadOnly,
     TextureLayout::TransferSource,
     TextureLayout::TransferDestination,
+    TextureLayout::PresentSource,
 };
+
+// ---------------------------------------------------------------------------------------
+// The three lists above are only worth iterating if they are complete, and a comment saying
+// they are is not what makes them so. These are the two `static_assert`s per list that do.
+//
+// **They are here because `kAllLayouts` went stale and nothing said so.** Task 4 added
+// `TextureLayout::PresentSource`, updated the twin list in Monarc.RHI/Tests/TestBarrier.cpp,
+// and left this copy at eight -- so nothing asserted `ToVulkan(PresentSource)`, nothing
+// asserted the reverse, and the round-trip loop skipped it. `ToVulkan(PresentSource)`
+// returning `VK_IMAGE_LAYOUT_GENERAL` left **both device-free suites byte-identical**, 58 of
+// 330 and 55 of 189. The device suite caught it -- `VUID-VkPresentInfoKHR-pImageIndices-01430`,
+// exit `0xc0000409` -- and that is the suite CI reports as Skipped, so the mutation shipped
+// green on all six presets. All three lists had the same hole; all three get the same guard.
+//
+// **A compile error rather than a case, and it is airtight rather than a nudge.** C++ cannot
+// ask an enum how many enumerators it has, and none of these three has a `Count` sentinel --
+// deliberately, since one would need a case in every `default`-less switch over the enum,
+// `ToVulkan` and `ToString` among them. What `/w44062` gives instead is the converse: a switch
+// with no `default` is a fatal warning on both compilers the day an enumerator it does not name
+// appears. So `IsEnumerator` below is that switch, and the pair of assertions per list closes
+// both directions:
+//
+//   1. The value one past the list's last is **not** an enumerator. A missing enumerator makes
+//      it one, and `IsEnumerator` cannot be taught the new value without failing to compile
+//      first -- so the sequence is: add an enumerator, the build breaks here, name it in
+//      `IsEnumerator`, and this assertion breaks until the list grows too.
+//   2. The list is in the enum's own order with no gaps and no repeats, which is what makes
+//      "one past the last index" the right value to probe in the first place -- and it catches
+//      a list that swapped a missing row for a duplicated one, which (1) alone would not.
+//
+// Both rest on the shape each enum has and Monarc/RHI/Barrier.h keeps: `TextureLayout` is
+// sequential from zero, and the two flag sets are `None` followed by one contiguous run of
+// bits from `1 << 0`. TestBarrier.cpp's own guards rest on exactly the same premise and say
+// so; what is different here is that these do not have to be *run*.
+//
+// TestBarrier.cpp guards its copies at runtime, by asking `ToString` whether the value one past
+// the end has a name. That works there because `ToString` is the function under test; the
+// equivalent probes here would go through `ToVulkan` and `ToVulkanBit`, whose not-recognised
+// answers are a *conservative mask* rather than a sentinel -- so a new stage that happened to
+// map to `ALL_COMMANDS` would slip past one. A compile error has neither problem.
+// ---------------------------------------------------------------------------------------
+
+/// Whether `value` is an enumerator of its set, as a `default`-less switch per set.
+///
+/// The trailing `return false` is not dead and is not optional: each of these enums has a fixed
+/// underlying type and can hold values outside its enumerator set -- which is exactly what the
+/// assertions below hand it -- and with every case covered MSVC still asks what those return
+/// (`warning C4715`, fatal through `/WX`).
+/// @{
+[[nodiscard]] constexpr bool IsEnumerator(PipelineStage stage) {
+    switch (stage) {
+        case PipelineStage::None:
+        case PipelineStage::DrawIndirect:
+        case PipelineStage::VertexShader:
+        case PipelineStage::FragmentShader:
+        case PipelineStage::EarlyFragmentTests:
+        case PipelineStage::LateFragmentTests:
+        case PipelineStage::ColorAttachmentOutput:
+        case PipelineStage::ComputeShader:
+        case PipelineStage::Copy:
+        case PipelineStage::Blit:
+        case PipelineStage::Resolve:
+        case PipelineStage::Clear:
+        case PipelineStage::Host:
+        case PipelineStage::AllGraphics:
+        case PipelineStage::AllCommands:
+            return true;
+    }
+    return false;
+}
+
+[[nodiscard]] constexpr bool IsEnumerator(Access access) {
+    switch (access) {
+        case Access::None:
+        case Access::IndirectCommandRead:
+        case Access::IndexRead:
+        case Access::VertexAttributeRead:
+        case Access::UniformRead:
+        case Access::ShaderSampledRead:
+        case Access::ShaderStorageRead:
+        case Access::ShaderStorageWrite:
+        case Access::ColorAttachmentRead:
+        case Access::ColorAttachmentWrite:
+        case Access::DepthStencilAttachmentRead:
+        case Access::DepthStencilAttachmentWrite:
+        case Access::TransferRead:
+        case Access::TransferWrite:
+        case Access::HostRead:
+        case Access::HostWrite:
+        case Access::MemoryRead:
+        case Access::MemoryWrite:
+            return true;
+    }
+    return false;
+}
+
+[[nodiscard]] constexpr bool IsEnumerator(TextureLayout layout) {
+    switch (layout) {
+        case TextureLayout::Undefined:
+        case TextureLayout::General:
+        case TextureLayout::ColorAttachment:
+        case TextureLayout::DepthStencilAttachment:
+        case TextureLayout::DepthStencilReadOnly:
+        case TextureLayout::ShaderReadOnly:
+        case TextureLayout::TransferSource:
+        case TextureLayout::TransferDestination:
+        case TextureLayout::PresentSource:
+            return true;
+    }
+    return false;
+}
+/// @}
+
+/// Whether `values` is `None` followed by `1 << 0`, `1 << 1`, ... in order.
+template <typename Enum, Monarc::usize N>
+[[nodiscard]] constexpr bool IsBitRunInOrder(const Enum (&values)[N]) {
+    if (values[0] != static_cast<Enum>(0)) {
+        return false;
+    }
+    for (Monarc::usize i = 1; i < N; ++i) {
+        if (values[i] != static_cast<Enum>(1U << (i - 1))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Whether `values` is `0`, `1`, `2`, ... in order.
+template <typename Enum, Monarc::usize N>
+[[nodiscard]] constexpr bool IsSequenceInOrder(const Enum (&values)[N]) {
+    for (Monarc::usize i = 0; i < N; ++i) {
+        if (static_cast<Monarc::usize>(values[i]) != i) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(IsBitRunInOrder(kAllStages),
+              "kAllStages must be None followed by one bit per position, in order -- see the "
+              "note above for why the completeness assertion below depends on it");
+static_assert(!IsEnumerator(static_cast<PipelineStage>(1U << (std::size(kAllStages) - 1))),
+              "kAllStages is missing a PipelineStage enumerator: the bit one past its last is "
+              "a named stage, so this list no longer covers the set the cases below iterate");
+
+static_assert(IsBitRunInOrder(kAllAccesses),
+              "kAllAccesses must be None followed by one bit per position, in order");
+static_assert(!IsEnumerator(static_cast<Access>(1U << (std::size(kAllAccesses) - 1))),
+              "kAllAccesses is missing an Access enumerator: the bit one past its last is a "
+              "named access");
+
+static_assert(IsSequenceInOrder(kAllLayouts),
+              "kAllLayouts must be the TextureLayout enumerators in declaration order, since "
+              "the enum is sequential from zero");
+static_assert(!IsEnumerator(static_cast<TextureLayout>(std::size(kAllLayouts))),
+              "kAllLayouts is missing a TextureLayout enumerator: the value one past its last "
+              "index is a named layout. This is the assertion Task 4 would have failed");
 
 /// The union of every named bit in a set.
 template <typename Enum, Monarc::usize N>
@@ -270,15 +428,26 @@ TEST_CASE("each texture layout maps to the Vulkan layout that means the same thi
     CHECK(ToVulkan(TextureLayout::TransferSource) == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     CHECK(ToVulkan(TextureLayout::TransferDestination) ==
           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    // The ninth, added by Task 4 with `ISwapchain` and missing from this case until a review.
+    // It is the one enumerator in the set that is required for a swapchain image and
+    // unreachable for a created texture, and presenting from any other layout is
+    // `VUID-VkPresentInfoKHR-pImageIndices-01430` -- which is what the device suite reported,
+    // and it is the suite CI skips.
+    CHECK(ToVulkan(TextureLayout::PresentSource) == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
 
     // **No distinctness assertion here, and its 28-comparison loop was deleted rather than
-    // collapsed.** The eight `CHECK`s above are exhaustive over `kAllLayouts` and pin each
-    // row to a distinct Vulkan layout, so two rows sharing one is already a named failure on
-    // whichever row was changed -- and the round-trip case below catches it a second time.
+    // collapsed.** The nine `CHECK`s above are exhaustive over `kAllLayouts` -- which
+    // `LayoutCount`'s `static_assert` is what now makes true rather than hopes -- and they pin
+    // each row to a distinct Vulkan layout, so two rows sharing one is already a named failure
+    // on whichever row was changed, and the round-trip case below catches it a second time.
     // A third statement of the same fact could not fail without one of those failing first,
     // which is the category this phase's review pass has been deleting. The two flag sets
     // keep theirs because their spot checks are not exhaustive; see them for what that line
     // is for.
+    //
+    // That "exhaustive over `kAllLayouts`" was the load-bearing justification for deleting the
+    // loop, and it stopped being true the moment the list did. The `static_assert` exists
+    // because the argument depends on it.
 }
 
 TEST_CASE("every stage, access and layout survives a round trip through Vulkan") {
