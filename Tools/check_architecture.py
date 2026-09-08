@@ -33,7 +33,16 @@ FORBIDDEN_INCLUDES = {
     ],
 }
 
-# Rule 7: platform-conditional compilation is confined to Core/Platform.
+# Rule 7: platform-conditional compilation is confined to per-platform source directories.
+#
+# **Path-shaped and module-agnostic, which is not what this gate's name said until A3 Task 5.**
+# It read "platform conditionals only in Core/Platform", and the mechanism has been
+# `Private/Platform/<Platform>/` in *any* module since A2c -- the exemption below never
+# mentions a module name and PLATFORM_MACROS is applied to every module in the graph. The name
+# was harmless while Monarc.Core was the only module with platform code; A3 is the phase that
+# made it wrong, because Monarc.Host.Windowed and Monarc.RHI.Vulkan both contain genuinely
+# platform-specific code and neither is Monarc.Core. A gate whose name describes a narrower
+# rule than it enforces invites someone to "fix" the mechanism to match the name.
 #
 # Deliberately excludes _MSC_VER and __clang__. Those are *compiler* macros, not platform
 # macros, and ADR-0012's rule is about platform portability. Compiler differences are
@@ -183,7 +192,7 @@ def gate_package_boundary(modules: dict, root: pathlib.Path) -> Gate:
 
 
 def gate_platform_containment(modules: dict, root: pathlib.Path) -> Gate:
-    gate = Gate(10, "platform conditionals only in Core/Platform")
+    gate = Gate(10, "platform conditionals only under Private/Platform/<Platform>/, in any module")
     for mod in modules.values():
         for path in iter_sources(root, mod["directory"]):
             rel = path.relative_to(root).as_posix()

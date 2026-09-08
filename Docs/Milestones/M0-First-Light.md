@@ -76,13 +76,21 @@ failure, not a judgement.
 | 7 | The same scene yields identical actor and component state in Editor, Play, Standalone and Headless worlds | [World kinds](../Runtime/World-Model.md#world-kinds) |
 | 8 | `monarc explain <asset>` prints a reference chain to a root | [Build-And-Export](../Product/Build-And-Export.md) |
 | 9 | The headless binary contains no RHI or graphics-API symbols | [Module-Graph](../Architecture/Module-Graph.md), headless purity |
-| 10 | Platform-conditional compilation appears only in `Monarc.Core/Platform` | [ADR-0012](../Architecture/Decisions/ADR-0012-backend-rollout.md), macOS viability |
+| 10 | Platform-conditional compilation appears only under a module's `Private/Platform/<Platform>/` directory — in any module | [ADR-0012](../Architecture/Decisions/ADR-0012-backend-rollout.md), [ADR-0016](../Architecture/Decisions/ADR-0016-platform-code-selection.md), macOS viability |
 | 11 | A serialized schema migration round-trips older data forward | [Serialization](../Content/Serialization.md) |
 | 12 | Nothing depends on an app: apps are graph leaves | [Module-Graph](../Architecture/Module-Graph.md) rule 8 |
 | 13 | Every module has `Private/`; a library has `Include/` and an app does not | [Module-Graph](../Architecture/Module-Graph.md) rule 9 |
 
 Gates 1, 3, 9, and 10 are the ones that would decay silently. They should be red-green from the
 first week they can be, rather than added once they would already fail.
+
+**Gate 10 is the worked example of why.** It was implemented in A1 and passed for four phases
+without ever being made to fail, and in that time its *name* drifted from the rule it enforces:
+it said "only in `Monarc.Core/Platform`" while the mechanism checked a path in any module. No
+test noticed, because every case in `Tools/test_check_architecture.py` built a
+`Monarc.Core`-shaped tree — so the wrong name could have been "fixed" into the mechanism and
+the suite would have stayed green. Corrected in A3 Task 5, with a non-Core case pinning each
+direction.
 
 ## Prerequisites
 

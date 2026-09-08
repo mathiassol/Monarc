@@ -38,8 +38,16 @@ Two disciplines keep the Metal path viable while no Mac exists:
 
 1. **Clang builds in CI** ([ADR-0003](ADR-0003-cpp23-baseline.md)) — catches MSVC-specific code
    long before an Apple toolchain would.
-2. **Platform-conditional compilation only in `Monarc.Core/Platform`** — no `#ifdef _WIN32`
-   anywhere else in the engine, enforced as a gate.
+2. **Platform-conditional compilation only under `Private/Platform/<Platform>/`** — no
+   `#ifdef _WIN32` anywhere else in any module, enforced as gate 10.
+
+**Amended 2026-09-08.** Discipline 2 originally read "only in `Monarc.Core/Platform`". That
+was true of the tree when this was written and was never what the gate enforced: gate 10's
+exemption has been the *path* `Private/Platform/<Platform>/`, in any module, since A2c, and
+[ADR-0016](ADR-0016-platform-code-selection.md) states the general form. Phase A3 made the
+narrow wording actively wrong — `Monarc.RHI.Vulkan` and `Monarc.Host.Windowed` both hold
+genuinely platform-specific code, and neither is `Monarc.Core` — so the discipline is restated
+here as the rule the gate has always applied. Nothing about the mechanism changed.
 
 ## Consequences
 

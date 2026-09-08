@@ -358,6 +358,40 @@ class TestPlatformContainment(FixtureTest):
         self.tree.mkdir("Source/Monarc.Core/Private")
         self.assertGatePasses(self._gate())
 
+    # -------------------------------------------------------------------------------------
+    # The rule is path-shaped and module-agnostic, and until A3 Task 5 every case above built
+    # a Monarc.Core-shaped tree -- so the gate's own name ("platform conditionals only in
+    # Core/Platform") could have been made true of the mechanism without one of them
+    # noticing. These two build a *non-Core* module and pin both directions.
+    # -------------------------------------------------------------------------------------
+
+    def _host_gate(self):
+        return ca.gate_platform_containment(
+            graph(module("Monarc.Host.Windowed", tier=3,
+                         directory="Source/Monarc.Host.Windowed")),
+            self.tree.root,
+        )
+
+    def _host(self, relative, text):
+        self.tree.mkdir("Source/Monarc.Host.Windowed/Include")
+        self.tree.write(f"Source/Monarc.Host.Windowed/{relative}", text)
+
+    def test_a_platform_ifdef_in_a_non_core_module_fails(self):
+        # A3 is what makes this reachable rather than hypothetical: Monarc.Host.Windowed and
+        # Monarc.RHI.Vulkan both contain genuinely platform-specific code and neither is
+        # Monarc.Core. Narrowing the gate to Monarc.Core -- which its old name invited --
+        # turns this case red.
+        self._host("Private/Window.cpp", WIN32_IFDEF)
+        self.assertGateFails(self._host_gate(), "_WIN32")
+
+    def test_a_per_platform_directory_in_a_non_core_module_is_exempt(self):
+        # The other half of the same claim, and the half a Core-only exemption would break:
+        # Private/Platform/<Platform>/ earns the exemption in any module, not only in the one
+        # that happened to need it first. This is where the real
+        # Private/Platform/Windows/Window.cpp lives.
+        self._host("Private/Platform/Windows/Window.cpp", WIN32_IFDEF)
+        self.assertGatePasses(self._host_gate())
+
 
 class TestLogicalLines(unittest.TestCase):
     def test_plain_lines_keep_their_numbers(self):

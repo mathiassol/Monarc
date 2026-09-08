@@ -28,9 +28,17 @@ pulled into a shipped game" real rather than aspirational.
 | `Monarc.Core` | Runtime | — | Platform (files, paths, time, threads, dynamic libraries), memory allocators, containers, strings, math, logging, assertions, GUIDs, `Result` |
 | `Monarc.Jobs` | Runtime | `Core` | Task scheduler: jobs, dependency graph, priorities, affinity, instrumentation |
 
-`Monarc.Core` is the only module permitted to contain platform-conditional code. No
-`#ifdef _WIN32` appears anywhere else in the engine — that discipline is what keeps macOS
-and future platforms reachable ([ADR-0012](Decisions/ADR-0012-backend-rollout.md)).
+`Monarc.Core` was the only module with platform code until Phase A3, and the rule was written
+as though that were the rule. It is not: **platform-conditional compilation is confined by
+*directory*, in every module** — a `#ifdef _WIN32` is legitimate only under
+`Private/Platform/<Platform>/`, and nowhere else in any module, `Monarc.Core` included. That is
+what keeps macOS and future platforms reachable
+([ADR-0012](Decisions/ADR-0012-backend-rollout.md);
+[ADR-0016](Decisions/ADR-0016-platform-code-selection.md)), and A3 is what made the broader
+statement necessary rather than merely more accurate: `Monarc.RHI.Vulkan` and
+`Monarc.Host.Windowed` both contain genuinely platform-specific code and neither is
+`Monarc.Core`. Gate 10 has enforced the directory rule since A2c; its *name* said
+"Core/Platform" until A3 Task 5 corrected it.
 
 ### Tier 1 — Data
 
@@ -172,8 +180,9 @@ These are build failures or test failures, not conventions:
 5. **Headless purity.** The headless host binary contains no RHI or graphics-API symbols.
 6. **Export purity.** A shipped game binary contains no `Monarc::Editor` or `Monarc::Cook`
    symbols.
-7. **Platform containment.** Platform-conditional compilation appears only in
-   `Monarc.Core/Platform`.
+7. **Platform containment.** Platform-conditional compilation appears only under a module's
+   `Private/Platform/<Platform>/` directory — in **any** module, not only `Monarc.Core`, and
+   not in a public header or in a platform-neutral file sitting beside those directories.
 8. **Apps are leaves.** No module may list an app in `PUBLIC_DEPS` or `PRIVATE_DEPS`.
 9. **Layout.** Every module has a `Private/` directory; a library has an `Include/`
    directory and an app does not.
