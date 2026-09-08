@@ -304,6 +304,22 @@ say nothing about whether it is fast.
 
 ## Open questions this plan does not settle
 
+- **What a pass declaring two accesses with disagreeing layouts should mean.** Raised by Task
+  1, which found the state representable and refused by nothing. Colour attachment read plus
+  write on one resource is legal — both want the same layout — and is tested. But
+  `DepthStencilAttachmentRead` plus `DepthStencilAttachmentWrite` on one resource asks for two
+  layouts at once, and nothing rejects it. Task 1 deliberately did not guess the rule because
+  A4 has no depth pass; the derivation in Task 3 is where it becomes answerable, since that is
+  the code with an opinion about what layout a resource is in.
+- **A device-free stub `ICommandList`, which Tasks 3 and 4 want anyway.** Task 1 reports that
+  `RenderGraph::Execute`'s stub is unreachable from any test, because it takes `RHI::IDevice&`
+  and `RHI::ICommandList&` and a device-free test has neither. That is the right signature —
+  weakening it to a nullable context struct to serve a test would be the tail wagging the dog
+  — but it means recording is untestable without a GPU. A fake `ICommandList` that records
+  what it was asked to do turns "the graph emitted exactly these two barriers, in this order,
+  around this rendering pass" into a device-free assertion, which is strictly stronger than
+  inspecting the derivation and hoping execution matches it. Decide it in Task 3, where the
+  first thing worth asserting about recording exists.
 - **Whether the recording callback can be given a barrier-free command list cheaply.** Worth
   attempting in Task 1 and abandoning if it distorts the interface — but a compiler-enforced
   version of ADR-0006's central promise is worth an attempt.
