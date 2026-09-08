@@ -351,14 +351,26 @@ enum class DiagnosticKind : u32 {
 ///
 /// **This list exists because `Error::message` is a non-owning view and therefore a string
 /// literal, and "an error naming the resource" cannot be expressed that way.** The house rule
-/// is that composed detail goes to `MONARC_LOG` at the failure site -- which is right for a
-/// human reading a log and useless for a test, because nothing in-process can read back what
-/// was logged. So every refusal is *also* recorded here, structurally: the kind, the code and
-/// literal the caller was handed, and the pass and resource involved. A test asserts on the
-/// fields; the log line is still emitted for the human.
+/// sends the composed detail to `MONARC_LOG` at the failure site, and that line is still
+/// emitted for the human.
+///
+/// **What it is not is "because a test cannot read a log line".** It can:
+/// `TestSupport::LogCapture` installs a sink for the whole run and Tests/TestPassDeclaration.cpp
+/// asserts on a captured line. The reason is the one the phase plan states -- inspection data
+/// "structured enough to assert on field by field rather than by string matching" -- and a
+/// substring match on a rendered line is precisely the assertion it forbids. Reviews on the
+/// Phase A3 branch deleted assertions of that shape. A field says which kind of refusal, which
+/// pass and which resource, and a wrong value fails; a `find()` on a log line says only that
+/// some line contained some characters, and keeps passing while the thing it describes changes
+/// underneath it. The sink is the weaker vehicle in its own right too -- process-global,
+/// unsynchronised, shared by every case in the run, and bounded in both line length and line
+/// count -- which is why the one case that reads it is the case about the log line itself.
+///
+/// So every refusal is *also* recorded here, structurally: the kind, the code and literal the
+/// caller was handed, and the pass and resource involved.
 ///
 /// Task 2's requirement that a dependency cycle be "reported naming the passes" is the same
-/// problem, and this is where its answer goes.
+/// problem and wants the same vehicle, and this is where its answer goes.
 struct GraphDiagnostic {
     DiagnosticKind kind = DiagnosticKind::PassPoolExhausted;
 
