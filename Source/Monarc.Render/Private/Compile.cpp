@@ -42,6 +42,14 @@ Status RenderGraph::Compile() {
     // they skipped. The diagnostics list is the record; the first entry's code is what the
     // caller gets, because that is the refusal that came first.
     //
+    // **This is an addition, not a checkbox.** No line of the phase plan's Task 1 asks for it;
+    // it follows from the diagnostics list existing at all, which is what makes "was anything
+    // refused?" a question compilation can ask. It is recorded as an addition here so that a
+    // later reader does not take it for a requirement and preserve it for the wrong reason --
+    // if Task 2 finds a build worth compiling despite a refusal, this is a decision to revisit
+    // and not a spec to honour. It forecloses nothing either way: the phase becomes
+    // `CompileFailed`, and inspection stays readable, which is the case `GraphPhase` is for.
+    //
     // Deliberately no new diagnostic here: the ones already recorded say what happened, and
     // adding a summary entry would put a row in the list that names no pass and no resource.
     //
