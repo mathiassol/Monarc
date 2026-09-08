@@ -1,0 +1,262 @@
+#include <Monarc/Render/GraphInspection.h>
+
+#include <Monarc/RHI/Types.h>
+
+#include <cstddef>
+#include <format>
+#include <utility>
+
+namespace Monarc::Render {
+
+// All five switches below are deliberately `default`-less, the shape
+// Monarc.RHI/Private/Barrier.cpp uses and for its reason: adding an enumerator becomes a
+// compile error here rather than a silent fall-through to the trailing return. MSVC's C4062 is
+// off by default and /W4 does not enable it, so CMake/MonarcTargetOptions.cmake passes /w44062
+// by name; Clang's -Wswitch is on at /W4; /WX makes both fatal.
+//
+// The trailing returns still have to exist: each enum has a fixed underlying type and can hold
+// a value no enumerator names, which is what Tests/TestGraphInspection.cpp's completeness
+// checks hand them.
+
+const char* ToString(GraphPhase phase) {
+    switch (phase) {
+        case GraphPhase::Declaring:     return "Declaring";
+        case GraphPhase::Compiled:      return "Compiled";
+        case GraphPhase::CompileFailed: return "CompileFailed";
+    }
+    return "<invalid GraphPhase>";
+}
+
+const char* ToString(ResourceOrigin origin) {
+    switch (origin) {
+        case ResourceOrigin::Transient: return "Transient";
+        case ResourceOrigin::Imported:  return "Imported";
+    }
+    return "<invalid ResourceOrigin>";
+}
+
+const char* ToString(GraphQueue queue) {
+    switch (queue) {
+        case GraphQueue::Graphics: return "Graphics";
+    }
+    return "<invalid GraphQueue>";
+}
+
+const char* ToString(BarrierCauseKind kind) {
+    switch (kind) {
+        case BarrierCauseKind::ImportIncoming: return "ImportIncoming";
+        case BarrierCauseKind::PassAccess:     return "PassAccess";
+        case BarrierCauseKind::ImportOutgoing: return "ImportOutgoing";
+    }
+    return "<invalid BarrierCauseKind>";
+}
+
+const char* ToString(DiagnosticKind kind) {
+    switch (kind) {
+        case DiagnosticKind::PassPoolExhausted:       return "PassPoolExhausted";
+        case DiagnosticKind::ResourcePoolExhausted:   return "ResourcePoolExhausted";
+        case DiagnosticKind::AccessPoolExhausted:     return "AccessPoolExhausted";
+        case DiagnosticKind::UnknownResource:         return "UnknownResource";
+        case DiagnosticKind::UnknownPass:             return "UnknownPass";
+        case DiagnosticKind::AccessDirectionMismatch: return "AccessDirectionMismatch";
+        case DiagnosticKind::AccessNamesNoTexture:    return "AccessNamesNoTexture";
+        case DiagnosticKind::DuplicateAccess:         return "DuplicateAccess";
+        case DiagnosticKind::DuplicateImport:         return "DuplicateImport";
+        case DiagnosticKind::InvalidImport:           return "InvalidImport";
+        case DiagnosticKind::RecordAlreadySet:        return "RecordAlreadySet";
+        case DiagnosticKind::AlreadyCompiled:         return "AlreadyCompiled";
+    }
+    return "<invalid DiagnosticKind>";
+}
+
+namespace {
+
+// ---------------------------------------------------------------------------------------
+// Rendering the inspection as text.
+//
+// `std::format_to_n` and never `std::format`, which is ADR-0003's condition on `<format>` in
+// runtime code: format into a fixed buffer, never allocate a `std::string`.
+// `Monarc::Detail::Format` in Monarc/Core/Log.h and `Describe` in Monarc.RHI/Private/Barrier.cpp
+// are the precedents.
+// ---------------------------------------------------------------------------------------
+
+/// Appends formatted text to a caller's buffer, counting what fitted and what there was.
+///
+/// The count continues past the end of the buffer, which is the whole point: a caller can pass
+/// a zero-length span to ask how much room the report needs, and a caller whose buffer was too
+/// small is told rather than left with a report clipped at the end -- where, once Task 3 lands,
+/// the barriers are.
+class TextWriter {
+public:
+    explicit TextWriter(std::span<char> out) : m_out(out) {}
+
+    template <typename... Args>
+    void Line(std::format_string<Args...> format, Args&&... args) {
+        const usize room = m_out.size() - m_written;
+        if (room == 0) {
+            // `std::formatted_size` counts through a counting iterator and allocates nothing.
+            // Used rather than a zero-count `format_to_n` so that no pointer is formed from an
+            // empty span's null `data()`.
+            m_needed += std::formatted_size(format, std::forward<Args>(args)...);
+            return;
+        }
+        const std::format_to_n_result<char*> result =
+            std::format_to_n(m_out.data() + m_written, static_cast<std::ptrdiff_t>(room), format,
+                             std::forward<Args>(args)...);
+        m_needed += static_cast<usize>(result.size);
+        m_written = m_needed < m_out.size() ? m_needed : m_out.size();
+    }
+
+    [[nodiscard]] InspectionText Result() const { return InspectionText{m_written, m_needed}; }
+
+private:
+    std::span<char> m_out;
+    usize           m_written = 0;
+    usize           m_needed  = 0;
+};
+
+/// A short field rendered into a fixed buffer and returned by value.
+///
+/// `AdapterUuidString`'s shape in Monarc.RHI/Include/Monarc/RHI/Adapter.h, chosen for its
+/// reason: there is no buffer size to get wrong at a call site and nothing to document about
+/// one. Every field below is at most two `u32`s in decimal with a separator, which is 21
+/// characters plus a terminator; 24 rounds it.
+///
+/// NUL-terminated, unlike `WriteInspectionText`'s own output, because `Get()` is handed
+/// straight to `std::format` as a `const char*`. Every caller uses the value within the
+/// full-expression that made it.
+struct FieldText {
+    char text[24] = {};
+
+    [[nodiscard]] const char* Get() const { return text; }
+};
+
+template <typename... Args>
+[[nodiscard]] FieldText Field(std::format_string<Args...> format, Args&&... args) {
+    FieldText out{};
+    const std::format_to_n_result<char*> result =
+        std::format_to_n(out.text, sizeof(out.text) - 1, format, std::forward<Args>(args)...);
+    *result.out = '\0';
+    return out;
+}
+
+/// One `TextureId`, as `index:generation`, or `none` for an invalid one.
+[[nodiscard]] FieldText Describe(TextureId id) {
+    return id.IsValid() ? Field("{}:{}", id.index, id.generation) : Field("none");
+}
+
+/// One `RHI::TextureHandle`, in the same shape. A separate overload rather than a cast into
+/// `TextureId`: the two are not interconvertible, which is the point of ResourceId.h, and a
+/// renderer that reached for one to print the other would be the first crack in that.
+[[nodiscard]] FieldText Describe(RHI::TextureHandle handle) {
+    return handle.IsValid() ? Field("{}:{}", handle.index, handle.generation) : Field("none");
+}
+
+/// A `u32` that may be a "nothing here" sentinel, as a number or as `none`.
+[[nodiscard]] FieldText DescribeOptional(u32 value, u32 sentinel) {
+    return value == sentinel ? Field("none") : Field("{}", value);
+}
+
+void WriteResourceLines(TextWriter& writer, usize index, const ResourceInspection& resource) {
+    // One line per resource, and a second only for an imported one. The extent, format and
+    // usage are on the first line because every resource has them; the import states are on
+    // their own because only an imported resource has any, and a line of `none`s for every
+    // transient would make a diff of a graph full of transients mostly noise.
+    writer.Line("resource {} id={} origin={} format={} extent={}x{} usage=0x{:x} "
+                "lifetime={}..{} alias={} name=\"{}\"\n",
+                index, Describe(resource.id).Get(), ToString(resource.origin),
+                RHI::ToString(resource.description.format), resource.description.extent.width,
+                resource.description.extent.height,
+                static_cast<u32>(resource.description.usage),
+                DescribeOptional(resource.lifetime.firstPass, kNoPass).Get(),
+                DescribeOptional(resource.lifetime.lastPass, kNoPass).Get(),
+                DescribeOptional(resource.aliasGroup, kNoAliasGroup).Get(), resource.name);
+
+    if (resource.origin != ResourceOrigin::Imported) {
+        return;
+    }
+    // The layout leads in each state for the reason `Describe(const TextureBarrier&)` in
+    // Monarc.RHI/Include/Monarc/RHI/Barrier.h gives: it is the half that is never a mask, so
+    // it always reads as a real spelling. The stage and access carry their hex beside their
+    // name because either can be a mask of several bits, which `ToString` reports with a
+    // not-a-single-value name -- the number is what keeps the line decodable when it does.
+    writer.Line("resource {} import texture={} incoming={}/{}(0x{:x})/{}(0x{:x}) "
+                "outgoing={}/{}(0x{:x})/{}(0x{:x})\n",
+                index, Describe(resource.importedTexture).Get(),
+                RHI::ToString(resource.incoming.layout), RHI::ToString(resource.incoming.stage),
+                static_cast<u32>(resource.incoming.stage),
+                RHI::ToString(resource.incoming.access),
+                static_cast<u32>(resource.incoming.access),
+                RHI::ToString(resource.outgoing.layout), RHI::ToString(resource.outgoing.stage),
+                static_cast<u32>(resource.outgoing.stage),
+                RHI::ToString(resource.outgoing.access),
+                static_cast<u32>(resource.outgoing.access));
+}
+
+void WriteBarrierLine(TextWriter& writer, usize index, const DerivedBarrier& barrier) {
+    writer.Line("barrier {} resource={} before-pass={} layout={}->{} "
+                "sync={}(0x{:x})->{}(0x{:x}) access={}(0x{:x})->{}(0x{:x}) "
+                "cause={}:{}:{}->{}:{}:{}\n",
+                index, Describe(barrier.resource).Get(),
+                DescribeOptional(barrier.emittedBeforePass, kNoPass).Get(),
+                RHI::ToString(barrier.layoutBefore), RHI::ToString(barrier.layoutAfter),
+                RHI::ToString(barrier.syncBefore), static_cast<u32>(barrier.syncBefore),
+                RHI::ToString(barrier.syncAfter), static_cast<u32>(barrier.syncAfter),
+                RHI::ToString(barrier.accessBefore), static_cast<u32>(barrier.accessBefore),
+                RHI::ToString(barrier.accessAfter), static_cast<u32>(barrier.accessAfter),
+                ToString(barrier.cause.before.kind),
+                DescribeOptional(barrier.cause.before.pass, kNoPass).Get(),
+                ToString(barrier.cause.before.access), ToString(barrier.cause.after.kind),
+                DescribeOptional(barrier.cause.after.pass, kNoPass).Get(),
+                ToString(barrier.cause.after.access));
+}
+
+}  // namespace
+
+InspectionText WriteInspectionText(const GraphInspection& inspection, std::span<char> out) {
+    TextWriter writer(out);
+
+    writer.Line("graph build={} phase={}\n", inspection.buildGeneration,
+                ToString(inspection.phase));
+
+    // A counts line, because a diff of two reports should say *that* something appeared before
+    // it says what -- and because a truncated report still carries the counts, which is how a
+    // reader knows what is missing from the end.
+    writer.Line("counts passes={} resources={} accesses={} barriers={} diagnostics={} "
+                "dropped={}\n",
+                inspection.passes.size(), inspection.resources.size(),
+                inspection.accesses.size(), inspection.barriers.size(),
+                inspection.diagnostics.size(), inspection.diagnosticsDropped);
+
+    for (const PassInspection& pass : inspection.passes) {
+        writer.Line("pass {} order={} queue={} culled={} record={} name=\"{}\"\n", pass.index,
+                    DescribeOptional(pass.executionOrder, kNoPass).Get(), ToString(pass.queue),
+                    pass.culled ? "yes" : "no", pass.hasRecord ? "yes" : "no", pass.name);
+    }
+
+    for (usize i = 0; i < inspection.resources.size(); ++i) {
+        WriteResourceLines(writer, i, inspection.resources[i]);
+    }
+
+    for (usize i = 0; i < inspection.accesses.size(); ++i) {
+        const AccessInspection& access = inspection.accesses[i];
+        writer.Line("access {} pass={} resource={} access={}\n", i, access.pass,
+                    Describe(access.resource).Get(), ToString(access.access));
+    }
+
+    for (usize i = 0; i < inspection.barriers.size(); ++i) {
+        WriteBarrierLine(writer, i, inspection.barriers[i]);
+    }
+
+    for (usize i = 0; i < inspection.diagnostics.size(); ++i) {
+        const GraphDiagnostic& diagnostic = inspection.diagnostics[i];
+        writer.Line("diagnostic {} kind={} code={} pass={} resource={} message=\"{}\"\n", i,
+                    ToString(diagnostic.kind), Monarc::ToString(diagnostic.code),
+                    DescribeOptional(diagnostic.pass, kNoPass).Get(), Describe(diagnostic.resource).Get(),
+                    diagnostic.message);
+    }
+
+    return writer.Result();
+}
+
+}  // namespace Monarc::Render
