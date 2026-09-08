@@ -1301,7 +1301,7 @@ asserts, tries the virtual screen's origin as a second position (which on this m
 other display, undimmed), and **fails with the tenant named in the log** when the answer is
 somebody else. The bytes it asserts are exact.
 
-**Three cases could report green having asserted nothing about their own subject, and that was
+**Four cases could report green having asserted nothing about their own subject, and that was
 found mechanically rather than by reading.** Each ended a `return` short of its assertions on a
 condition about the machine or the desktop:
 
@@ -1310,6 +1310,7 @@ condition about the machine or the desktop:
 | the screen capture | the topmost window at the capture point not being ours | no |
 | a window moved to another monitor | `monitorCount < 2` | no |
 | a swapchain is refused what it cannot honour (format half) | the surface offering `R8G8B8A8_UNORM` | **yes** |
+| a swapchain refuses a queue and a command list that are not its device's | `Adapters().Size() < 2`, and the second adapter declining to present | no |
 
 Forcing `WindowTestHooks::WindowAtClientPoint` to report `isOurs == false` — the shape of a
 machine with a permanent overlay — left
@@ -1321,7 +1322,10 @@ distinguished "asserted and passed" from "declined to assert". The swapchain rea
 was already guarded this way — `CHECK(adaptersRead >= 1)` — so the discipline existed one case
 earlier in the same file and had not been applied.
 
-All three now assert, each by the mechanism its own condition deserves:
+The fourth was left open and flagged rather than half-fixed, because both of its decline
+conditions are legitimate hardware and counting them would have been tautological. That turned
+out to be a false dilemma: **the case needs two devices, not two adapters.** All four now
+assert, each by the mechanism its own condition deserves:
 
 - the capture's two facts are `REQUIRE`s, so a desktop that got in the way is a red case whose
   log names the class that was over the window. They are two assertions rather than one because
@@ -1337,7 +1341,34 @@ All three now assert, each by the mechanism its own condition deserves:
   *offers* `R8G8B8A8_UNORM` must **honour** it, which is the same no-silent-substitution
   guarantee from the other side, and that is what the case asserts on this machine. Its three
   machine-independent refusals are counted and the count asserted, so a block that stopped
-  running is a failure rather than a smaller total.
+  running is a failure rather than a smaller total;
+- the cross-device case builds its second device on `Adapters()[0]` instead of `Adapters()[1]`,
+  so it has no decline path left and its precondition is the one every other case in the file
+  already has. Both guards it exercises are address comparisons —
+  `&queue != &m_state->device->queue` in `VulkanSwapchain::SubmitForPresent` and
+  `VulkanDeviceState::FindOwnList` under `ValidateForSubmit` — so a second `VkDevice` on one
+  adapter is as foreign as one on another, and `VulkanBackend::CreateDevice` keeps nothing per
+  adapter, so calling it twice with the same `AdapterInfo` is what makes that second device.
+  Measured, not assumed: **two devices come up on `NVIDIA GeForce RTX 3070 Ti`
+  (`759c8156-7b91-7099-6511-5bd91de66f76`), each with its own window and swapchain, and each
+  presents a frame of its own** — which is also what says the refusals are not passing because
+  submitting is broken. The case is now stronger than the version it replaced rather than
+  merely runnable: it runs on any machine with one working adapter.
+
+**And rebuilding it found the claim its own comment made to be false.** The "wrong swapchain"
+half submitted a foreign command list to a second swapchain that had *not* acquired an image,
+and `SubmitForPresent` checks the queue, then the acquire phase, then the list — so the refusal
+came from the **phase** guard and `ValidateForSubmit`, which the comment named as the guard
+being tested, was never reached. Measured by logging the message: `ISwapchain::SubmitForPresent
+needs an image this swapchain has acquired and not yet submitted; call Acquire first`. Both
+refusals return `InvalidArgument`, so the `CHECK` on the code could not tell them apart and
+nothing did. The second device now records a frame of its own *before* the refusals, and the
+two messages are asserted as well as the codes:
+
+| submitted | refused by | message |
+|---|---|---|
+| the other device's queue | `SubmitForPresent`'s own comparison | `was given a queue that does not belong to this swapchain's device` |
+| the other device's list | `ValidateForSubmit` → `FindOwnList` | `the command list does not belong to this queue's device` |
 
 Each new guard was broken to check it can fail — see the mutation table below.
 
@@ -1414,7 +1445,7 @@ One caveat worth stating: the captures show
 `Monarc.FirstLight` asks for colour-attachment only. RenderDoc patches the transfer-source bit in
 so that it can save the backbuffer; that value is RenderDoc's, not Monarc's.
 
-**Mutation experiments, eighteen of them.** Each was rebuilt from a touched source, with `ninja` confirmed to have
+**Mutation experiments, twenty-one of them.** Each was rebuilt from a touched source, with `ninja` confirmed to have
 recompiled rather than reporting "no work to do", and reverted afterwards:
 
 | mutation | result |
@@ -1437,6 +1468,9 @@ recompiled rather than reporting "no work to do", and reverted afterwards:
 | `VulkanSwapchainState::BringUp` substitutes `B8G8R8A8_UNORM` for whatever was asked | `ERROR: CHECK( attempted->ImageFormat() == Monarc::RHI::Format::R8G8B8A8_UNORM )`, and **that one assertion is the only thing in the whole suite that catches it** — every other case asks for `B8G8R8A8_UNORM`, so a silent substitution was previously invisible |
 | one of the three machine-independent refusal blocks removed from "a swapchain is refused what it cannot honour" | `ERROR: CHECK( refusals == 3 ) is NOT correct!` — which is what the count is for, since a block that is *present* but stops refusing goes red on its own `REQUIRE_FALSE` |
 | `ReleaseClassIfUnused`'s count check dropped | **nothing red** — 18 cases, 98 assertions, all green — and eighteen `ERROR_CLASS_HAS_WINDOWS` warnings. Windows refuses the unregister itself, so the count is not observable by assertion; two comments that claimed otherwise were corrected |
+| `SubmitForPresent`'s queue-identity comparison forced past (`if (false)`) | `FATAL ERROR: REQUIRE_FALSE( wrongQueue.has_value() ) is NOT correct!  values: REQUIRE_FALSE( true )` — the submit **succeeds** without it, because `SubmitList` uses `m_state->device`'s own queue and never reads the one it was handed |
+| `VulkanDeviceState::FindOwnList` returns `&lists[frameIndex]` instead of `nullptr` | `FATAL ERROR: REQUIRE_FALSE( wrongList.has_value() ) is NOT correct!` — the half that says the swapchain's submit did not skip `ValidateForSubmit` |
+| the second device's frame moved back *below* the refusals, reproducing the two-adapter version's ordering | `ERROR: CHECK( wrongList.error().message.find("command list does not belong") != std::string_view::npos )`, and the `InvalidArgument` check beside it stayed **green** — the message is the only thing that distinguishes `ValidateForSubmit` from the phase guard in front of it |
 
 **One guard has no observable failure, and the reason first given for it was wrong.** Removing
 the wait that retires an acquire semaphore before it is reused produced no validation output and
@@ -1608,12 +1642,13 @@ device-free cases and 504 assertions" was `Monarc.RHI` (51 / 174) plus `Monarc.R
 | `Monarc.RHI.Vulkan.Tests` | 58 | 330 |
 | `Monarc.Host.Windowed.Tests` | 18 | 98 |
 | `Monarc.RHI.Vulkan.DeviceTests` | 38 | 384 |
-| `Monarc.Host.Windowed.DeviceTests` | 16 | 914 |
+| `Monarc.Host.Windowed.DeviceTests` | 16 | 926 |
 
-So **131 device-free cases / 617 assertions** and **54 device-required / 1298** across the three
+So **131 device-free cases / 617 assertions** and **54 device-required / 1310** across the three
 A3 modules. The window device suite was 15 cases and 884 assertions when Task 4 first shipped:
-the extra case is the acquire-ordering one above, and 5 of the 30 extra assertions are the
-guards that stop three cases passing having asserted nothing. All ten CTest entries pass on all six presets with zero warnings, and both `gpu`
+the extra case is the acquire-ordering one above, and of the 42 extra assertions, 5 are the
+guards that stop three cases passing having asserted nothing and 12 are the fourth such case
+rebuilt on two devices rather than two adapters. All ten CTest entries pass on all six presets with zero warnings, and both `gpu`
 entries report **Skipped** when `--vulkan-library=` is pointed at a name that cannot resolve.
 
 ## Verification gates

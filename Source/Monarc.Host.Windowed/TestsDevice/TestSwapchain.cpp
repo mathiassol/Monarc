@@ -1049,25 +1049,38 @@ TEST_CASE("acquiring without a BeginFrame in between is what the acquire-slot wa
 }
 
 TEST_CASE("a swapchain refuses a queue and a command list that are not its device's") {
-    // **Two devices, which is what makes this testable at all** -- and this machine has two
-    // adapters, so it is not a hypothetical. A frame submitted to the wrong device's queue is
-    // not something a driver reports helpfully.
-    if (Adapters().Size() < 2) {
-        MONARC_LOG(SwapchainTest, Warning,
-                   "this machine reports one adapter, so a foreign queue cannot be built; this "
-                   "case did not run");
-        return;
-    }
+    // **Two devices on *one* adapter, which is what lets this case run everywhere.** The
+    // subject is device identity and not adapter identity: both guards below are address
+    // comparisons -- `&queue != &m_state->device->queue` in `VulkanSwapchain::SubmitForPresent`
+    // and `VulkanDeviceState::FindOwnList` under `ValidateForSubmit` -- so a second `VkDevice`
+    // on `Adapters()[0]` is as foreign as one on another adapter by every test they apply.
+    //
+    // It used to build the second device on `Adapters()[1]`, which cost it two `return`s it
+    // did not need: one on `Adapters().Size() < 2`, one on the second adapter declining to
+    // present. Either left the case reporting green having asserted nothing about its own
+    // subject, and neither condition is one this suite may assume away -- "a case that
+    // required every adapter to present would fail on hardware Monarc is meant to support" is
+    // argued in "a swapchain comes up on every adapter that can present".
+    // `VulkanBackend::CreateDevice` takes an `AdapterInfo` and keeps nothing per adapter, so
+    // calling it twice with the same one is two `VkDevice`s, and the precondition drops to the
+    // one every case here that does not loop over the adapters already has: `Adapters()[0]`
+    // opens.
+    REQUIRE_FALSE(Adapters().IsEmpty());
 
     Harness first;
     REQUIRE(first.Open(Adapters()[0], false).has_value());
 
     Harness second;
-    if (!second.Open(Adapters()[1], false)) {
-        MONARC_LOG(SwapchainTest, Warning,
-                   "the second adapter has no swapchain, so this case did not run");
-        return;
-    }
+    REQUIRE(second.Open(Adapters()[0], false).has_value());
+
+    // One adapter, asserted rather than assumed. `CreateDevice` re-describes the adapter from
+    // the driver instead of copying the argument through, so this is the driver's own answer
+    // twice over and it says the two devices sit on the same physical device.
+    CHECK(first.device->Adapter().uuid == second.device->Adapter().uuid);
+    MONARC_LOG(SwapchainTest, Info,
+               "two devices and two swapchains on adapter [0] \"{}\" ({})",
+               first.device->Adapter().name,
+               Monarc::RHI::ToString(first.device->Adapter().uuid).text);
 
     const Monarc::Result<Monarc::RHI::ICommandList*> commands = first.device->BeginFrame();
     REQUIRE(commands.has_value());
@@ -1078,26 +1091,65 @@ TEST_CASE("a swapchain refuses a queue and a command list that are not its devic
                         Monarc::RHI::BufferHandle{})
                 .has_value());
 
-    // The wrong queue: the right list, the right swapchain, another device's queue.
+    // **The second device records a frame of its own before the refusals, and the order is
+    // load-bearing.** `SubmitForPresent` checks the queue, then the acquire phase, then the
+    // command list, so a second swapchain that had not acquired refuses a foreign list at the
+    // *phase* guard and `ValidateForSubmit` is never reached. That is what the two-adapter
+    // version of this case did while its comment named the guard it did not reach: the message
+    // it actually returned was "needs an image this swapchain has acquired and not yet
+    // submitted; call Acquire first", measured by logging it. Both refusals are
+    // `InvalidArgument`, so nothing but the message distinguishes them -- which is why the
+    // messages below are asserted and not only the codes.
+    const Monarc::Result<Monarc::RHI::ICommandList*> otherCommands =
+        second.device->BeginFrame();
+    REQUIRE(otherCommands.has_value());
+    const Monarc::Result<Monarc::RHI::AcquiredImage> otherAcquired = second.swapchain->Acquire();
+    REQUIRE(otherAcquired.has_value());
+    REQUIRE(otherAcquired->outcome == Monarc::RHI::AcquireOutcome::Acquired);
+    REQUIRE(RecordFrame(**otherCommands, otherAcquired->texture, second.swapchain->Extent(),
+                        Monarc::RHI::BufferHandle{})
+                .has_value());
+
+    // The wrong queue: the right list, the right swapchain, the other device's queue. Refused
+    // by `SubmitForPresent`'s own comparison, and that comparison is the only thing standing
+    // in the way -- the submission underneath goes through `m_state->device->SubmitList` and
+    // never reads the queue it was handed, so deleting the guard makes this call *succeed*.
     const Monarc::Result<Monarc::u64> wrongQueue =
         first.swapchain->SubmitForPresent(second.device->GraphicsQueue(), **commands);
     REQUIRE_FALSE(wrongQueue.has_value());
     CHECK(wrongQueue.error().code == Monarc::ErrorCode::InvalidArgument);
+    CHECK(wrongQueue.error().message.find("queue that does not belong") !=
+          std::string_view::npos);
 
-    // The wrong swapchain: the right queue and list, another device's swapchain. Refused by
-    // `ValidateForSubmit`, which is the shared guard `IQueue::Submit` uses -- so this is the
-    // case that says the swapchain's submit did not skip it.
-    const Monarc::Result<Monarc::u64> wrongSwapchain =
+    // The wrong list: the other swapchain, its own queue, and a list belonging to neither of
+    // them. Refused by `ValidateForSubmit`, the shared guard `IQueue::Submit` uses -- so this
+    // is the case that says the swapchain's submit did not skip it, and the message is what
+    // says the refusal came from there rather than from either guard in front of it.
+    const Monarc::Result<Monarc::u64> wrongList =
         second.swapchain->SubmitForPresent(second.device->GraphicsQueue(), **commands);
-    REQUIRE_FALSE(wrongSwapchain.has_value());
-    CHECK(wrongSwapchain.error().code == Monarc::ErrorCode::InvalidArgument);
+    REQUIRE_FALSE(wrongList.has_value());
+    CHECK(wrongList.error().code == Monarc::ErrorCode::InvalidArgument);
+    CHECK(wrongList.error().message.find("command list does not belong") !=
+          std::string_view::npos);
 
-    // And the right combination still works, so the refusals above are not passing because
-    // submitting is broken.
+    // Logged as well as asserted, because "which guard refused" is the whole content of this
+    // case and a reader of the run should not have to re-derive it from two `find` calls.
+    MONARC_LOG(SwapchainTest, Info, "the other device's queue: {} -- {}",
+               Monarc::ToString(wrongQueue.error().code), wrongQueue.error().message);
+    MONARC_LOG(SwapchainTest, Info, "the other device's list: {} -- {}",
+               Monarc::ToString(wrongList.error().code), wrongList.error().message);
+
+    // And both right combinations work, so the refusals above are not passing because
+    // submitting is broken -- and this is what says two devices on one adapter are both
+    // *usable* rather than merely both constructed.
     REQUIRE(first.swapchain->SubmitForPresent(first.device->GraphicsQueue(), **commands)
                 .has_value());
     REQUIRE(first.swapchain->Present().has_value());
+    REQUIRE(second.swapchain->SubmitForPresent(second.device->GraphicsQueue(), **otherCommands)
+                .has_value());
+    REQUIRE(second.swapchain->Present().has_value());
     REQUIRE(first.device->WaitIdle().has_value());
+    REQUIRE(second.device->WaitIdle().has_value());
 }
 
 TEST_CASE("an image handle held across a recreation is stale rather than reused") {

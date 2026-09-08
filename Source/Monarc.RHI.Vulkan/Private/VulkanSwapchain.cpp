@@ -948,9 +948,15 @@ Result<u64> VulkanSwapchain::SubmitForPresent(IQueue& queue, ICommandList& comma
         // `VulkanDeviceState::FindOwnList`'s argument for command lists. Casting an `IQueue&`
         // of unknown dynamic type is undefined before there is anything left to check, and
         // `dynamic_cast` needs RTTI; comparing addresses through a common base is well defined
-        // for any pointer, and it answers the question that can actually go wrong on this
-        // machine: two adapters mean two devices, and presenting a frame submitted to the
-        // wrong one is not something a driver reports helpfully.
+        // for any pointer, and it answers the question that can actually go wrong: any two
+        // devices are two devices, and presenting a frame submitted to the wrong one is not
+        // something a driver reports helpfully. **Two adapters are not what makes this
+        // reachable** -- `CreateDevice` keeps nothing per adapter, so two `VkDevice`s on one
+        // adapter are as foreign to each other as two on separate ones, which is the shape
+        // Monarc.Host.Windowed's "a swapchain refuses a queue and a command list that are not
+        // its device's" uses. Deleting this comparison makes that case's first refusal
+        // *succeed*, because `SubmitList` below submits on `m_state->device`'s own queue and
+        // never reads the one it was handed.
         return Err(ErrorCode::InvalidArgument,
                    "ISwapchain::SubmitForPresent was given a queue that does not belong to this "
                    "swapchain's device");

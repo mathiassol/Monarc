@@ -494,8 +494,12 @@ struct VulkanDeviceState {
     /// `ICommandList&` of unknown dynamic type to `VulkanCommandList&` is undefined before
     /// there is anything left to check, and `dynamic_cast` would need RTTI. Comparing the
     /// argument's address against this device's own lists is well defined for any pointer, and
-    /// it answers the question that can actually go wrong on this machine: two adapters mean
-    /// two devices, and a list from one submitted to the other's queue is refused here.
+    /// it answers the question that can actually go wrong: any two devices are two devices, and
+    /// a list from one submitted to the other's queue is refused here. **Two adapters are not
+    /// what makes that reachable** -- `VulkanBackend::CreateDevice` keeps nothing per adapter,
+    /// so two `VkDevice`s on one adapter have two sets of lists just the same, which is the
+    /// shape Monarc.Host.Windowed's "a swapchain refuses a queue and a command list that are
+    /// not its device's" uses to reach this.
     [[nodiscard]] VulkanCommandList* FindOwnList(ICommandList* list);
 
     /// The `VulkanCommandList` `list` names, if it is one of this device's and is in a state a
