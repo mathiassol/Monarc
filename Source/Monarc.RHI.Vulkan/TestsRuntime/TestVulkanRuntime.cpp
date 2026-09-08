@@ -61,10 +61,13 @@ constexpr std::string_view kLibraryOption = "--vulkan-library=";
 
 /// The library name main() opened with, so the cases open the same one it gated on.
 ///
-/// Null means "the platform's own", which is `Loader::Open`'s default. A raw pointer to a
-/// pointer main already holds -- `argv` outlives everything here -- rather than a copy, for the
-/// reason TestsDevice/ gives about its own globals: nothing Vulkan-shaped is constructed during
-/// static initialisation.
+/// Null means "the platform's own", which is `Loader::Open`'s default. It points into `argv`
+/// rather than owning a copy, which needs no allocator and no fixed buffer and is safe because
+/// `argv` outlives every case. `main` clears it before returning.
+///
+/// Only ever a name that opened: `main` returns 77 before doctest exists if it did not. So the
+/// `REQUIRE(loader.has_value())` in each case below is a real assertion about `Loader::Open`
+/// being deterministic, not a second gate.
 const char* g_libraryName = nullptr;
 
 [[nodiscard]] Monarc::Result<Monarc::RHI::Detail::Loader> OpenLoader() {
@@ -212,10 +215,10 @@ int main(int argc, char** argv) {
     }
     g_libraryName = libraryName;
 
-    // Opened and closed again before any case runs. The cases each open their own -- three of
-    // them need two Loaders or a moved-from one -- so holding this open would only mean the
-    // module's refcount never drops to zero, which is the one thing the move cases assert
-    // about. What this call is for is the decision below it.
+    // Opened, and closed again by the scope, before any case runs. This call exists only for
+    // the decision below it: every case opens whatever Loaders it needs for itself, because
+    // two of them need a *moved-from* Loader and one needs two live ones, and neither is
+    // something a shared instance could provide.
     {
         const Monarc::Result<Monarc::RHI::Detail::Loader> loader = OpenLoader();
         if (!loader) {
