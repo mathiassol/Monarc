@@ -276,6 +276,25 @@ confirming it:
   rejects. This is precisely the divergence
   [ADR-0003](Architecture/Decisions/ADR-0003-cpp23-baseline.md) makes the Clang build
   conditional on catching, and it means that build is load-bearing rather than belt-and-braces.
+- **`std::format_to_n` allocates a transient 16 bytes per integer with a presentation type,
+  in the debug standard library.** Measured in A4 Task 1 under a counting global
+  `operator new`, on both compilers: `{}` on any type allocates nothing, while `{:x}`, `{:X}`,
+  `{:d}`, `{:o}`, `{:b}` and `{:08x}` each cost one 16-byte allocation, freed inside the same
+  call. It is the checked-iterator container proxy, not the entry point —
+  `std::formatted_size` measures identically — and it is a function of
+  `_ITERATOR_DEBUG_LEVEL`: one under `/MDd` and `/MTd`, zero under `/MD` and `/MT`, zero under
+  `/MDd` with `_ITERATOR_DEBUG_LEVEL=0`, one under `/MD` with `_ITERATOR_DEBUG_LEVEL=1`. So of
+  the six presets, `msvc-debug` and `clang-debug` pay it and the other four do not.
+
+  Worth knowing because
+  [ADR-0003](Architecture/Decisions/ADR-0003-cpp23-baseline.md)'s amendment permits `<format>`
+  in runtime code "on the condition that it formats into a fixed buffer via
+  `std::format_to_n` rather than allocating a `std::string`" — and `MONARC_LOG` is built on
+  exactly that. The condition still holds as written: no `std::string` is allocated, and
+  nothing here grows without bound. But the mechanism it names is not allocation-free in Debug,
+  so **"uses `format_to_n`" is not the same claim as "allocates nothing"**, and two comments in
+  A4 Task 1 that said the latter were false until this was measured. A hot path that must not
+  allocate at all needs its own formatting, not `format_to_n` with a presentation type.
 - **`cmake --build` outside a developer environment reports success by saying nothing.** With
   no `vcvars64.bat` in the shell, an already-current build tree prints `ninja: no work to do`
   and exits zero — indistinguishable from a real verification. The failure only surfaces once
