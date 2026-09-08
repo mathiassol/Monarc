@@ -322,6 +322,24 @@ confirming it:
   `PATH` problem. `vcvars64.bat` alone does not cause this — it appears when composing a
   `PATH` by hand from the Machine and User variables. **Filter `msys64` out when doing
   that**, or configure from a plain developer prompt.
+
+  **And filtering is not enough on its own, measured in A4 Task 1's review pass: a
+  reconfigure that picks the wrong tools writes them into `CMakeCache.txt`, and re-running
+  `cmake --preset` with the right `PATH` does not undo it.** The four Clang presets need
+  `C:\Program Files\LLVM\bin` on `PATH` *as well* as `msys64` filtered out — without LLVM,
+  `cmake --preset clang-debug` fails with "CMAKE_CXX_COMPILER: clang-cl is not a full path
+  and was not found in the PATH"; with LLVM but without the filter it gets past that and
+  fails the compiler sanity check with `msys64\ld.exe: cannot find /nologo`. Both attempts
+  leave `CMAKE_AR` and `CMAKE_LINKER` cached as MSYS2's `ar.exe` and `ld.exe`, and those are
+  `FILEPATH` cache entries CMake will not re-detect. `cmake --build` then exits non-zero
+  while `ctest` keeps reporting the stale binaries green — the same shape of trap as
+  `ninja: no work to do`. Overriding the two entries with `-DCMAKE_LINKER=` is *not* a
+  sufficient repair either: it links but leaves `clang-asan` reporting a spurious
+  `global-buffer-overflow` inside doctest's own `parseArgs` in **every** test binary. The
+  repair that works is deleting `CMakeCache.txt` and `CMakeFiles/` from the tree and
+  configuring again, which restores `lld-link` and `llvm-lib` — what the sanitizer wiring in
+  CMake/MonarcTargetOptions.cmake already says it expects. `_deps/` can be kept, so nothing
+  is re-downloaded.
 - **`clang-cl` does not accept `/std:c++23`** — it silently ignores the flag (emitting only
   an "argument unused" warning) and falls back to C++17, which then fails with a wall of
   confusing errors. Use `/std:c++latest`, or let CMake's `CXX_STANDARD 23` pick the flag.
