@@ -444,11 +444,33 @@ TEST_CASE("ten frames are acquired and presented, with no out-of-date loop") {
     // worked.
     REQUIRE_FALSE(Adapters().IsEmpty());
 
+    // **Counted, because the `continue` below used to be the whole of this case's answer to a
+    // machine where no adapter can present.** Everything asserted here lives inside the loop,
+    // so a configuration in which every `Open` declines reported this case green having
+    // asserted one thing: that the adapter list is not empty. Measured, by forcing
+    // `VulkanDeviceState::swapchainEnabled` false -- the exact "this GPU cannot drive this
+    // monitor" configuration the `continue` exists to tolerate: 14 of 16 cases went red and
+    // this one reported SUCCESS with 1 assertion. `main()` gates on the adapter list being
+    // *empty*, not on any adapter being able to present, so that is not a state the skip
+    // covers. Its two siblings already count -- `CHECK(presenting >= 1)` and
+    // `CHECK(adaptersRead >= 1)` -- and this was the last case in the file shaped the other
+    // way.
+    Monarc::usize presenting = 0;
+
     for (const Monarc::RHI::AdapterInfo& adapter : Adapters()) {
-        Harness harness;
-        if (!harness.Open(adapter, false)) {
+        Harness             harness;
+        const Monarc::Status opened = harness.Open(adapter, false);
+        if (!opened) {
+            // Logged as well as counted. "This GPU cannot present to this window" is a
+            // legitimate configuration -- see `VulkanBackend::AdapterCanPresent` -- and the
+            // reason belongs in the record either way, which the bare `continue` did not put
+            // there.
+            MONARC_LOG(SwapchainTest, Warning, "adapter \"{}\" has no swapchain: {} -- {}",
+                       adapter.name, Monarc::ToString(opened.error().code),
+                       opened.error().message);
             continue;
         }
+        ++presenting;
 
         Monarc::u32 presented = 0;
         Monarc::u32 outOfDate = 0;
@@ -480,6 +502,10 @@ TEST_CASE("ten frames are acquired and presented, with no out-of-date loop") {
 
         REQUIRE(harness.device->WaitIdle().has_value());
     }
+
+    // At least one adapter must have presented, or nothing above ran and this case has said
+    // nothing about ten frames, the out-of-date loop, or the timeline.
+    CHECK(presenting >= 1);
 }
 
 TEST_CASE("every swapchain image is acquired in turn") {

@@ -367,18 +367,57 @@ TEST_CASE("a window can be moved between monitors, and both monitors' DPI is rep
                "{} monitor(s); this window is on the one at ({}, {})-({}, {}) at {} DPI",
                first.monitorCount, first.left, first.top, first.right, first.bottom, first.dpi);
 
-    if (first.monitorCount < 2) {
-        // Reported rather than asserted. A machine with one monitor has nothing to drag to, and
-        // a case that passed by doing nothing is the shape of assertion this branch deletes.
-        MONARC_LOG(WindowTest, Warning,
-                   "this machine reports one monitor, so there is no second one to move to; "
-                   "the monitor-drag half of this case did not run");
-        return;
+    // **What `Monitors()` reported, asserted on any machine, before the count is consulted at
+    // all.** This used to `return` on `monitorCount < 2`, which meant a one-monitor machine
+    // reported this case green having asserted one thing: that `Window::Create` succeeded.
+    // Nothing about monitors and nothing about DPI, both of which are in the title. Measured,
+    // by forcing `WindowTestHooks::Monitors` to report one monitor: the suite stayed 18 of 18
+    // green while assertions fell 98 to 93, and run alone the case reported one passed.
+    //
+    // A zeroed `MONITORINFO` -- `GetMonitorInfoW` failing, or `MonitorFromWindow` finding
+    // nothing -- is what these four turn red, and they are the half of this case that does not
+    // need a second display.
+    CHECK(first.monitorCount >= 1);
+    CHECK(first.right > first.left);
+    CHECK(first.bottom > first.top);
+    CHECK(first.dpi > 0);
+    // The monitor the window is on is inside the virtual screen, which is the only relation
+    // between the two rectangles that holds however many displays there are.
+    CHECK(first.left >= first.virtualLeft);
+    CHECK(first.top >= first.virtualTop);
+
+    // **A second monitor is declared as a *branch* here and as a requirement in the device
+    // suite, and the asymmetry is deliberate.** `Monarc.Host.Windowed/TestsDevice`'s "a window
+    // moved to another monitor keeps presenting" asserts `CHECK(monitorCount >= 2)` outright,
+    // on the argument that a suite already requiring a GPU and an interactive session can
+    // declare a second display alongside them. This suite is the one CI actually runs -- it
+    // needs no device, only `HasInteractiveSession()` -- and a GitHub runner reports one
+    // monitor. The same `CHECK` here would be a permanently red assertion about the runner's
+    // hardware rather than about Monarc, which is the kind of red that teaches people to
+    // ignore reds.
+    //
+    // So the count picks the branch and **both branches assert**. What is not on offer is the
+    // third option this used to take.
+    const bool crossMonitor = first.monitorCount >= 2;
+
+    if (!crossMonitor) {
+        // **And the count itself is cross-checked, which is what makes a wrong one catchable
+        // on a machine with any number of displays.** The virtual screen is the bounding box
+        // of every monitor, so on a machine with one it *is* that monitor and its origin is
+        // that monitor's origin. Forcing `WindowTestHooks::Monitors` to report a count of 1 on
+        // this two-monitor machine -- where `\\.\DISPLAY5` sits at `(-1920, 0)` -- turns this
+        // red, which is the mutation a bare `return` and a bare `CHECK(monitorCount >= 2)`
+        // would each have missed here for opposite reasons.
+        CHECK(first.virtualLeft == first.left);
+        CHECK(first.virtualTop == first.top);
     }
 
     // The development machine has \\.\DISPLAY5 at (-1920, 0) and \\.\DISPLAY1, the primary, at
     // (0, 0). A negative X is therefore how the second monitor is reached -- see Docs/Status.md.
-    WindowTestHooks::MoveTo(*window, first.left - 1000, first.top + 100);
+    // Where there is only one, the move stays inside it, so the client-size and DPI assertions
+    // below run on every machine.
+    WindowTestHooks::MoveTo(*window, crossMonitor ? first.left - 1000 : first.left + 200,
+                            first.top + 100);
     Settle(*window);
 
     const WindowTestHooks::MonitorInfo second = WindowTestHooks::Monitors(*window);
@@ -386,12 +425,25 @@ TEST_CASE("a window can be moved between monitors, and both monitors' DPI is rep
                "after the move it is on the one at ({}, {})-({}, {}) at {} DPI", second.left,
                second.top, second.right, second.bottom, second.dpi);
 
-    CHECK(second.left != first.left);
+    if (crossMonitor) {
+        CHECK(second.left != first.left);
+    } else {
+        MONARC_LOG(WindowTest, Warning,
+                   "this machine reports one monitor, so the move above was within it and the "
+                   "cross-monitor half of this case is unexercised here; what runs instead is "
+                   "everything that does not need a second display");
+        // The move stayed on the one monitor, which is the only thing there is to assert about
+        // where it ended up -- and it is an assertion rather than a return.
+        CHECK(second.left == first.left);
+    }
+
     CHECK_FALSE(window->ClientSize().IsEmpty());
-    // The window keeps its client size across the move, because both monitors report the same
-    // DPI. **That is also why this case does not exercise the WM_DPICHANGED path**, and saying
-    // so is the whole of the claim: a drag between displays at different scale factors would
-    // change the size, and neither monitor here is scaled differently from the other.
+    // The window keeps its client size across the move. **On this machine that is also why the
+    // case does not exercise the WM_DPICHANGED path**, and saying so is the whole of the claim:
+    // a drag between displays at different scale factors would change the size, and neither
+    // monitor here is scaled differently from the other. Within one monitor the equality is a
+    // stronger statement, because no DPI change is even possible -- a `MoveTo` that resized the
+    // window is what it catches.
     CHECK(second.dpi == first.dpi);
     CHECK(window->ClientSize() == kTestWindow.size);
 
