@@ -19,6 +19,7 @@ include(MonarcModule)
 #   Monarc.RHI.Vulkan.DeviceTests      2.64 s
 #   Monarc.Host.Windowed.Tests         1.00 s   <- slowest unit suite; opens real windows
 #   Monarc.RHI.Vulkan.Probe            0.45 s
+#   Monarc.RHI.Vulkan.RuntimeTests     0.05 s   <- opens a library; creates no instance at all
 #   every other unit suite            <0.25 s
 #
 # A3 Task 5 added a *ninth* kind, and it is slower than it looks: a death test's child ends at
@@ -94,7 +95,7 @@ function(_monarc_add_test_binary module source_dir target_suffix out_target)
     # Recorded so that gate 14 can read this target's link line back.
     #
     # **The link line is the whole lever, which is why this exists.** Every source-reading gate
-    # skips Tests/ and TestsDevice/ by design (see MODULE_SOURCE_DIRS in
+    # skips Tests/, TestsRuntime/ and TestsDevice/ by design (see MODULE_SOURCE_DIRS in
     # Tools/check_architecture.py): test targets are not modules. Gate 3 therefore cannot see a
     # tier-2 *test* that includes Monarc/Host/ -- and what stopped one was not a rule but an
     # accident, that _monarc_add_test_binary links only the module under test, so the header is
@@ -115,8 +116,10 @@ endfunction()
 # registers it with CTest. Test targets are exempt from the module graph: they are
 # not modules, and nothing may depend on them.
 #
-# Everything under Tests/ must run on a machine with no GPU, no Vulkan driver and no display.
-# Anything that needs a device goes in TestsDevice/ instead -- see below.
+# Everything under Tests/ must run on a machine with no GPU, no Vulkan driver, no Vulkan
+# runtime library and no display. Anything that needs a device goes in TestsDevice/, and
+# anything that needs `vulkan-1.dll` but neither an instance nor an adapter goes in
+# TestsRuntime/ -- both below, both reporting Skipped rather than Passed where they cannot run.
 function(monarc_test_module module)
     _monarc_add_test_binary(${module} "Tests" "Tests" _target)
     if(NOT _target)
@@ -157,6 +160,39 @@ function(monarc_device_test_module module)
         LABELS "gpu"
         SKIP_RETURN_CODE 77
         TIMEOUT ${MONARC_DEVICE_TEST_TIMEOUT_SECONDS})
+endfunction()
+
+# Builds a module's tests that need a Vulkan **runtime** but no **device**, from its
+# TestsRuntime/ directory, as a third binary and a third CTest entry.
+#
+# **This exists because CI turned out to be exactly the machine this describes, which was not
+# what the phase plan assumed.** The A3 plan expected GitHub's Windows runners to have no
+# `vulkan-1.dll` at all, so that everything loader-shaped was device-gated and unreachable
+# there. Measured on run 34241306503 instead: the loader opens, every global entry point
+# resolves, and bring-up refuses later, at `VK_KHR_surface`, because no ICD is registered. So
+# there is a real middle tier -- a runtime with no instance and no adapter -- and four cases
+# that had been sitting behind the device suite's `adapters.IsEmpty()` gate could have been
+# running in CI all along. Docs/Status.md holds the measurement and which four.
+#
+# The gate is `Loader::Open` rather than a device, and it is made in `main` before doctest runs,
+# for the same reason monarc_device_test_module() gives: a filter inside a binary that had
+# already started reports "0 tests, all passed", and SKIP_RETURN_CODE 77 is the vocabulary for
+# "could not run". A machine with no Vulkan at all reports Skipped here; a machine with a loader
+# and no ICD runs every case; a machine with a device runs them too.
+#
+# Label `runtime`, so `ctest -L runtime` runs exactly these and neither `-L unit` nor `-L gpu`
+# claims them. `ctest -LE gpu` now runs them, which is the point.
+function(monarc_runtime_test_module module)
+    _monarc_add_test_binary(${module} "TestsRuntime" "RuntimeTests" _target)
+    if(NOT _target)
+        return()
+    endif()
+
+    add_test(NAME ${_target} COMMAND ${_target})
+    set_tests_properties(${_target} PROPERTIES
+        LABELS "runtime"
+        SKIP_RETURN_CODE 77
+        TIMEOUT ${MONARC_TEST_TIMEOUT_SECONDS})
 endfunction()
 
 # Registers one CTest entry per fatal guard: a child process that invokes the guard, and a

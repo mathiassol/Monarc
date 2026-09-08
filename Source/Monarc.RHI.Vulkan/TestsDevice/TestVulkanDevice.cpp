@@ -19,6 +19,15 @@
 // implementation. The device-free suite keeps the failure path, where the allocator can still
 // be measured; the four cases below are what the two-phase constructor used to make reachable
 // with no Vulkan at all, at the price of a backend that could exist without a state.
+//
+// **`Detail::Loader`'s own cases are no longer here, and CI is why.** Four of them -- the three
+// move cases and "opening a library that is not the Vulkan loader still fails on a machine that
+// has one" -- need a Vulkan *runtime* and nothing above it, and sitting behind this binary's
+// adapter gate meant they never ran on a machine without a GPU. GitHub's runners turned out to
+// have `vulkan-1.dll` and no ICD, so they are now TestsRuntime/TestVulkanRuntime.cpp and run in
+// CI. What stayed is what genuinely needs a `VkInstance`: the instance-version case and the
+// validation-implication case both read state off a live backend, and bring-up is exactly what
+// fails on such a machine.
 
 #define DOCTEST_CONFIG_IMPLEMENT
 #include <doctest/doctest.h>
@@ -36,14 +45,9 @@
 #include <Monarc/RHI/Vulkan/VulkanBackend.h>
 #include <Monarc/RHI/Vulkan/VulkanDevice.h>
 
-#include <Loader.h>
-#include <LoaderTables.h>
-
 #include <cstdio>
 #include <string_view>
 #include <utility>
-
-using Monarc::RHI::Detail::AllTablesEmpty;
 
 namespace {
 
@@ -344,88 +348,6 @@ TEST_CASE("a backend releases everything it allocated") {
         CHECK(allocator.BytesAllocated() > 0);
     }
     CHECK(allocator.BytesAllocated() == 0);
-}
-
-TEST_CASE("a loader that is open transfers on move and leaves the source closed and empty") {
-    // The case TestVulkanLoader.cpp cannot write, and the reason is the tables: telling a
-    // move that clears the source from one that copies it needs a source whose tables were
-    // populated, and only a real Vulkan runtime can populate them. With nothing open the two
-    // are indistinguishable, so this is the only suite the assertion can live in.
-    Monarc::Result<Monarc::RHI::Detail::Loader> source = Monarc::RHI::Detail::Loader::Open();
-    REQUIRE(source.has_value());
-    REQUIRE(source->IsOpen());
-    REQUIRE(source->Global().vkCreateInstance != nullptr);
-
-    const Monarc::RHI::Detail::Loader destination(std::move(*source));
-    CHECK(destination.IsOpen());
-    CHECK(destination.Global().vkCreateInstance != nullptr);
-
-    // The source must not still hold the module. If it did, both would call FreeLibrary on it
-    // and the second call would be releasing a reference nobody owns.
-    CHECK_FALSE(source->IsOpen());
-
-    // And its tables must be null, which is the half a defaulted move gets wrong: the three
-    // tables are trivially copyable, so a defaulted move copies them and leaves the source
-    // holding live-looking pointers into a module the destination now owns. This is the line
-    // that fails if Loader's moves are ever defaulted again -- verified by defaulting them.
-    CHECK(AllTablesEmpty(*source));
-}
-
-TEST_CASE("move-assigning a loader to itself leaves it open") {
-    Monarc::Result<Monarc::RHI::Detail::Loader> loader = Monarc::RHI::Detail::Loader::Open();
-    REQUIRE(loader.has_value());
-    REQUIRE(loader->IsOpen());
-
-    // Not a contrivance to reach a line. Loader::operator= releases the destination through
-    // Close() before adopting the source, so an unguarded version applied to one object
-    // unloads the library and then copies back the nulls Close() had just written -- both
-    // checks below go red, and the module is gone. The `this != &other` guard is the whole
-    // of what prevents it, and it is Platform::Library::operator='s own guard.
-    Monarc::RHI::Detail::Loader& alias = *loader;
-    *loader                            = std::move(alias);
-
-    CHECK(loader->IsOpen());
-    CHECK(loader->Global().vkCreateInstance != nullptr);
-}
-
-TEST_CASE("move assignment clears the source's tables, and not only move construction does") {
-    // Both operators are written out, so both need the assertion: a hand-written constructor
-    // beside a defaulted assignment would pass the case above and fail this one. This is also
-    // the operator VulkanBackend::State::BringUp uses on every bring-up -- `loader =
-    // std::move(*opened)` -- so it is the moved-from Loader that actually exists in shipped
-    // code, rather than only in a test.
-    //
-    // What is *not* asserted here is that the destination's own module was released: two
-    // Loaders opened from the same name hold the same refcounted HMODULE, and nothing in the
-    // public interface can see the count. Loader::operator= releases through Close() for that
-    // reason -- one release path, stated once -- and the claim stops where the observation
-    // does.
-    Monarc::Result<Monarc::RHI::Detail::Loader> destination =
-        Monarc::RHI::Detail::Loader::Open();
-    Monarc::Result<Monarc::RHI::Detail::Loader> source = Monarc::RHI::Detail::Loader::Open();
-    REQUIRE(destination.has_value());
-    REQUIRE(source.has_value());
-    REQUIRE(source->Global().vkCreateInstance != nullptr);
-
-    *destination = std::move(*source);
-
-    CHECK(destination->IsOpen());
-    CHECK(destination->Global().vkCreateInstance != nullptr);
-    CHECK_FALSE(source->IsOpen());
-    CHECK(AllTablesEmpty(*source));
-}
-
-TEST_CASE("opening a library that is not the Vulkan loader still fails on a machine that has one") {
-    // The device-free suite covers this too, and it is repeated here for one reason: on a
-    // machine with a real Vulkan runtime, vkGetInstanceProcAddr *is* resolvable from
-    // somewhere, and a loader that had fallen back to a process-wide symbol lookup rather than
-    // asking the library it opened would pass in CI and fail here. Nothing does that today;
-    // this is the case that would notice if it started.
-    const Monarc::Result<Monarc::RHI::Detail::Loader> opened =
-        Monarc::RHI::Detail::Loader::Open(Monarc::Platform::Library::SystemLibraryName());
-    REQUIRE_FALSE(opened.has_value());
-    CHECK(opened.error().code == Monarc::ErrorCode::NotFound);
-    CHECK(opened.error().message.find("vkGetInstanceProcAddr") != std::string_view::npos);
 }
 
 // ---------------------------------------------------------------------------------------

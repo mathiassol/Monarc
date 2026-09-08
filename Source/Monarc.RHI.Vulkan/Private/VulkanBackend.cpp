@@ -329,6 +329,16 @@ Status VulkanBackend::State::BringUp(const Config& config) {
     }
     instanceApiVersion = Detail::ToApiVersion(packedInstanceVersion);
 
+    // **Logged here rather than only by a caller that got a backend back, and A3 Task 5's
+    // reading of CI is why.** `Monarc.FirstLight --adapters` prints the instance version, but
+    // only after `Create` succeeded -- so on GitHub's runners, where bring-up refuses a few
+    // lines below this for want of `VK_KHR_surface`, the probe reported a loader and no version
+    // at all. The version is the second of the four things that mode exists to record, and it
+    // is known by the time this line runs whether or not anything after it works. Info, so it
+    // is in the probe's output on every machine.
+    MONARC_LOG(Vulkan, Info, "instance version {}.{}.{} from vkEnumerateInstanceVersion",
+               instanceApiVersion.major, instanceApiVersion.minor, instanceApiVersion.patch);
+
     const ApiVersion required = Detail::ToApiVersion(kRequiredApiVersion);
     if (instanceApiVersion < required) {
         MONARC_LOG(Vulkan, Warning,

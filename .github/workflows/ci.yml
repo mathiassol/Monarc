@@ -119,17 +119,26 @@ jobs:
       #
       # A mechanism whose whole purpose is to report, that reports nothing, is worse than not
       # having it: the run goes green and the question stays unanswered. Hence a second,
-      # verbose invocation of exactly that one entry.
+      # verbose invocation of exactly those entries.
       #
-      # `if: always()` and no `exit /b 1`: this reports, it does not gate. A failure here
-      # should never be the reason a run is red, and a red run is exactly when knowing what
-      # the machine has is most useful.
+      # **`Monarc.RHI.Vulkan.RuntimeTests` is here for the same reason, and it is not
+      # redundant.** The probe stops at the first refusal -- on these runners
+      # `VK_KHR_surface`, before an instance exists -- so what it reports is bring-up's view.
+      # The runtime suite reports the loader's: which global entry points resolved, and the
+      # instance version read back through the table. Both are passing entries, so both are
+      # silent without this step.
+      #
+      # `if: always()`, because a red run is exactly when knowing what the machine has is most
+      # useful. There is deliberately no `|| exit /b 0` after either invocation: a step whose
+      # job is to report should be loud when it cannot, which is the whole lesson of the
+      # commit that added it.
       - name: Probe -- what this runner actually has
         if: always()
         shell: cmd
         run: |
           call "%VCVARS%" >nul
           ctest --preset ${{ matrix.preset }} -R Monarc.RHI.Vulkan.Probe -V
+          ctest --preset ${{ matrix.preset }} -R Monarc.RHI.Vulkan.RuntimeTests -V
 
       # The module graph is what the architecture gates and, later, `monarc explain`
       # read. Publishing it makes a graph change visible in the run itself.

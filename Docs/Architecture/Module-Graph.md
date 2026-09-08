@@ -175,8 +175,16 @@ export.
 | `Private/` | the module | Implementation, and headers no consumer sees. A test target of the same module has this on its include path and nothing else does |
 | `Private/Platform/<Platform>/` | the module, on that platform only | The only place a platform conditional is legitimate — rule 7 |
 | `Private/**/TestSupport/` | **the module's test binaries, and nothing else** | Test-only code that is not a test |
-| `Tests/` | `<Module>.Tests` | Must run with no GPU, no driver and no display |
+| `Tests/` | `<Module>.Tests` | Must run with no GPU, no driver, no graphics runtime library and no display |
+| `TestsRuntime/` | `<Module>.RuntimeTests` | Needs the graphics runtime library and nothing above it — no instance, no adapter; reports Skipped where there is none |
 | `TestsDevice/` | `<Module>.DeviceTests` | Needs a device; reports Skipped where there is none |
+
+**`TestsRuntime/` exists because a measurement contradicted an assumption.** Phase A3 assumed
+GitHub's Windows runners had no Vulkan runtime at all, which would have made the middle row an
+empty category. They have one, with no ICD registered behind it — `vulkan-1.dll` opens, every
+global entry point resolves, and instance creation fails at `VK_KHR_surface`. So four cases that
+were behind the device gate could have been running in CI from the day they were written.
+[Status.md](../Status.md) records the probe output and which four.
 
 **`Private/**/TestSupport/` is the one that needs explaining.** `monarc_module()` does not glob
 it; `_monarc_add_test_binary()` globs it into *every* test binary of the owning module. It is

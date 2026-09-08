@@ -2,21 +2,20 @@
 
 #include <Loader.h>
 
-// A test-only helper over Loader's entry-point tables, shared by this module's two test
-// binaries.
+// A test-only helper over Loader's entry-point tables, shared by this module's test binaries.
 //
-// **Under Private/ rather than in either Tests/ directory, and that is what makes it
-// shareable.** CMake/MonarcTest.cmake puts a module's Private/ on both test targets' include
-// path, so Tests/ and TestsDevice/ can each include this; nothing outside the module has that
-// directory on its path, and nothing in the shipped module includes this header. The
-// alternative was the status quo -- one 13-line function written out twice, which had to be
-// kept in step with three X-macro lists in two files.
+// **Under Private/ rather than in any one Tests/ directory, and that is what makes it
+// shareable.** CMake/MonarcTest.cmake puts a module's Private/ on every test target's include
+// path, so Tests/, TestsRuntime/ and TestsDevice/ can each include this; nothing outside the
+// module has that directory on its path, and nothing in the shipped module includes this
+// header. The alternative was the status quo -- one 13-line function written out twice, which
+// had to be kept in step with three X-macro lists in two files.
 //
-// Tests/TestVulkanLoader.cpp explains why the two suites assert *different* things with it:
-// the device-free one can only ever call it on a Loader that was never open, and telling a
-// move that clears the source's tables from one that copies them needs a source whose tables
-// were populated. That difference justified two sets of assertions. It never justified two
-// copies of the helper.
+// Tests/TestVulkanLoader.cpp explains why the suites assert *different* things with it: the
+// no-Vulkan one can only ever call it on a Loader that was never open, and telling a move that
+// clears the source's tables from one that copies them needs a source whose tables were
+// populated -- which is TestsRuntime/'s, since a runtime is all that takes. That difference
+// justified two sets of assertions. It never justified two copies of the helper.
 
 namespace Monarc::RHI::Detail {
 

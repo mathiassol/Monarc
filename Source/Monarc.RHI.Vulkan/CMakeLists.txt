@@ -45,27 +45,37 @@ target_compile_definitions(Monarc.RHI.Vulkan PRIVATE
 # declaration. See those files' own comments, Private/VulkanPlatform.h, and ADR-0016.
 # (This said "VulkanPlatform.cpp and nowhere else" until Task 4 added the second file.)
 
-# Three test outcomes, and they are three because a suite that silently runs nothing while
+# Four test outcomes, and they are four because a suite that silently runs nothing while
 # showing green is the failure mode this whole phase is shaped to avoid.
 #
-#   1. Tests/       -- device-free, label `unit`, runs everywhere including CI.
-#   2. TestsDevice/ -- device-required, label `gpu`, SKIP_RETURN_CODE 77, so a machine with no
-#                      Vulkan device reports Skipped and never Passed.
-#   3. The probe     -- always runs, always passes, prints what it found. Registered from
-#                      Source/Monarc.FirstLight/CMakeLists.txt, because `--adapters` is already
-#                      exactly that program and a second implementation of it would be a second
-#                      thing to keep true.
+#   1. Tests/        -- needs no Vulkan at all, label `unit`, runs everywhere including CI.
+#   2. TestsRuntime/ -- needs `vulkan-1.dll` and nothing above it, label `runtime`,
+#                       SKIP_RETURN_CODE 77.
+#   3. TestsDevice/  -- device-required, label `gpu`, SKIP_RETURN_CODE 77, so a machine with no
+#                       Vulkan device reports Skipped and never Passed.
+#   4. The probe     -- always runs, always passes, prints what it found. Registered from
+#                       Source/Monarc.FirstLight/CMakeLists.txt, because `--adapters` is already
+#                       exactly that program and a second implementation of it would be a second
+#                       thing to keep true.
+#
+# **The third of those four is A3 Task 5's, and it exists because a measurement contradicted the
+# plan.** The plan assumed CI had no Vulkan runtime, which would have made outcome 2 an empty
+# category. Run 34241306503 measured a loader that opens, resolves every global entry point, and
+# fails at `VK_KHR_surface` for want of an ICD -- so there is a real tier between "no Vulkan" and
+# "a GPU", and four cases were device-gated for no reason. Docs/Status.md holds the numbers.
 monarc_test_module(Monarc.RHI.Vulkan)
+monarc_runtime_test_module(Monarc.RHI.Vulkan)
 monarc_device_test_module(Monarc.RHI.Vulkan)
 
-# Both test binaries compile against Private/ headers -- Loader.h and Translate.h are where the
-# entry-point tables and the pure translation functions live, and neither belongs in a public
+# All three test binaries compile against Private/ headers -- Loader.h and Translate.h are where
+# the entry-point tables and the pure translation functions live, and neither belongs in a public
 # header. monarc_test_module() puts the module's Private/ directory on the test target's
 # include path for exactly this; what these two lines add is the Vulkan headers themselves and
 # the same VK_NO_PROTOTYPES the module is built with. Without the definition being identical,
 # a test would see prototypes the module does not and the two would disagree about what a
 # direct call means.
-foreach(_test_target Monarc.RHI.Vulkan.Tests Monarc.RHI.Vulkan.DeviceTests)
+foreach(_test_target Monarc.RHI.Vulkan.Tests Monarc.RHI.Vulkan.RuntimeTests
+                     Monarc.RHI.Vulkan.DeviceTests)
     if(TARGET ${_test_target})
         target_link_libraries(${_test_target} PRIVATE Vulkan::Headers)
         target_compile_definitions(${_test_target} PRIVATE VK_NO_PROTOTYPES)

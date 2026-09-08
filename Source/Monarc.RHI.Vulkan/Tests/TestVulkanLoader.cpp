@@ -105,5 +105,7 @@ TEST_CASE("resolving instance functions on a closed loader is rejected, not atte
 //     whose tables are populated is the thing that separates them, and only a real Vulkan
 //     runtime can populate them -- Loader's members are private and Open is the only writer.
 //
-// Both are in TestsDevice/TestVulkanDevice.cpp, which reports Skipped rather than Passed when
-// there is no device to run them against.
+// Both are in TestsRuntime/TestVulkanRuntime.cpp, which reports Skipped rather than Passed when
+// there is no Vulkan runtime to run them against. They were in TestsDevice/ until A3 Task 5:
+// neither needs an instance or an adapter, and CI turned out to be a machine with a loader and
+// no ICD, so the device gate was skipping cases that could have run there all along.
