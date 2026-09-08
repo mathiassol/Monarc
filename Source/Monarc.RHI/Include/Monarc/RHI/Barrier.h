@@ -119,7 +119,7 @@ enum class Access : u32 {
 /// the whole reason a transition needs naming.
 ///
 /// **`PipelineStage`'s "an unused enumerator costs one row in one switch" does not hold for
-/// half of this set, and the narrower version is this: four of these eight name a transition
+/// much of this set, and the narrower version is this: four of these nine name a transition
 /// no texture Monarc can create today may legally be put into.** A layout is only valid for an
 /// image whose *usage* permits it, and `TextureUsage` in Device.h has two bits --
 /// `ColorAttachment` and `TransferSource`. Measured on both local adapters, each of the four
@@ -138,8 +138,10 @@ enum class Access : u32 {
 ///   says nothing uploads to a texture yet, so an image transfer-destination bit would be an
 ///   enumerator with no caller.
 ///
-/// The other four -- `Undefined`, `General`, `ColorAttachment`, `TransferSource` -- are reached
-/// by the same probe with no validation error at all.
+/// Four of the remaining five -- `Undefined`, `General`, `ColorAttachment`, `TransferSource` --
+/// are reached by the same probe with no validation error at all. The ninth, `PresentSource`,
+/// is the other way round: it is unreachable for a *created* texture whatever its usage, and
+/// required for a swapchain image. Its own comment below says so.
 ///
 /// **They stay, and the plan is why**: ADR-0005's model arrives whole, and
 /// `DepthStencilAttachment` is needed the moment a depth pass exists. What changes is the
@@ -174,6 +176,23 @@ enum class TextureLayout : u32 {
 
     TransferSource,
     TransferDestination,
+
+    /// Ready for the presentation engine to display -- `VK_IMAGE_LAYOUT_PRESENT_SRC_KHR`.
+    ///
+    /// **The one layout on this list that no `IDevice::CreateTexture` image may ever be put
+    /// into, and the one a swapchain image must be in before it is presented.** It is valid
+    /// only for an image that came from a swapchain, which is why it is the exception to the
+    /// paragraph above rather than another row in its table: the four layouts named there are
+    /// unreachable because `TextureUsage` has no bit that permits them, where this one is
+    /// unreachable for a created texture no matter what usage it carries and is *required* for
+    /// an acquired one.
+    ///
+    /// Added in Phase A3 Task 4 with its first and only caller: `Monarc.FirstLight`'s frame
+    /// loop barriers the acquired image `ColorAttachment` -> `PresentSource` before
+    /// `ISwapchain::Present`, and the swapchain readback goes `TransferSource` ->
+    /// `PresentSource` instead. Presenting from any other layout is
+    /// `VUID-VkPresentInfoKHR-pImageIndices-01430`.
+    PresentSource,
 };
 
 /// The enumerator's own spelling, for logs and test failures. Never nullptr.

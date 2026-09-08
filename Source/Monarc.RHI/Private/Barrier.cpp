@@ -70,6 +70,7 @@ const char* ToString(TextureLayout layout) {
         case TextureLayout::ShaderReadOnly:         return "ShaderReadOnly";
         case TextureLayout::TransferSource:         return "TransferSource";
         case TextureLayout::TransferDestination:    return "TransferDestination";
+        case TextureLayout::PresentSource:          return "PresentSource";
     }
     return "<invalid TextureLayout>";
 }

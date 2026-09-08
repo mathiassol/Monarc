@@ -86,6 +86,7 @@ constexpr TextureLayout kAllLayouts[] = {
     TextureLayout::ShaderReadOnly,
     TextureLayout::TransferSource,
     TextureLayout::TransferDestination,
+    TextureLayout::PresentSource,
 };
 
 /// A bit position well past every named one, so a value cast from it is definitely not an
