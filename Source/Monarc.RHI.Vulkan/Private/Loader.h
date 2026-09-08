@@ -78,8 +78,9 @@ enum class Requirement : u8 { Required, Optional };
 ///
 /// **`vkCreateWin32SurfaceKHR` is deliberately not in this list, and it cannot be.** Its
 /// declaration and `VkWin32SurfaceCreateInfoKHR` exist only where `VK_USE_PLATFORM_WIN32_KHR`
-/// is defined, which is exactly one translation unit --
-/// Private/Platform/Windows/VulkanSurface.cpp -- and never the target (ADR-0016). A table
+/// is defined, which is two translation units in
+/// Private/Platform/Windows/ -- VulkanSurface.cpp, the only one that needs the declaration,
+/// and VulkanPlatform.cpp -- and never a header and never the target (ADR-0016). A table
 /// member naming `PFN_vkCreateWin32SurfaceKHR` would put that type in this header, which
 /// every neutral source in the module includes. So the platform file resolves its own surface
 /// constructor through `GetInstanceProcAddr()` below; nothing else needs it.
@@ -308,7 +309,8 @@ public:
     ///
     /// **One caller, and it is the platform surface file.** `vkCreateWin32SurfaceKHR` cannot
     /// go in the instance table -- its declaration only exists where
-    /// `VK_USE_PLATFORM_WIN32_KHR` is defined, and that is one .cpp and never this header --
+    /// `VK_USE_PLATFORM_WIN32_KHR` is defined, and that is two .cpp files under
+    /// `Private/Platform/Windows/` and never this header --
     /// so `Private/Platform/Windows/VulkanSurface.cpp` resolves it here instead. Exposing the
     /// resolver rather than widening the table is what keeps every Win32 Vulkan declaration
     /// inside that one file.

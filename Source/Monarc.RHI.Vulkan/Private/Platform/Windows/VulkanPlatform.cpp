@@ -1,7 +1,8 @@
 #include <VulkanPlatform.h>
 
-// The only translation unit in Monarc.RHI.Vulkan that defines this, and it is defined here
-// rather than on the target on purpose. Target-wide, every neutral source in the module would
+// One of the two translation units in Monarc.RHI.Vulkan that define this -- the other is
+// VulkanSurface.cpp beside it, which Task 4 added -- and it is defined here rather than on the
+// target on purpose. Target-wide, every neutral source in the module would
 // see vkCreateWin32SurfaceKHR and VkWin32SurfaceCreateInfoKHR declared, and the first
 // accidental use of one would compile on this machine and fail on the next platform -- the
 // exact rot ADR-0016 exists to prevent, relocated from an #ifdef into a compiler flag.

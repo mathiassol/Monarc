@@ -401,6 +401,46 @@ That capture is the proof that the pixels came from where we think they did.
       table-clearing on partial failure observable. Task 2 proved that path by mutation
       instead, which is not the same as covering it.
 
+### Notes carried over from Task 4's spec review
+
+- [ ] **Decide what gate 3 should say about test directories — a gate decision, not a code
+      change, which is why nothing was fixed when this was found.** `iter_sources` in
+      `Tools/check_architecture.py` walks only `Include/` and `Private/`, so every source-reading
+      gate skips `Tests/` and `TestsDevice/` by design: test targets are not modules and are
+      entitled to reach across a tier. Gate 3's forbidden list for tier 2 includes
+      `Monarc/Host/`, and it therefore cannot see a *tier-2* test that includes it.
+
+      The build stops that today for an unrelated reason — `monarc_test_module()` links only the
+      module under test, so `Monarc/Host/Window.h` is not on a `Monarc.RHI.Vulkan` test's include
+      path — but one `target_link_libraries` line in that module's CMakeLists.txt would lift the
+      obstacle, which is exactly what `Monarc.Host.Windowed/CMakeLists.txt` already does in the
+      allowed direction for its device suite. So the protection is a missing link line, not a
+      gate. Pre-existing and not introduced by Task 4. The options are to leave the exemption and
+      say so in [Module-Graph](../Architecture/Module-Graph.md) rule 3, or to police *upward*
+      includes in test directories while continuing to allow downward ones — which is a
+      different rule from the one gate 3 implements and needs a decision before code.
+
+- [ ] **Take `Detail::WindowTestHooks` out of the shipped binary.** They have no shipped caller
+      and are nonetheless linked into every app that links `Monarc.Host.Windowed`: `dumpbin
+      /imports` on the Release `Monarc.FirstLight.exe` lists `GDI32.dll` (`BitBlt`,
+      `CreateCompatibleDC`) plus `WindowFromPoint`, `GetClassNameW`, `MonitorFromWindow`,
+      `GetMonitorInfoW`, `BringWindowToTop`, `SetForegroundWindow` and
+      `AdjustWindowRectExForDpi`, none of which any shipped path calls. An extra system DLL in a
+      first-light program's import table is a real cost.
+
+      **Not by moving them into the tests**, which was considered and measured: four of the ten
+      are not wrappers a test could write for itself, and they are the four that pull `GDI32`
+      and most of the unused imports in — so moving the `SetWindowPos`/`ShowWindow` wrappers
+      alone would put `<Windows.h>` in two test files, break the tree-wide "no test includes
+      `<Windows.h>`" claim, put platform code where gate 10 does not read it, and leave the cost
+      almost unchanged. The shape that works is a test-only translation unit under
+      `Private/Platform/<Platform>/` — still selected by directory, still inside gate 10's
+      reach, still shared by both of the module's test binaries — that `monarc_module()` does not
+      glob and `_monarc_add_test_binary()` does. That is a convention in
+      `CMake/MonarcModule.cmake` affecting every module, which is why it is a task and not a
+      drive-by. `WindowPlatform::NativeHandle` is already declared in `Private/WindowPlatform.h`,
+      so the new unit needs no friendship it does not have.
+
 ### A note carried over from Task 3
 
 - [ ] **Add a death-test harness, and cover the fatal guards with it.** Monarc now has four

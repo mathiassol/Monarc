@@ -38,9 +38,12 @@ target_compile_definitions(Monarc.RHI.Vulkan PRIVATE
     $<$<CONFIG:Debug>:MONARC_VULKAN_VALIDATION=1>
     $<$<NOT:$<CONFIG:Debug>>:MONARC_VULKAN_VALIDATION=0>)
 
-# VK_USE_PLATFORM_WIN32_KHR is deliberately NOT set here. It is defined inside
-# Private/Platform/Windows/VulkanPlatform.cpp and nowhere else, so no platform-neutral source
-# in this module ever sees a Win32 declaration -- see that file's own comment, and ADR-0016.
+# VK_USE_PLATFORM_WIN32_KHR is deliberately NOT set here. It is defined inside exactly two
+# translation units -- Private/Platform/Windows/VulkanPlatform.cpp and
+# Private/Platform/Windows/VulkanSurface.cpp, both selected by directory rather than by an
+# #ifdef -- and in no header, so no platform-neutral source in this module ever sees a Win32
+# declaration. See those files' own comments, Private/VulkanPlatform.h, and ADR-0016.
+# (This said "VulkanPlatform.cpp and nowhere else" until Task 4 added the second file.)
 
 # Three test outcomes, and they are three because a suite that silently runs nothing while
 # showing green is the failure mode this whole phase is shaped to avoid.

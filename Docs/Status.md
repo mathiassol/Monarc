@@ -1298,8 +1298,48 @@ swapchain's contents never enter its GDI surface. For an afternoon it read a sta
 point named a layered, topmost `Shell_SystemDim` — the overlay Windows puts over the monitor a
 system security dialog is on, and one was open. The case now asks who is on top before it
 asserts, tries the virtual screen's origin as a second position (which on this machine is the
-other display, undimmed), and **reports rather than asserts** when the answer is somebody else.
-The bytes it does assert are exact.
+other display, undimmed), and **fails with the tenant named in the log** when the answer is
+somebody else. The bytes it asserts are exact.
+
+**Three cases could report green having asserted nothing about their own subject, and that was
+found mechanically rather than by reading.** Each ended a `return` short of its assertions on a
+condition about the machine or the desktop:
+
+| case | declined on | did it decline here? |
+|---|---|---|
+| the screen capture | the topmost window at the capture point not being ours | no |
+| a window moved to another monitor | `monitorCount < 2` | no |
+| a swapchain is refused what it cannot honour (format half) | the surface offering `R8G8B8A8_UNORM` | **yes** |
+
+Forcing `WindowTestHooks::WindowAtClientPoint` to report `isOurs == false` — the shape of a
+machine with a permanent overlay — left
+`ctest -R Monarc.Host.Windowed.DeviceTests --output-on-failure` printing **`Passed`** and nothing
+else, 15 of 15 cases green. The only trace was the assertion total falling from 884 to 881: the
+three exact-byte checks that are the entire reason the case exists. A three-in-884 drop is
+invisible without diffing two runs, and nothing in the case, in `main()`, or in CTest
+distinguished "asserted and passed" from "declined to assert". The swapchain readback beside it
+was already guarded this way — `CHECK(adaptersRead >= 1)` — so the discipline existed one case
+earlier in the same file and had not been applied.
+
+All three now assert, each by the mechanism its own condition deserves:
+
+- the capture's two facts are `REQUIRE`s, so a desktop that got in the way is a red case whose
+  log names the class that was over the window. They are two assertions rather than one because
+  they are two different failures, and the single line that reported both used to say something
+  self-contradictory — "the topmost window at the capture point is `Monarc.Host.Windowed.Window`
+  and not Monarc's on any monitor tried" — whenever the window had been on top when it was
+  positioned and lost the spot during the several hundred frames that follow;
+- the monitor-drag case declares the second monitor as a requirement (`CHECK`, not `REQUIRE`) and
+  moves the window *within* the one monitor when there is only one, so the presenting half it is
+  named for runs on any machine and a one-monitor machine gets a named failure instead of a
+  warning nobody diffs;
+- the format-refusal half genuinely cannot run here, so it is not a skip at all: a surface that
+  *offers* `R8G8B8A8_UNORM` must **honour** it, which is the same no-silent-substitution
+  guarantee from the other side, and that is what the case asserts on this machine. Its three
+  machine-independent refusals are counted and the count asserted, so a block that stopped
+  running is a failure rather than a smaller total.
+
+Each new guard was broken to check it can fail — see the mutation table below.
 
 **Both adapters can present to a window on either monitor.** Measured with
 `vkGetPhysicalDeviceSurfaceSupportKHR` on the graphics queue family device creation would pick,
@@ -1321,7 +1361,8 @@ differ, which is the point of keeping them unrelated. `maxImageCount` differs by
 the NVIDIA surface and 64 on the Intel one**. Both surfaces offer
 `VK_IMAGE_USAGE_TRANSFER_SRC_BIT`, so the readback ran on both; both also offer
 `R8G8B8A8_UNORM`, which is why the "a format the surface does not offer is refused" half of one
-case reports that it did not run rather than asserting.
+case cannot run here and asserts the converse instead — that a surface which offers the format
+returns a swapchain in exactly that format.
 
 **The command list's states are one `enum class` now, and the plan's premise about the fifth was
 wrong.** The plan deferred the refactor on the grounds that "the swapchain adds the fifth state —
@@ -1373,7 +1414,7 @@ One caveat worth stating: the captures show
 `Monarc.FirstLight` asks for colour-attachment only. RenderDoc patches the transfer-source bit in
 so that it can save the backbuffer; that value is RenderDoc's, not Monarc's.
 
-**Mutation experiments, thirteen of them.** Each was rebuilt from a touched source, with `ninja` confirmed to have
+**Mutation experiments, eighteen of them.** Each was rebuilt from a touched source, with `ninja` confirmed to have
 recompiled rather than reporting "no work to do", and reverted afterwards:
 
 | mutation | result |
@@ -1389,16 +1430,97 @@ recompiled rather than reporting "no work to do", and reverted afterwards:
 | the test's clear colour changed to `(200, 30, 10)` | 11 assertions red across both readbacks and the screen capture, every reading `(10, 30, 200, 255)` |
 | the acquire-semaphore reuse wait disabled | **no validation error and no red assertion that detects it** — see below |
 | `ISwapchain`'s two `= default` move operations commented out | `error C2280: 'ISwapchain::ISwapchain(const ISwapchain&)': attempting to reference a deleted function` at both of `VulkanSwapchain.cpp`'s move operations — so they are load-bearing, not decoration |
-| `WindowPlatform::Pump`'s null-handle guard disabled | the suite **hangs**: `WaitMessage` on a closed window blocks forever. A finding stated in the case rather than an assertion claimed |
+| `WindowPlatform::Pump`'s null-handle guard forced past (`if (false && handle == nullptr)`) | the window suite **hangs**: `WaitMessage` on a closed window blocks forever. With the CTest `TIMEOUT` added below, `***Timeout 60.02 sec` and `8 - Monarc.Host.Windowed.Tests (Timeout)`; without one CTest's own default is 1500 s |
+| the same guard **deleted** rather than forced past | does not compile: `warning C4189: 'handle': local variable is initialized but not referenced`, fatal through `error C2220`. `handle` is not used again — `PeekMessageW` is given `nullptr` deliberately — so `/W4 /WX` refuses the naive form of this mutation outright |
+| `WindowTestHooks::WindowAtClientPoint` forced to report `isOurs == false` | **before**: `Passed`, 15 of 15 cases, 884 → 881 assertions, `--output-on-failure` prints nothing. **After the guard**: `***Failed`, `FATAL ERROR: REQUIRE( onTop ) is NOT correct!`, 14 of 15 |
+| `WindowTestHooks::Monitors` forced to report `monitorCount == 1` | `ERROR: CHECK( first.monitorCount >= 2 ) is NOT correct!`, 14 of 16 cases — and the presenting half of the case still ran, 887 of 888 assertions green |
+| `VulkanSwapchainState::BringUp` substitutes `B8G8R8A8_UNORM` for whatever was asked | `ERROR: CHECK( attempted->ImageFormat() == Monarc::RHI::Format::R8G8B8A8_UNORM )`, and **that one assertion is the only thing in the whole suite that catches it** — every other case asks for `B8G8R8A8_UNORM`, so a silent substitution was previously invisible |
+| one of the three machine-independent refusal blocks removed from "a swapchain is refused what it cannot honour" | `ERROR: CHECK( refusals == 3 ) is NOT correct!` — which is what the count is for, since a block that is *present* but stops refusing goes red on its own `REQUIRE_FALSE` |
 | `ReleaseClassIfUnused`'s count check dropped | **nothing red** — 18 cases, 98 assertions, all green — and eighteen `ERROR_CLASS_HAS_WINDOWS` warnings. Windows refuses the unregister itself, so the count is not observable by assertion; two comments that claimed otherwise were corrected |
 
-**One guard has no observable failure, and saying so is the extent of the claim made for it.**
-Removing the wait that retires an acquire semaphore before it is reused produced no validation
-output and no assertion that caught it: in the lockstep steady state `IDevice::BeginFrame` has
-already waited on the same timeline value, so the semaphore was retired anyway. The guard is for
-the drifted case — an out-of-date acquire skips a submission and the two counters stop agreeing —
-which this machine does not produce on demand. It stays, and it is written down as reasoned
-rather than measured.
+**One guard has no observable failure, and the reason first given for it was wrong.** Removing
+the wait that retires an acquire semaphore before it is reused produced no validation output and
+no assertion that caught it: in the lockstep steady state `IDevice::BeginFrame` has already
+waited on the same timeline value, so the semaphore was retired anyway. That much stands. What
+was written down beside it — that the guard is for "the drifted case", an out-of-date acquire
+skipping a submission so the two counters stop agreeing — is the one case that **cannot** strain
+it, and re-deriving it is what showed why:
+
+- `VulkanDevice::BeginFrame` advances `frameIndex` on every success; `VulkanSwapchain::Acquire`
+  advances `acquireCursor` only on a *successful* acquire. So the frame index runs ahead of the
+  cursor and never behind.
+- A submission stamps `frames[list.FrameIndex()].timelineValue`, and that slot cannot be reused
+  or overwritten without a `BeginFrame` first waiting on the value it holds. Timeline counters
+  only increase, so waiting on a newer value has already reached every older one.
+- Therefore drift makes `BeginFrame`'s wait *stronger* than the acquire slot's, not weaker.
+
+The sequence that does reach the wait uncovered is a caller that **acquires without a
+`BeginFrame` in between**, which nothing refuses: `phase` is `Idle` again after `Present`, and
+`Acquire` never consults the device's frame state. Two ordinary frames leave a recorded value in
+each acquire slot and *neither* frame slot waited on, so a third acquire taken before that
+frame's `BeginFrame` finds slot 0's value with nothing having covered it — and this wait is then
+the only thing keeping the reuse legal. A new case, `acquiring without a BeginFrame in between is
+what the acquire-slot wait is for`, walks exactly that sequence and logs how far the timeline had
+actually got.
+
+Twelve runs of that case in isolation: the acquire slot's recorded value is always 1, the queue
+has always submitted up to 2, and the **completed** value read 2 ten times and **1 twice** — so
+the second frame's submission was still in flight on two of twelve runs, one step away from the
+first frame's being in flight too. `completed 0` is what would make the wait block, and it did
+not occur. **Whether it ever blocks is GPU timing and is not something this machine produces on
+demand** — so the case asserts that the sequence exists and completes, logs how close it came,
+and claims nothing about the wait blocking.
+
+So the honest statement is: unreachable as *work* under the pacing rule `ISwapchain`'s class
+comment documents, reachable the moment a caller departs from it, and kept for the second
+reason rather than the one first given.
+
+**The render-finished semaphores are per swapchain image, and the mitigation claimed for the
+other half of that hazard was too strong.** Per-image is right and the reason is
+`vkQueuePresentKHR`: its wait belongs to the presentation of *that* image, and with three images
+against two frames in flight a per-frame semaphore would let frame N+2 signal one whose present
+wait is still outstanding. Reuse is safe because a later `vkAcquireNextImageKHR` returning the
+same index means the presentation engine has released it — the accepted pattern, not a spec
+guarantee.
+
+What was written down beside it claimed that destroying and rebuilding every semaphore in
+`Recreate`, after a device wait, left "no semaphore history to strain". That **relocates** the
+hazard rather than closing it. `vkDeviceWaitIdle` retires *queue* operations, and a presentation
+engine's wait on a binary semaphore is not one — precisely the gap
+`VK_EXT_swapchain_maintenance1`'s present fences exist to close, which A3 does not enable. Two
+things changed:
+
+- `TearDownSwapchain` now destroys the swapchain **before** the semaphores it presented with.
+  The image views still go first, because a view outliving its image is
+  `VUID-vkDestroyImage-image-01000`'s shape; `vkDestroySwapchainKHR` then ends the presentation
+  engine's interest in the images, and only after that are the render-finished and acquire
+  semaphores destroyed. Validation stays silent on both adapters across every recreation the
+  suite performs — the resize, maximise, minimise-and-restore, monitor-drag and stale-handle
+  cases between them — with the fatal messenger installed, so a complaint would have stopped
+  the process.
+- The claim is narrowed to what is true: **reduced, not eliminated.** No semaphore is carried
+  across a recreation, so the reuse argument never has to hold across one; closing the
+  presentation-engine gap properly needs maintenance1.
+
+**`Detail::WindowTestHooks` is in the shipped binary, which "no shipped caller" had been read as
+denying.** `dumpbin /imports` on the Release `Monarc.FirstLight.exe` lists `GDI32.dll` —
+`BitBlt` and `CreateCompatibleDC`, from `CaptureScreenPixel` — plus `WindowFromPoint`,
+`GetClassNameW`, `MonitorFromWindow`, `GetMonitorInfoW`, `BringWindowToTop`,
+`SetForegroundWindow` and `AdjustWindowRectExForDpi`. No shipped path calls any of them: they
+are the ten test hooks, linked in because they live in the module's own translation unit. An
+extra system DLL in a first-light program's import table is a real cost.
+
+Moving them into the test files does not fix it and costs more. Four are not wrappers a test
+could write for itself — `RequestClientSize` needs `Window.cpp`'s own `kWindowStyle`,
+`CaptureScreenPixel` is a screen `BitBlt` through a DIB, and `WindowAtClientPoint` and
+`Monitors` are multi-call Win32 queries — and those four are exactly the ones that pull in
+`GDI32` and most of the unused imports. Moving only the `SetWindowPos`/`ShowWindow` wrappers
+would put `<Windows.h>` in two test files (both suites use these), break the tree-wide "no test
+includes `<Windows.h>`" claim, and put platform code where gate 10 does not read it — while
+leaving the measured cost almost untouched. The fix that removes it is a test-only translation
+unit under `Private/Platform/<Platform>/` that the module does not compile and the test targets
+do, which needs a convention in `CMake/MonarcModule.cmake` rather than a code change. It is a
+Task 5 checkbox.
 
 **Two other things Task 4 did not exercise, stated rather than implied.** Dragging a window
 between this machine's monitors does **not** exercise `WM_DPICHANGED`: both are 1920x1080 and
@@ -1420,6 +1542,23 @@ live in `Monarc.Host.Windowed/TestsDevice/` rather than beside the swapchain, be
 both the backend and a window they can drive, and a tier-3 test reaching down to tier 2 is the
 direction the module graph allows.
 
+**And a public one, which nothing had reconciled.** The plan's file listing calls
+`VulkanBackend.h` "the only public header" in `Monarc.RHI.Vulkan`. There are three:
+
+| header | added by | why it is public |
+|---|---|---|
+| `VulkanBackend.h` | Task 2 | the plan's own entry point |
+| `VulkanDevice.h` | Task 3 | `CreateDevice` returns a `VulkanDevice` by value, so a caller has to see the type |
+| `VulkanSwapchain.h` | Task 4 | `CreateSwapchain` returns a `VulkanSwapchain` by value, for the same reason |
+
+The pattern predates Task 4 — Task 3 broke the plan's claim first — and the reason is one
+decision rather than three: a factory that returns a concrete type by value cannot hide that
+type, and returning `ISwapchain*` instead would mean an owning raw pointer and a `Destroy` free
+function, which is the ownership shape ADR-0002 and `Platform::Library` both avoid. None of the
+three names a Vulkan or Win32 type; that rule is the one that matters and it holds. Recorded here
+because the plan's sentence and the tree have said different things since Task 3 and nothing had
+said so.
+
 One thing the plan puts in `VulkanSurface.cpp` is deliberately not there: the queue-family
 presentation-support query. `vkGetPhysicalDeviceSurfaceSupportKHR` belongs to `VK_KHR_surface`
 rather than to any platform's extension, so it needs neither `<Windows.h>` nor
@@ -1427,6 +1566,29 @@ rather than to any platform's extension, so it needs neither `<Windows.h>` nor
 platform-*neutral* code there, which is the mistake ADR-0016's exemption note warns about from
 the other side. It lives in the two places that ask: `VulkanBackend::AdapterCanPresent` and
 `VulkanSwapchainFactory::Create`.
+
+**Every CTest entry now has a `TIMEOUT`, because nothing was bounding a hang.** CTest does
+distinguish a timeout from slowness — `***Timeout` and `(Timeout)` in the failure list — but its
+own default is **1500 seconds**, so the `Pump` mutation above cost 25 minutes per preset before
+being reported, six presets deep, and `.github/workflows/ci.yml` set no `timeout-minutes`
+either. The values are measured. Slowest real run of each kind across all six presets:
+
+| entry | slowest of six | `TIMEOUT` |
+|---|---|---|
+| `Monarc.Host.Windowed.DeviceTests` | 8.79 s | 180 s |
+| `Monarc.RHI.Vulkan.DeviceTests` | 2.64 s | 180 s |
+| `Monarc.Host.Windowed.Tests` | 1.00 s | 60 s |
+| `Monarc.RHI.Vulkan.Probe` | 0.45 s | 60 s |
+| `Architecture.GateTests` | 0.24 s | 60 s |
+| every other unit suite | < 0.25 s | 60 s |
+
+The device number understates the *worst* case, and 180 s is sized for that rather than for what
+was observed: the screen-capture case presents in batches until two readings agree, up to 25
+batches of 20 frames, and it settled after 2 here — so the same suite can legitimately present
+about 580 frames rather than about 90, which under FIFO is roughly 18 s at 60 Hz and 27 s at
+30 Hz. 180 s is ~20x the measured run and ~6.7x that bound. The CI jobs also carry
+`timeout-minutes` (45 for a build leg, 10 for docs) as a ceiling on the configure and build
+steps, which no CTest property can reach; GitHub's default there is 360 minutes.
 
 **Checkable claims.**
 `grep -rniE '^[[:space:]]*#[[:space:]]*include[[:space:]]*<windows\.h>' Source/` matches seven
@@ -1446,10 +1608,12 @@ device-free cases and 504 assertions" was `Monarc.RHI` (51 / 174) plus `Monarc.R
 | `Monarc.RHI.Vulkan.Tests` | 58 | 330 |
 | `Monarc.Host.Windowed.Tests` | 18 | 98 |
 | `Monarc.RHI.Vulkan.DeviceTests` | 38 | 384 |
-| `Monarc.Host.Windowed.DeviceTests` | 15 | 884 |
+| `Monarc.Host.Windowed.DeviceTests` | 16 | 914 |
 
-So **131 device-free cases / 617 assertions** and **53 device-required / 1268** across the three
-A3 modules. All ten CTest entries pass on all six presets with zero warnings, and both `gpu`
+So **131 device-free cases / 617 assertions** and **54 device-required / 1298** across the three
+A3 modules. The window device suite was 15 cases and 884 assertions when Task 4 first shipped:
+the extra case is the acquire-ordering one above, and 5 of the 30 extra assertions are the
+guards that stop three cases passing having asserted nothing. All ten CTest entries pass on all six presets with zero warnings, and both `gpu`
 entries report **Skipped** when `--vulkan-library=` is pointed at a name that cannot resolve.
 
 ## Verification gates

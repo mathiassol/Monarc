@@ -127,6 +127,31 @@ struct WindowPlatform {
 ///
 /// A separate struct from `WindowPlatform` above so the distinction is greppable: everything
 /// in that one has a shipped caller and nothing in this one does.
+///
+/// **"No shipped caller" is not the same as "not in the shipped binary", and a review made the
+/// difference measurable.** These are compiled into `Monarc.Host.Windowed`, so the linker pulls
+/// them into every app that links the module: `dumpbin /imports` on the Release
+/// `Monarc.FirstLight.exe` lists `GDI32.dll` -- `BitBlt` and `CreateCompatibleDC`, from
+/// `CaptureScreenPixel` -- plus `WindowFromPoint`, `GetClassNameW`, `MonitorFromWindow`,
+/// `GetMonitorInfoW`, `BringWindowToTop`, `SetForegroundWindow` and
+/// `AdjustWindowRectExForDpi`, none of which any shipped path calls. An extra system DLL in a
+/// first-light program's import table is a real cost and it is written down rather than argued
+/// away.
+///
+/// **What it does not justify is moving these into the test files.** Four of them are not
+/// wrappers a test could write for itself: `RequestClientSize` needs this file's own
+/// `kWindowStyle`, and a test that hard-coded it would compute the wrong outer size the day the
+/// style changed; `CaptureScreenPixel` is a screen `BitBlt` through a DIB; and
+/// `WindowAtClientPoint` and `Monitors` are multi-call Win32 queries. Those four are exactly
+/// the ones that pull `GDI32` and most of the unused imports in, so moving only the
+/// `SetWindowPos`/`ShowWindow` wrappers would put `<Windows.h>` in two test files -- both
+/// suites need these -- and leave the measured cost almost untouched.
+///
+/// The fix that does remove it is a test-only translation unit under
+/// `Private/Platform/<Platform>/` that the module does not compile and the test targets do.
+/// That needs a convention in `CMake/MonarcModule.cmake` rather than a code change, so it is a
+/// Task 5 checkbox in Docs/Plans/2026-09-06-phase-a3-rhi-and-first-light.md and not something
+/// smuggled in here.
 struct WindowTestHooks {
     /// Asks the platform for a client area of `size`. The window may become another size, and
     /// `Window::ClientSize()` after a pump is what it actually became -- which is the fact the
