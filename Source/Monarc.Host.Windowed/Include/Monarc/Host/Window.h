@@ -160,6 +160,24 @@ public:
 
     /// What happened during the most recent pump, in the order it happened. Valid until the
     /// next `PumpEvents` or `WaitForEvents`.
+    ///
+    /// **Exact for one window per thread, and approximate for two.** A pump drains the whole
+    /// thread's message queue by design -- filtering by window would leave every other
+    /// window's messages in it forever, and Win32 sends a thread messages belonging to no
+    /// window at all -- but it clears only the pumped window's own event count. So with two
+    /// windows on a thread the one that is not pumped accumulates events across the other's
+    /// pumps, and an event posted to A can be consumed during B's pump and then cleared by A's
+    /// next pump before A ever reads it.
+    ///
+    /// `kMaxWindowEvents` and the coalescing in the handler bound what that can cost: at most
+    /// two entries, one per kind, latest of each. And the fact that actually matters is not
+    /// lost either way -- `CloseRequested()` is sticky precisely so that a loop checking it
+    /// once per frame cannot miss a request reported by a pump it did not look at. What a
+    /// second window can lose is the *event entry*, not the request.
+    ///
+    /// Two windows exist in both of this module's suites, so this is a real configuration and
+    /// not a hypothetical; what it is not is a bug worth a per-window queue while nothing needs
+    /// the exactness.
     [[nodiscard]] std::span<const WindowEvent> Events() const;
 
     /// The client area's current size in physical pixels.

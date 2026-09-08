@@ -351,9 +351,16 @@ inline constexpr u32 kNoMemoryType = static_cast<u32>(-1);
 ///
 /// **This is not `kFramesInFlight` and must never be derived from it.** Swapchain images
 /// belong to the surface and frames in flight belong to Monarc's own pacing; on this machine
-/// the surface reports a minimum of 2 and no maximum, so the two numbers happen to be 3 and 2.
-/// A driver reporting a minimum of 3 would make them 4 and 2, and code that had tied them
+/// both surfaces report a minimum of 2 with a maximum well above 3 -- 8 on the NVIDIA surface
+/// and 64 on the Intel one -- so the clamp never bites and the two numbers happen to be 3 and
+/// 2. A driver reporting a minimum of 3 would make them 4 and 2, and code that had tied them
 /// together would be wrong only on that machine.
+///
+/// (This said "a minimum of 2 and no maximum" until a review checked it against
+/// `VulkanSwapchain.cpp`'s own creation log, which prints both. Docs/Status.md had the maxima
+/// right; the header was the stale copy. The derived 3 was correct either way -- the premise
+/// was not, and "no maximum" is a *different* branch of this function from the one this
+/// machine takes.)
 [[nodiscard]] u32 ChooseSwapchainImageCount(u32 minImageCount, u32 maxImageCount);
 
 /// The extent to create a swapchain at.

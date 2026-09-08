@@ -1075,9 +1075,23 @@ Status VulkanSwapchain::Present() {
     }
     if (result != VK_SUCCESS) {
         // The render-finished semaphore may be left signalled by a present that failed outright
-        // -- there is no way to tell. `Recreate` destroys every semaphore, which is what makes
-        // that recoverable rather than a state to reason about; a caller that neither recreates
-        // nor shuts down after this is presenting on a surface that has stopped working.
+        // -- there is no way to tell. `Recreate` destroys every semaphore, so recreating is the
+        // response that clears it.
+        //
+        // **`needsRecreation` is deliberately not set here, and the comment used to imply
+        // otherwise.** It said recreation made the leftover semaphore "recoverable", which is
+        // true of what `Recreate` does and says nothing about the caller being told to call it:
+        // the sticky flag a frame loop polls stays clear on this path. That is the right
+        // choice rather than an oversight. The two results that *do* set it --
+        // `VK_ERROR_OUT_OF_DATE_KHR` and `VK_SUBOPTIMAL_KHR` -- are handled above as
+        // successes, so the flag means "this frame worked and the next one needs a new
+        // swapchain", and a loop reading it takes no other action. A hard failure is a
+        // returned `Error`, which is louder, and recreation is not always the answer to one:
+        // `VK_ERROR_DEVICE_LOST` cannot be recreated out of. Setting the flag would tell a
+        // frame loop to retry a swapchain on a dead device.
+        //
+        // So: a caller that neither recreates nor shuts down after this is presenting on a
+        // surface that has stopped working, and the `Error` is what says so.
         return m_state->FailVk("vkQueuePresentKHR", result);
     }
     return {};

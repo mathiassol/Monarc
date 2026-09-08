@@ -10,9 +10,15 @@
 // this module includes `<windows.h>`" name a file whose entire job is the surface -- so the
 // claim is checkable by looking at one file rather than by reading two.
 //
-// The checkable form, and it has to match the *include* rather than the word: two other files
-// in this module mention `<Windows.h>` in a comment, so a grep for the bare name answers about
-// prose. This one does not --
+// The checkable form, and it has to match the *include* rather than the word: one other file in
+// this module mentions `<Windows.h>` in a comment -- Private/VulkanSwapchain.cpp, at the top,
+// where it says surface creation is elsewhere -- so a grep for the bare name answers partly
+// about prose. This one does not --
+//
+// (It said "two other files" until a review counted them:
+// `grep -rniIl "windows\.h" Source/Monarc.RHI.Vulkan/` returns this file and that one. The
+// companion claim in Monarc.Host.Windowed/Private/Platform/Windows/Window.cpp -- "three other
+// files in this module" -- is exact: Window.h, WindowPlatform.h and Tests/TestWindow.cpp.)
 //
 //     grep -rniE '^[[:space:]]*#[[:space:]]*include[[:space:]]*<windows\.h>' Source/
 //
