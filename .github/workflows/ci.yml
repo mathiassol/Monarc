@@ -112,6 +112,25 @@ jobs:
           call "%VCVARS%" >nul || exit /b 1
           ctest --preset ${{ matrix.preset }} || exit /b 1
 
+      # The probe exists to put the truth about each machine into this log -- what Vulkan the
+      # runner has, or that it has none -- so that "CI has no GPU" is an observed fact rather
+      # than an assumption in a plan. It is registered as an always-passing CTest entry, and
+      # CTest discards a passing test's output, so the step above ran it and printed nothing.
+      #
+      # A mechanism whose whole purpose is to report, that reports nothing, is worse than not
+      # having it: the run goes green and the question stays unanswered. Hence a second,
+      # verbose invocation of exactly that one entry.
+      #
+      # `if: always()` and no `exit /b 1`: this reports, it does not gate. A failure here
+      # should never be the reason a run is red, and a red run is exactly when knowing what
+      # the machine has is most useful.
+      - name: Probe -- what this runner actually has
+        if: always()
+        shell: cmd
+        run: |
+          call "%VCVARS%" >nul
+          ctest --preset ${{ matrix.preset }} -R Monarc.RHI.Vulkan.Probe -V
+
       # The module graph is what the architecture gates and, later, `monarc explain`
       # read. Publishing it makes a graph change visible in the run itself.
       - name: Upload module graph
