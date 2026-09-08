@@ -37,13 +37,26 @@ private:
     static constexpr u32 kInvalidIndex = static_cast<u32>(-1);
 };
 
-// Free functions in JobHandle's own namespace, not friends: HashMap<JobHandle, V>::FindIndex
-// compares keys with == from inside a template defined elsewhere, which finds this operator
-// only through argument-dependent lookup -- and ADL looks at the operands' namespace,
-// Monarc, not at whichever class happened to declare a friend. A plain free function here
-// is what makes that lookup succeed. It also sidesteps String.h's friend/[[nodiscard]]
-// portability trap (MSVC accepts [[nodiscard]] on a friend declaration, clang-cl does not):
-// with no friend declaration at all, [[nodiscard]] below is unremarkable on both compilers.
+// Free functions in JobHandle's own namespace rather than hidden friends. For a plain
+// non-template type there is no strong technical reason either way; this is the house form,
+// and that is the whole of it.
+//
+// Saying so explicitly, because this comment used to give two reasons and both were wrong --
+// and both had already been cited verbatim by two files in Monarc.RHI. What is actually
+// true, measured on cl and clang-cl at /W4 /WX:
+//
+//   * A hidden friend is not hidden from ADL. A friend *defined inside* the class is found
+//     by ADL from a template instantiated anywhere, including a template in a wholly
+//     unrelated namespace: the class is its own associated entity, and ADL considers
+//     friends declared in associated classes. So HashMap<JobHandle, V>::FindIndex comparing
+//     keys with == from inside a class template needed nothing from this decision -- and
+//     HashMap lives in namespace Monarc alongside JobHandle anyway, so the operands'
+//     namespace was never in question to begin with.
+//   * [[nodiscard]] on a hidden friend *definition* compiles clean on both compilers.
+//     Containers/String.h's portability note is genuine but narrower than it was made out
+//     to be: clang-cl rejects the attribute on a friend *declaration* separated from its
+//     definition ("an attribute list cannot appear here"), which is the shape String.h uses
+//     and this file does not.
 [[nodiscard]] constexpr bool operator==(const JobHandle& a, const JobHandle& b) {
     return a.index == b.index && a.generation == b.generation;
 }

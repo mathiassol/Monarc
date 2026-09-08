@@ -1,0 +1,549 @@
+#include <doctest/doctest.h>
+
+#include <Monarc/Core/Containers/Array.h>
+#include <Monarc/Core/Error.h>
+#include <Monarc/Core/Log.h>
+#include <Monarc/Core/Memory/SystemAllocator.h>
+#include <Monarc/RHI/Capabilities.h>
+#include <Monarc/RHI/Device.h>
+#include <Monarc/RHI/Types.h>
+
+#include <Translate.h>
+
+#include <cstring>
+#include <iterator>
+#include <string_view>
+
+using Monarc::RHI::ApiVersion;
+using Monarc::RHI::DeviceType;
+using Monarc::RHI::Format;
+using Monarc::RHI::Detail::ContainsExtension;
+using Monarc::RHI::Detail::ContainsLayer;
+using Monarc::RHI::Detail::FromVulkan;
+using Monarc::RHI::Detail::SeverityToLogLevel;
+using Monarc::RHI::Detail::ToApiVersion;
+using Monarc::RHI::Detail::ToDeviceType;
+using Monarc::RHI::Detail::ToErrorCode;
+using Monarc::RHI::Detail::ToVulkan;
+
+namespace {
+
+/// A VkExtensionProperties naming `name`, as a driver would hand one back. The name is a
+/// fixed-size char array in the struct, so this is what building one by hand takes.
+[[nodiscard]] VkExtensionProperties Extension(const char* name) {
+    VkExtensionProperties properties{};
+    std::memcpy(properties.extensionName, name, std::strlen(name));
+    return properties;
+}
+
+[[nodiscard]] VkLayerProperties Layer(const char* name) {
+    VkLayerProperties properties{};
+    std::memcpy(properties.layerName, name, std::strlen(name));
+    return properties;
+}
+
+/// Every enumerator of Format, once. Same list and same reasoning as TestTypes.cpp's: the
+/// `default`-less switch in Translate.cpp already refuses a new enumerator nobody gave a case
+/// to, and this list covers the half the compiler cannot -- that the case it was given returns
+/// the *right* Vulkan format rather than a neighbouring row's.
+constexpr Format kAllFormats[] = {
+    Format::Unknown,
+    Format::R8G8B8A8_UNORM,
+    Format::B8G8R8A8_UNORM,
+};
+
+/// A value Format can hold that no enumerator names. Well-defined: Format has a fixed
+/// underlying type.
+constexpr Format kNotAFormat = static_cast<Format>(4242);
+
+}  // namespace
+
+TEST_CASE("every format maps to the Vulkan format that spells the same thing") {
+    CHECK(ToVulkan(Format::Unknown) == VK_FORMAT_UNDEFINED);
+    CHECK(ToVulkan(Format::R8G8B8A8_UNORM) == VK_FORMAT_R8G8B8A8_UNORM);
+    CHECK(ToVulkan(Format::B8G8R8A8_UNORM) == VK_FORMAT_B8G8R8A8_UNORM);
+}
+
+TEST_CASE("kAllFormats lists every Format enumerator") {
+    // The list is only worth iterating if it is complete, and C++ cannot ask an enum how many
+    // enumerators it has. Same indirect check as TestTypes.cpp's: the index one past the end
+    // of the list must not name a format, which ToString answers by returning its
+    // not-a-format marker. Append an enumerator without extending this list and that index
+    // becomes a named format, and this fails -- observed, by dropping B8G8R8A8_UNORM from the
+    // list and watching it report "B8G8R8A8_UNORM == <invalid Format>".
+    const Format onePastTheList = static_cast<Format>(std::size(kAllFormats));
+    CHECK(std::string_view(Monarc::RHI::ToString(onePastTheList)) ==
+          std::string_view(Monarc::RHI::ToString(kNotAFormat)));
+}
+
+TEST_CASE("no two formats map to one Vulkan format") {
+    // The pair this matters for is B8G8R8A8_UNORM and R8G8B8A8_UNORM: they differ only in
+    // channel order, so a copy-paste in Translate.cpp giving them one VkFormat is invisible to
+    // every other test here and is exactly the confusion Task 3's exact-value readback exists
+    // to catch. Unknown is excluded because VK_FORMAT_UNDEFINED is legitimately shared with
+    // every value that is not a format at all.
+    for (const Format outer : kAllFormats) {
+        for (const Format inner : kAllFormats) {
+            if (outer != inner && outer != Format::Unknown && inner != Format::Unknown) {
+                CHECK(ToVulkan(outer) != ToVulkan(inner));
+            }
+        }
+    }
+}
+
+TEST_CASE("every format round-trips through Vulkan and back") {
+    // The property a swapchain format negotiated against a surface actually depends on: Task 4
+    // asks the surface what it supports, gets VkFormats back, and has to turn them into
+    // something Monarc can name.
+    for (const Format format : kAllFormats) {
+        CHECK(FromVulkan(ToVulkan(format)) == format);
+    }
+}
+
+TEST_CASE("a Vulkan format Monarc does not model comes back as Unknown, not as a guess") {
+    CHECK(FromVulkan(VK_FORMAT_R16G16B16A16_SFLOAT) == Format::Unknown);
+    CHECK(FromVulkan(VK_FORMAT_D24_UNORM_S8_UINT) == Format::Unknown);
+    // The near-misses matter most: these differ from a format Monarc does model by one letter,
+    // and a `default` that fell through to the wrong row would be caught here and nowhere else.
+    CHECK(FromVulkan(VK_FORMAT_R8G8B8A8_SRGB) == Format::Unknown);
+    CHECK(FromVulkan(VK_FORMAT_B8G8R8A8_SRGB) == Format::Unknown);
+    CHECK(FromVulkan(VK_FORMAT_R8G8B8A8_SNORM) == Format::Unknown);
+    CHECK(FromVulkan(VK_FORMAT_UNDEFINED) == Format::Unknown);
+}
+
+TEST_CASE("a value that is not a Format translates to undefined rather than to a real format") {
+    CHECK(ToVulkan(kNotAFormat) == VK_FORMAT_UNDEFINED);
+}
+
+TEST_CASE("every Vulkan device type maps to the RHI device kind of the same name") {
+    CHECK(ToDeviceType(VK_PHYSICAL_DEVICE_TYPE_OTHER) == DeviceType::Other);
+    CHECK(ToDeviceType(VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) == DeviceType::IntegratedGpu);
+    CHECK(ToDeviceType(VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) == DeviceType::DiscreteGpu);
+    CHECK(ToDeviceType(VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU) == DeviceType::VirtualGpu);
+    CHECK(ToDeviceType(VK_PHYSICAL_DEVICE_TYPE_CPU) == DeviceType::Cpu);
+}
+
+TEST_CASE("the four real device kinds map to four different RHI kinds") {
+    // Discrete and integrated are the two that actually occur on the development machine, and
+    // conflating them would make the tier report and any future device-selection heuristic
+    // silently wrong on a laptop. Other and MAX_ENUM are excluded: both legitimately mean
+    // "nothing better to say" and share DeviceType::Other.
+    constexpr VkPhysicalDeviceType kReal[] = {VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU,
+                                              VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU,
+                                              VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU,
+                                              VK_PHYSICAL_DEVICE_TYPE_CPU};
+    for (const VkPhysicalDeviceType outer : kReal) {
+        for (const VkPhysicalDeviceType inner : kReal) {
+            if (outer != inner) {
+                CHECK(ToDeviceType(outer) != ToDeviceType(inner));
+            }
+        }
+    }
+}
+
+TEST_CASE("the MAX_ENUM sentinel and an unrecognised value both mean Other") {
+    // MAX_ENUM is not a device kind and no driver returns it, but it is an enumerator, so the
+    // `default`-less switch in Translate.cpp had to be given a case for it. This pins where
+    // that case goes.
+    CHECK(ToDeviceType(VK_PHYSICAL_DEVICE_TYPE_MAX_ENUM) == DeviceType::Other);
+    CHECK(ToDeviceType(static_cast<VkPhysicalDeviceType>(4242)) == DeviceType::Other);
+
+    // A loop over every VkPhysicalDeviceType asserting that none of them translates to a
+    // value outside DeviceType's enumerator set used to sit here. It was six assertions with
+    // no behaviour of their own: the only way to fail it is a case returning an out-of-range
+    // static_cast, and such a case fails one of the five direct assertions in "every Vulkan
+    // device type maps to the RHI device kind of the same name" first.
+}
+
+TEST_CASE("a packed Vulkan version decodes to its three parts") {
+    CHECK(ToApiVersion(VK_MAKE_API_VERSION(0, 1, 3, 0)) == ApiVersion{1, 3, 0});
+    CHECK(ToApiVersion(VK_API_VERSION_1_3) == ApiVersion{1, 3, 0});
+    CHECK(ToApiVersion(VK_MAKE_API_VERSION(0, 1, 3, 275)) == ApiVersion{1, 3, 275});
+    CHECK(ToApiVersion(VK_MAKE_API_VERSION(0, 1, 4, 351)) == ApiVersion{1, 4, 351});
+}
+
+TEST_CASE("the packed versions the development machine actually reports decode correctly") {
+    // 4206867 and 4211039 are the integers `vulkaninfo` printed beside "1.3.275" and
+    // "1.4.351" for the two devices on this machine. Written as literals rather than built
+    // with VK_MAKE_API_VERSION on purpose: the case above already checks that the decoder
+    // agrees with the encoder, which would still hold if both had the same bug. These are the
+    // numbers a driver put in a struct.
+    CHECK(ToApiVersion(4206867) == ApiVersion{1, 3, 275});
+    CHECK(ToApiVersion(4211039) == ApiVersion{1, 4, 351});
+}
+
+TEST_CASE("the variant bits are dropped rather than folded into the version") {
+    // Variant 1 is Vulkan SC, a different specification Monarc does not target. A decoder that
+    // read the variant bits as part of the major version would report 1.3.0 here as something
+    // else entirely, and the difference is only visible on a value no ordinary driver produces.
+    CHECK(ToApiVersion(VK_MAKE_API_VERSION(1, 1, 3, 0)) == ApiVersion{1, 3, 0});
+    CHECK(ToApiVersion(VK_MAKE_API_VERSION(1, 1, 3, 0)) ==
+          ToApiVersion(VK_MAKE_API_VERSION(0, 1, 3, 0)));
+}
+
+TEST_CASE("a VkResult Monarc can receive is named by its own spelling") {
+    using Monarc::RHI::Detail::ToString;
+    CHECK(std::string_view(ToString(VK_SUCCESS)) == "VK_SUCCESS");
+    CHECK(std::string_view(ToString(VK_INCOMPLETE)) == "VK_INCOMPLETE");
+    CHECK(std::string_view(ToString(VK_ERROR_OUT_OF_HOST_MEMORY)) ==
+          "VK_ERROR_OUT_OF_HOST_MEMORY");
+    CHECK(std::string_view(ToString(VK_ERROR_OUT_OF_DEVICE_MEMORY)) ==
+          "VK_ERROR_OUT_OF_DEVICE_MEMORY");
+    CHECK(std::string_view(ToString(VK_ERROR_INITIALIZATION_FAILED)) ==
+          "VK_ERROR_INITIALIZATION_FAILED");
+    CHECK(std::string_view(ToString(VK_ERROR_LAYER_NOT_PRESENT)) ==
+          "VK_ERROR_LAYER_NOT_PRESENT");
+    CHECK(std::string_view(ToString(VK_ERROR_EXTENSION_NOT_PRESENT)) ==
+          "VK_ERROR_EXTENSION_NOT_PRESENT");
+    CHECK(std::string_view(ToString(VK_ERROR_INCOMPATIBLE_DRIVER)) ==
+          "VK_ERROR_INCOMPATIBLE_DRIVER");
+}
+
+TEST_CASE("a VkResult outside Monarc's table says so rather than guessing") {
+    using Monarc::RHI::Detail::ToString;
+    // Translate.h is explicit that this table is not exhaustive and cannot usefully be. What
+    // matters is that the fallback is honest: an unrecognised result must not be reported as
+    // VK_SUCCESS, and it must not be reported as any other real result either. The numeric
+    // value reaches the log through the call site, which is what keeps this actionable.
+    const std::string_view unknown = ToString(static_cast<VkResult>(-987654));
+    CHECK_FALSE(unknown.empty());
+    CHECK(unknown != "VK_SUCCESS");
+    CHECK(unknown.find("not in Monarc's table") != std::string_view::npos);
+
+    // The five results Task 3 added, each because a call this module now makes can return it.
+    // Named individually rather than looped, so a row deleted from the table is a red
+    // assertion naming the result rather than a count going down by one.
+    CHECK(std::string_view(ToString(VK_TIMEOUT)) == "VK_TIMEOUT");
+    CHECK(std::string_view(ToString(VK_ERROR_FEATURE_NOT_PRESENT)) ==
+          "VK_ERROR_FEATURE_NOT_PRESENT");
+    CHECK(std::string_view(ToString(VK_ERROR_TOO_MANY_OBJECTS)) == "VK_ERROR_TOO_MANY_OBJECTS");
+    CHECK(std::string_view(ToString(VK_ERROR_MEMORY_MAP_FAILED)) ==
+          "VK_ERROR_MEMORY_MAP_FAILED");
+    CHECK(std::string_view(ToString(VK_ERROR_DEVICE_LOST)) == "VK_ERROR_DEVICE_LOST");
+
+    // The three Task 4 added. **The line above this one used to read
+    // `CHECK(ToString(VK_ERROR_SURFACE_LOST_KHR) == unknown)`, with a note saying "belongs to
+    // the swapchain, which is Task 4's; when that call arrives, this line is where it says
+    // so" -- and the call arrived without anyone coming back here.** What found it was a new
+    // device case destroying a window under a live surface: the refusal logged
+    // `<VkResult not in Monarc's table> (-1000000000)`. So these three are measured or
+    // named-at-a-call-site rather than added on principle; Translate.cpp says which is which.
+    CHECK(std::string_view(ToString(VK_ERROR_SURFACE_LOST_KHR)) ==
+          "VK_ERROR_SURFACE_LOST_KHR");
+    CHECK(std::string_view(ToString(VK_ERROR_NATIVE_WINDOW_IN_USE_KHR)) ==
+          "VK_ERROR_NATIVE_WINDOW_IN_USE_KHR");
+    CHECK(std::string_view(ToString(VK_NOT_READY)) == "VK_NOT_READY");
+
+    // And one that is still absent, so the fallback stays exercised by a real result rather
+    // than only by the cast above. VK_ERROR_FRAGMENTED_POOL comes from descriptor-pool
+    // allocation, which no call in this module makes yet; when one does, this line is where
+    // it says so -- and the paragraph above is the reason to believe that promise less than
+    // the assertion.
+    CHECK(std::string_view(ToString(VK_ERROR_FRAGMENTED_POOL)) == unknown);
+}
+
+TEST_CASE("a result meaning the capability is absent is Unsupported, not BackendFailure") {
+    // The distinction Monarc/Core/Error.h draws: Unsupported means asking differently might
+    // work, BackendFailure means the call was legitimate and the API refused it. All three
+    // below are the first, and VK_ERROR_INCOMPATIBLE_DRIVER is the one that matters most --
+    // it is what vkCreateInstance returns on a machine with vulkan-1.dll and no registered
+    // ICD, which is plausibly the CI runner's exact state. Branchability is the whole reason
+    // BackendFailure exists, so a caller falling back on Unsupported must fire here.
+    CHECK(ToErrorCode(VK_ERROR_INCOMPATIBLE_DRIVER) == Monarc::ErrorCode::Unsupported);
+    CHECK(ToErrorCode(VK_ERROR_LAYER_NOT_PRESENT) == Monarc::ErrorCode::Unsupported);
+    CHECK(ToErrorCode(VK_ERROR_EXTENSION_NOT_PRESENT) == Monarc::ErrorCode::Unsupported);
+
+    // The fourth, added in Task 3 with the call that produces it: vkCreateDevice reports this
+    // when a requested feature is absent, and Monarc requests three of them by name.
+    CHECK(ToErrorCode(VK_ERROR_FEATURE_NOT_PRESENT) == Monarc::ErrorCode::Unsupported);
+}
+
+TEST_CASE("every other result the backend can receive stays BackendFailure") {
+    // Including the two out-of-memory results, deliberately: Monarc's OutOfMemory means
+    // *Monarc's* allocator returned nothing -- which is what a failed VulkanBackend::Create
+    // reports for its own State -- and a driver heap running out is a different fact a caller
+    // would handle differently. Conflating them would make one code mean two things.
+    CHECK(ToErrorCode(VK_ERROR_OUT_OF_HOST_MEMORY) == Monarc::ErrorCode::BackendFailure);
+    CHECK(ToErrorCode(VK_ERROR_OUT_OF_DEVICE_MEMORY) == Monarc::ErrorCode::BackendFailure);
+    CHECK(ToErrorCode(VK_ERROR_INITIALIZATION_FAILED) == Monarc::ErrorCode::BackendFailure);
+
+    // And a result the table has never heard of. The fallback must not quietly become
+    // Unsupported, which would tell a caller a capability was missing on the strength of a
+    // number nobody recognised.
+    CHECK(ToErrorCode(static_cast<VkResult>(-987654)) == Monarc::ErrorCode::BackendFailure);
+    CHECK(ToErrorCode(VK_ERROR_DEVICE_LOST) == Monarc::ErrorCode::BackendFailure);
+
+    // **And a surface that has stopped working, which is the tempting one to get wrong.** It
+    // arrives from every surface query the swapchain makes -- measured, by destroying a window
+    // under a live surface -- and "this surface is gone" reads like a capability being absent.
+    // It is not: `Unsupported` means asking differently might work, and there is no different
+    // way to ask about a window that no longer exists. Only a fresh window and a fresh
+    // `CreateSwapchain` will do, which is what `ISwapchain::Recreate` refusing a shut-down
+    // swapchain says from the other side.
+    CHECK(ToErrorCode(VK_ERROR_SURFACE_LOST_KHR) == Monarc::ErrorCode::BackendFailure);
+}
+
+TEST_CASE("an extension is found by its whole name and never by a prefix of one") {
+    Monarc::SystemAllocator                       allocator;
+    Monarc::Array<VkExtensionProperties>          extensions(allocator);
+    extensions.Push(Extension("VK_KHR_surface_maintenance1"));
+    extensions.Push(Extension("VK_KHR_win32_surface"));
+    extensions.Push(Extension("VK_NV_mesh_shader"));
+
+    CHECK(ContainsExtension(extensions, "VK_KHR_win32_surface"));
+    CHECK(ContainsExtension(extensions, "VK_KHR_surface_maintenance1"));
+
+    // **The near-misses are the point.** `VK_KHR_surface` is a prefix of an entry that *is*
+    // present, and `VK_EXT_mesh_shader` differs from one by two letters. A prefix or substring
+    // match would report both as available, which is a capability claim the implementation
+    // would then fail to honour -- and Tasks 3 and 4 add many more of these queries.
+    CHECK_FALSE(ContainsExtension(extensions, "VK_KHR_surface"));
+    CHECK_FALSE(ContainsExtension(extensions, "VK_EXT_mesh_shader"));
+
+    // And the other direction: a name longer than an available one must not match it either.
+    CHECK_FALSE(ContainsExtension(extensions, "VK_KHR_win32_surface_2"));
+    CHECK_FALSE(ContainsExtension(extensions, ""));
+}
+
+TEST_CASE("an empty extension list contains nothing, including the empty name") {
+    // What a machine with no Vulkan SDK hands back, and the case a loop written with a
+    // do-while or an off-by-one bound would read one element of anyway.
+    Monarc::SystemAllocator              allocator;
+    Monarc::Array<VkExtensionProperties> extensions(allocator);
+    CHECK_FALSE(ContainsExtension(extensions, "VK_EXT_debug_utils"));
+    CHECK_FALSE(ContainsExtension(extensions, ""));
+}
+
+TEST_CASE("a layer is found by its whole name, and the validation layer by exactly its own") {
+    Monarc::SystemAllocator          allocator;
+    Monarc::Array<VkLayerProperties> layers(allocator);
+    layers.Push(Layer("VK_LAYER_KHRONOS_validation"));
+    layers.Push(Layer("VK_LAYER_MEDAL_HOOK"));
+
+    CHECK(ContainsLayer(layers, "VK_LAYER_KHRONOS_validation"));
+    CHECK(ContainsLayer(layers, "VK_LAYER_MEDAL_HOOK"));
+
+    // VK_LAYER_KHRONOS_validation is the one name whose presence decides whether Monarc's
+    // instance gets validation at all, and the overlay layers this machine really does have
+    // installed are what a loose match would collide with.
+    CHECK_FALSE(ContainsLayer(layers, "VK_LAYER_KHRONOS"));
+    CHECK_FALSE(ContainsLayer(layers, "VK_LAYER_LUNARG_standard_validation"));
+
+    Monarc::Array<VkLayerProperties> none(allocator);
+    CHECK_FALSE(ContainsLayer(none, "VK_LAYER_KHRONOS_validation"));
+}
+
+TEST_CASE("each debug-utils severity logs at the level that will actually be printed") {
+    // The VulkanValidation category's minimum is Warning, so one level too low is not a
+    // cosmetic difference: an ERROR mapped to Info is filtered out at the sink and the
+    // validation finding disappears. Each of the four is pinned by name.
+    CHECK(SeverityToLogLevel(VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) ==
+          Monarc::LogLevel::Error);
+    CHECK(SeverityToLogLevel(VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) ==
+          Monarc::LogLevel::Warning);
+    CHECK(SeverityToLogLevel(VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) ==
+          Monarc::LogLevel::Info);
+    CHECK(SeverityToLogLevel(VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT) ==
+          Monarc::LogLevel::Trace);
+}
+
+TEST_CASE("several severity bits at once report the loudest of them") {
+    // Vulkan documents the callback's severity as a single bit, and the ordered tests take the
+    // maximum rather than the first match so that this function does not depend on that.
+    // Reversing the order of the tests -- the mistake the shape invites -- turns these red.
+    CHECK(SeverityToLogLevel(static_cast<VkDebugUtilsMessageSeverityFlagBitsEXT>(
+              VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT |
+              VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT)) == Monarc::LogLevel::Error);
+    CHECK(SeverityToLogLevel(static_cast<VkDebugUtilsMessageSeverityFlagBitsEXT>(
+              VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+              VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT)) == Monarc::LogLevel::Warning);
+}
+
+TEST_CASE("no severity maps to Debug or Fatal, which is what the callback's switch assumes") {
+    // DebugMessengerCallback's switch is `default`-less over all six LogLevels, so it must
+    // give Debug and Fatal a case -- and it currently folds them in with Trace. That is only
+    // sound while this function cannot return either, so the range is pinned here rather than
+    // assumed there. A severity that started returning Fatal would log the loudest level at
+    // the quietest with no compile error; this is the case that would notice.
+    constexpr VkDebugUtilsMessageSeverityFlagBitsEXT kAll[] = {
+        VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT,
+        VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT,
+        VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT,
+        VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+        VK_DEBUG_UTILS_MESSAGE_SEVERITY_FLAG_BITS_MAX_ENUM_EXT,
+    };
+    for (const VkDebugUtilsMessageSeverityFlagBitsEXT severity : kAll) {
+        const Monarc::LogLevel level = SeverityToLogLevel(severity);
+        CHECK(level != Monarc::LogLevel::Debug);
+        CHECK(level != Monarc::LogLevel::Fatal);
+    }
+
+    // A bit Vulkan has not defined is a new severity as far as this is concerned, and it lands
+    // at Trace -- the quietest level, which is the right place for something unrecognised.
+    CHECK(SeverityToLogLevel(static_cast<VkDebugUtilsMessageSeverityFlagBitsEXT>(0x40000)) ==
+          Monarc::LogLevel::Trace);
+}
+
+// ---------------------------------------------------------------------------------------
+// Swapchain negotiation.
+//
+// **The half of swapchain creation CI can run, and until a review nothing ran it.**
+// Private/Translate.h's justification for extracting these two functions at all is that a
+// swapchain needs a window, a surface, a device and a presenting queue family, none of which a
+// GitHub runner has -- "but the arithmetic that turns `VkSurfaceCapabilitiesKHR` into an image
+// count and an extent needs none of them, and it is the part with edge cases: an unbounded
+// maximum, a maximum equal to the minimum, the 'surface has no preference' sentinel, and
+// clamping a requested size into a range. Every one of those is a driver behaviour this machine
+// does not exhibit, so a device test could not reach them even with a GPU present."
+//
+// `grep -rn "ChooseSwapchain" Source/` returned two declarations, two definitions and two call
+// sites, and no test. Two mutations measured what that cost. `ChooseSwapchainExtent` rewritten
+// to `return requested;` -- ignoring `capabilities.currentExtent` entirely, which is the branch
+// the header calls decisive -- left CTest 10 of 10 green and the device suite byte-identical at
+// 16 of 926, and took the `chosen.IsEmpty()` guard in `VulkanSwapchain.cpp` with it as dead
+// code nobody noticed. `ChooseSwapchainImageCount`'s clamp changed to `maxImageCount + 7` left
+// the same numbers.
+//
+// These are here rather than in TestVulkanBarrierTranslate.cpp, where `FindMemoryType` is
+// tested: that file is the barrier model's by its own opening line, and swapchain negotiation
+// is no part of it. This one is Translate.h's general pure surface.
+// ---------------------------------------------------------------------------------------
+
+namespace {
+
+using Monarc::RHI::Extent2D;
+using Monarc::RHI::Detail::ChooseSwapchainExtent;
+using Monarc::RHI::Detail::ChooseSwapchainImageCount;
+
+/// Vulkan's spelling of "this surface has no preferred extent; pick one in range".
+constexpr Monarc::u32 kNoPreference = 0xFFFFFFFFU;
+
+/// The capabilities a surface would report, as much of them as these two functions read.
+[[nodiscard]] VkSurfaceCapabilitiesKHR Capabilities(VkExtent2D current, VkExtent2D minimum,
+                                                    VkExtent2D maximum) {
+    VkSurfaceCapabilitiesKHR capabilities{};
+    capabilities.currentExtent  = current;
+    capabilities.minImageExtent = minimum;
+    capabilities.maxImageExtent = maximum;
+    return capabilities;
+}
+
+}  // namespace
+
+TEST_CASE("the surface's own extent wins wherever it reports one") {
+    // **The branch that decides every swapchain on Windows**, where `currentExtent` is always
+    // the window's client rect -- so a swapchain created at any other size is
+    // `VUID-VkSwapchainCreateInfoKHR-imageExtent-01274`. The request is deliberately nothing
+    // like the surface's answer, so a function that returned it is red rather than
+    // coincidentally right.
+    const VkSurfaceCapabilitiesKHR capabilities =
+        Capabilities(VkExtent2D{640, 360}, VkExtent2D{1, 1}, VkExtent2D{4096, 4096});
+
+    CHECK(ChooseSwapchainExtent(capabilities, Extent2D{1920, 1080}) == Extent2D{640, 360});
+    // Including when the request is itself in range and perfectly legal, which is the case
+    // that makes this about the surface deciding rather than about the request being bad.
+    CHECK(ChooseSwapchainExtent(capabilities, Extent2D{800, 600}) == Extent2D{640, 360});
+    // And when nothing was requested at all.
+    CHECK(ChooseSwapchainExtent(capabilities, Extent2D{}) == Extent2D{640, 360});
+}
+
+TEST_CASE("a surface reporting no area comes back empty rather than with a size invented") {
+    // A minimised window, which on Windows reports 0 x 0. `VulkanSwapchainState::BringUp`
+    // refuses an empty answer by name -- the difference between a `Status` a frame loop can
+    // park on and `VUID-VkSwapchainCreateInfoKHR-imageExtent-01689` stopping the process -- so
+    // this function has to hand the emptiness through rather than clamp it up to
+    // `minImageExtent`. That guard is what a `return requested;` mutation made dead.
+    const VkSurfaceCapabilitiesKHR minimised =
+        Capabilities(VkExtent2D{0, 0}, VkExtent2D{1, 1}, VkExtent2D{4096, 4096});
+
+    CHECK(ChooseSwapchainExtent(minimised, Extent2D{640, 360}).IsEmpty());
+    CHECK(ChooseSwapchainExtent(minimised, Extent2D{640, 360}) == Extent2D{});
+}
+
+TEST_CASE("the no-preference sentinel clamps the request into the surface's range") {
+    // **Unreachable on Windows and written because it is reachable elsewhere** -- Wayland
+    // reports the sentinel -- which is exactly why it needs a device-free case: no test on this
+    // machine can reach it through a real surface.
+    const VkSurfaceCapabilitiesKHR free = Capabilities(
+        VkExtent2D{kNoPreference, kNoPreference}, VkExtent2D{64, 32}, VkExtent2D{1024, 768});
+
+    // In range, so the request is honoured exactly.
+    CHECK(ChooseSwapchainExtent(free, Extent2D{800, 600}) == Extent2D{800, 600});
+    // Below the minimum in both dimensions, and above the maximum in both.
+    CHECK(ChooseSwapchainExtent(free, Extent2D{16, 8}) == Extent2D{64, 32});
+    CHECK(ChooseSwapchainExtent(free, Extent2D{4096, 4096}) == Extent2D{1024, 768});
+    // Exactly on each bound, which is where an off-by-one in the clamp lives.
+    CHECK(ChooseSwapchainExtent(free, Extent2D{64, 32}) == Extent2D{64, 32});
+    CHECK(ChooseSwapchainExtent(free, Extent2D{1024, 768}) == Extent2D{1024, 768});
+    // **The two dimensions clamp independently**, which one clamp applied to both would get
+    // wrong: this request is over the maximum in width and under the minimum in height at once.
+    CHECK(ChooseSwapchainExtent(free, Extent2D{4096, 8}) == Extent2D{1024, 32});
+
+    // A minimum of zero is not a size a swapchain can be created at, so an empty request under
+    // an empty minimum stays empty and the caller refuses it -- the same refusal the minimised
+    // window gets, arriving down the other branch.
+    const VkSurfaceCapabilitiesKHR fromZero = Capabilities(
+        VkExtent2D{kNoPreference, kNoPreference}, VkExtent2D{0, 0}, VkExtent2D{1024, 768});
+    CHECK(ChooseSwapchainExtent(fromZero, Extent2D{}).IsEmpty());
+}
+
+TEST_CASE("a mixed sentinel pair takes the surface's numbers rather than half of each") {
+    // Translate.cpp tests both dimensions and says why: the spec pairs them, so a surface
+    // reporting a real width beside a sentinel height is malformed rather than half free.
+    // Testing one dimension -- the shape the code invites -- would take the clamping branch
+    // with `0xFFFFFFFF` standing in for the other dimension's current extent, and `4294967295`
+    // is not a size. Falling through keeps the mistake local: the caller gets an extent it can
+    // refuse, and these two assertions are what say which way it falls.
+    const VkSurfaceCapabilitiesKHR widthFree =
+        Capabilities(VkExtent2D{kNoPreference, 360}, VkExtent2D{64, 32}, VkExtent2D{1024, 768});
+    CHECK(ChooseSwapchainExtent(widthFree, Extent2D{800, 600}) == Extent2D{kNoPreference, 360});
+
+    const VkSurfaceCapabilitiesKHR heightFree =
+        Capabilities(VkExtent2D{640, kNoPreference}, VkExtent2D{64, 32}, VkExtent2D{1024, 768});
+    CHECK(ChooseSwapchainExtent(heightFree, Extent2D{800, 600}) ==
+          Extent2D{640, kNoPreference});
+}
+
+TEST_CASE("an image count is one more than the minimum, so a frame can be worked on") {
+    // The minimum alone leaves the CPU blocked in `vkAcquireNextImageKHR` for most of every
+    // frame. `maxImageCount` of zero is Vulkan's spelling of "no limit" and must not be clamped
+    // to: a `std::min` against zero asks for no images at all, which is
+    // `VUID-VkSwapchainCreateInfoKHR-minImageCount-01271`. Neither local surface reports zero,
+    // so this is a driver behaviour only a device-free case can reach.
+    CHECK(ChooseSwapchainImageCount(2, 0) == 3);
+    CHECK(ChooseSwapchainImageCount(1, 0) == 2);
+
+    // **And it is not derived from `kFramesInFlight`, which is the claim Translate.h makes and
+    // nothing checked.** A driver reporting a minimum of 3 gets 4 images against the same 2
+    // frames in flight; code that had tied the two together would be wrong only on that
+    // machine, which is the machine nobody has.
+    CHECK(ChooseSwapchainImageCount(3, 0) == 4);
+}
+
+TEST_CASE("an image count is clamped to a maximum the surface does report") {
+    // The clamp bites in two shapes and neither occurs here: both local surfaces report a
+    // maximum far above `minImageCount + 1`.
+    //
+    // A maximum equal to the minimum -- there is no room for the extra image, so the minimum is
+    // what has to be asked for.
+    CHECK(ChooseSwapchainImageCount(2, 2) == 2);
+    CHECK(ChooseSwapchainImageCount(1, 1) == 1);
+    // A maximum exactly at `minImageCount + 1`: the boundary, where an off-by-one in the
+    // comparison shows and where `maxImageCount + 7` does not.
+    CHECK(ChooseSwapchainImageCount(2, 3) == 3);
+    // And a maximum below the minimum, which is malformed. Nothing here can repair that; what
+    // it must not do is ask for more than the surface said it would give.
+    CHECK(ChooseSwapchainImageCount(4, 2) == 2);
+}
+
+TEST_CASE("the image counts this machine's two surfaces actually produce") {
+    // The device measurement, restated where CI can check it -- and it is the one case in this
+    // section whose inputs are readings rather than constructions. Both local surfaces report
+    // `minImageCount` 2; the maxima differ by vendor, 8 on the NVIDIA surface and 64 on the
+    // Intel one, from `VulkanSwapchain.cpp`'s own creation log. Both give 3 images against 2
+    // frames in flight, which is the pair of counts the device suite asserts from the other
+    // side with `CHECK(ImageCount() > kFramesInFlight)`.
+    CHECK(ChooseSwapchainImageCount(2, 8) == 3);
+    CHECK(ChooseSwapchainImageCount(2, 64) == 3);
+    CHECK(ChooseSwapchainImageCount(2, 8) > Monarc::RHI::kFramesInFlight);
+}

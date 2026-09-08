@@ -24,6 +24,16 @@ jobs:
   build:
     name: ${{ matrix.preset }}
     runs-on: windows-latest
+
+    # A ceiling against a hang, not a performance target -- and it is deliberately generous,
+    # because the only measured input is local: a clean configure and build of one preset takes
+    # two to four minutes on a developer machine, and a runner adds checkout, a doctest fetch,
+    # and possibly a `choco install llvm`. GitHub's default is 360 minutes, which is a whole
+    # afternoon of runner time for a job that will never finish. Per-*test* hangs are bounded
+    # separately and much more tightly by the CTest TIMEOUT properties in
+    # CMake/MonarcTest.cmake; this catches the configure and build steps, which no CTest
+    # property can.
+    timeout-minutes: 45
     strategy:
       # Never cancel the other legs: when MSVC and Clang disagree, seeing *both*
       # results is the entire point of running both. clang-asan catches the aliasing
@@ -102,6 +112,34 @@ jobs:
           call "%VCVARS%" >nul || exit /b 1
           ctest --preset ${{ matrix.preset }} || exit /b 1
 
+      # The probe exists to put the truth about each machine into this log -- what Vulkan the
+      # runner has, or that it has none -- so that "CI has no GPU" is an observed fact rather
+      # than an assumption in a plan. It is registered as an always-passing CTest entry, and
+      # CTest discards a passing test's output, so the step above ran it and printed nothing.
+      #
+      # A mechanism whose whole purpose is to report, that reports nothing, is worse than not
+      # having it: the run goes green and the question stays unanswered. Hence a second,
+      # verbose invocation of exactly those entries.
+      #
+      # **`Monarc.RHI.Vulkan.RuntimeTests` is here for the same reason, and it is not
+      # redundant.** The probe stops at the first refusal -- on these runners
+      # `VK_KHR_surface`, before an instance exists -- so what it reports is bring-up's view.
+      # The runtime suite reports the loader's: which global entry points resolved, and the
+      # instance version read back through the table. Both are passing entries, so both are
+      # silent without this step.
+      #
+      # `if: always()`, because a red run is exactly when knowing what the machine has is most
+      # useful. There is deliberately no `|| exit /b 0` after either invocation: a step whose
+      # job is to report should be loud when it cannot, which is the whole lesson of the
+      # commit that added it.
+      - name: Probe -- what this runner actually has
+        if: always()
+        shell: cmd
+        run: |
+          call "%VCVARS%" >nul
+          ctest --preset ${{ matrix.preset }} -R Monarc.RHI.Vulkan.Probe -V
+          ctest --preset ${{ matrix.preset }} -R Monarc.RHI.Vulkan.RuntimeTests -V
+
       # The module graph is what the architecture gates and, later, `monarc explain`
       # read. Publishing it makes a graph change visible in the run itself.
       - name: Upload module graph
@@ -115,6 +153,7 @@ jobs:
   docs:
     name: docs
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7

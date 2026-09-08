@@ -29,6 +29,11 @@ CMakeFiles/
 .obsidian/cache
 .obsidian/plugins/*/data.json
 
+# ---- Vulkan tooling ----
+# `vulkaninfo` drops a VP_VULKANINFO_<device>_<driver>.json profile beside wherever it
+# was run. It is a dump of one machine's driver, so it is never shared state.
+VP_VULKANINFO_*.json
+
 # ---- Editors / OS / tooling ----
 .vs/
 .claudian/

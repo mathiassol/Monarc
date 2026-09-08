@@ -88,6 +88,25 @@ function(monarc_set_target_options target)
     if(MSVC)
         target_compile_options(${target} PRIVATE
             /W4 /WX
+            # C4062: a `default`-less switch over an enum that omits an enumerator. This is
+            # not redundant with /W4 -- C4062 is one of MSVC's off-by-default warnings and
+            # /W4 does not turn it on, so without this line cl compiles a non-exhaustive
+            # switch silently while clang-cl rejects the same file (-Wswitch, on at /W4).
+            # Verified on a minimal translation unit: `cl /W4 /WX` exits clean, `cl /W4 /WX
+            # /w44062` gives "warning C4062: enumerator 'E::C' in switch of enum 'E' is not
+            # handled" through C2220. Monarc relies on that error as the mechanism that
+            # forces a new enumerator to be given a case: Monarc.RHI/Private/Types.cpp says
+            # so explicitly, and Monarc.Core/Private/Error.cpp and Log.cpp are written in
+            # the same `default`-less shape, so the flag governs them too. A guarantee that
+            # holds on one of two supported compilers is not one a developer working on
+            # msvc-debug can lean on.
+            #
+            # Deliberately not /w44061, which fires even when a `default` IS present: it
+            # would force every defensive `default` to enumerate all cases and delete the
+            # distinction between "forgot an enumerator" and "chose to handle the rest in
+            # one place". C4062 fires only where the code has already opted in by omitting
+            # `default`, which is the signal actually wanted.
+            /w44062
             /permissive-        # conformance mode
             /Zc:__cplusplus     # otherwise __cplusplus reports 199711
             /Zc:preprocessor    # conforming preprocessor

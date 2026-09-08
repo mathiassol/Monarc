@@ -1,7 +1,9 @@
-// The one translation unit in Monarc.Jobs.Tests that provides doctest's main() -- mirrors
-// Monarc.Core.Tests/TestPlaceholder.cpp, which this module has no equivalent placeholder
-// file for.
-#define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
+// doctest's implementation and `main` used to be here. A3 Task 5 moved both to
+// TestDeathGuards.cpp for the reason that file gives: `--monarc-death-guard=<name>` has to be
+// handled before doctest starts, or doctest's SEH filter catches the debug break a fatal guard
+// raises and reports it as a failed assertion rather than letting the process die. Exactly one
+// translation unit may define the implementation, and the file that owns `main` is the natural
+// one -- which is also what Monarc.Core.Tests now does.
 #include <doctest/doctest.h>
 
 #include <Monarc/Core/Containers/HashMap.h>

@@ -52,6 +52,7 @@ TEST_CASE("ToString names every error code") {
     CHECK(std::string_view(Monarc::ToString(ErrorCode::PermissionDenied)) == "PermissionDenied");
     CHECK(std::string_view(Monarc::ToString(ErrorCode::IoFailure)) == "IoFailure");
     CHECK(std::string_view(Monarc::ToString(ErrorCode::Unsupported)) == "Unsupported");
+    CHECK(std::string_view(Monarc::ToString(ErrorCode::BackendFailure)) == "BackendFailure");
 }
 
 TEST_CASE("errors propagate through and_then without losing detail") {

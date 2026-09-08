@@ -287,6 +287,29 @@ This is the task that makes the phase automatable. Everything here runs without 
 **Verification.** `ctest -L gpu` green locally on both adapters; `ctest` in CI reports the gpu
 tests as **skipped**, not passed. Confirm the skip appears in CI's output by reading it.
 
+### Notes carried over from Task 2's code-quality review
+
+Two things Task 2's review found and deliberately left alone, because Task 3 is where they
+stop being premature. Neither is a defect today.
+
+- [ ] **Consolidate the resolve macros.** `MONARC_VK_RESOLVE_GLOBAL` and
+      `MONARC_VK_RESOLVE_INSTANCE` in `Private/Loader.cpp` differ only in the table they write
+      and two words of wording. A third copy for the device table is the point at which
+      parameterising pays — not before, which is why Task 2 left two.
+
+      Related, and larger: today "optional" means "its own table". That works for the one
+      extension Monarc asks for (`VK_EXT_debug_utils`, whose absence is not an error) and
+      multiplies badly once mesh-shader, ray-tracing and swapchain entry points arrive with
+      *per-adapter* availability. `Private/Loader.h`'s three-table comment anticipates the
+      device table but not per-function optionality; a resolved-or-null flag per entry, or a
+      `Resolve(..., Required | Optional)` parameter, is the shape to consider when the device
+      table lands.
+- [ ] **Extract the messenger block from `BringUp`.** `Private/VulkanBackend.cpp`'s messenger
+      creation needs only `instance`, `messengerInfo` and the loader, and comes out cleanly.
+      `BringUp`'s remaining length is partly forced and should stay: `messengerInfo`,
+      `enabledExtensions` and `applicationInfo` must all outlive the `vkCreateInstance` call
+      that reads them, so they cannot move into helpers that return.
+
 ---
 
 ## Task 4: A window, a surface, a swapchain, and first light
@@ -308,6 +331,23 @@ tests as **skipped**, not passed. Confirm the skip appears in CI's output by rea
 - [ ] `Monarc.FirstLight`'s main loop: acquire, barrier undefined → colour attachment, begin
       rendering with a clear, end, barrier → present, submit, present, advance the timeline.
 - [ ] Clean shutdown: wait on the timeline, destroy in reverse order, and exit zero.
+- [ ] **Turn `VulkanCommandList`'s four state flags into one `enum class State`, and do it
+      while adding the fifth state rather than after.** Task 3 enumerated the machine —
+      `Reset`, `Recording`, `Recorded`, `Submitted`, tracked by `m_recording`, `m_recorded`,
+      `m_submitted` and `m_rendering` — and closing that table found **three** reachable holes,
+      each of which was a named VUID in Debug and **silent undefined behaviour in Release**,
+      where validation is off. The table and its transitions are written down in
+      `Private/VulkanDeviceState.h` and [Status.md](../Status.md).
+
+      Four bools cannot make an unaudited method a compile error; an exhaustive `switch` over
+      a `State` enum can, because `/w44062` is on. That is the same class of guarantee as
+      `TextureBarrier`'s required layout pair and `VK_NO_PROTOTYPES` — not testable by
+      assertion, demonstrable by writing the bad code and watching it fail to compile.
+
+      Deliberately deferred to here rather than done in Task 3, for one reason: **the
+      swapchain adds the fifth state.** A list holding an acquired image is a state the machine
+      does not yet have, and designing the enum with it in hand beats designing it blind and
+      bolting the state on. Roughly sixty mechanical lines across two files.
 
 ### Tests
 
@@ -341,6 +381,136 @@ That capture is the proof that the pixels came from where we think they did.
 - [ ] Update [RHI.md](../Rendering/RHI.md) where A3 turned an intention into a fact —
       particularly the loader decision and the adapter-identity rule.
 - [ ] Update [M0](../Milestones/M0-First-Light.md) to mark A3 complete.
+
+### Notes carried over from Task 2's code-quality review
+
+- [ ] **Decide whether `TestsRuntime/` earns a third binary — after reading the probe's real CI
+      output, not before.** Six cases in `TestsDevice/TestVulkanDevice.cpp` need a Vulkan
+      **runtime**, not a **device**: the three `Loader` move cases, "opening a library that is
+      not the Vulkan loader still fails on a machine that has one", the instance-version case,
+      and the validation-implication case. They sit behind `main`'s `adapters.IsEmpty()` gate,
+      so on a machine with `vulkan-1.dll` and no registered ICD all six are skipped though
+      every one could have run. Whether that is worth a third outcome depends entirely on what
+      the runners actually have, which is the checkbox above this one.
+
+      **It earned it, and "all six" was an overcount — it is four.** The runners are that
+      machine, measured. But two of the six read state off a live `VulkanBackend`, not off a
+      `Loader`: the instance-version case calls `Backend().InstanceApiVersion()` and the
+      validation-implication case calls `Backend().DebugMessengerInstalled()`, and
+      `VulkanBackend::Create` is exactly what fails where there is no ICD. Those two stay
+      device-gated. The four that moved are the three move cases and the not-the-loader one, and
+      three of those four assert an invariant — that `Loader`'s hand-written moves clear the
+      source's tables — that no runner could previously execute at all.
+      [Status.md](../Status.md) has the case-by-case verdict and both mutations.
+
+      Related, and independent of that decision: **in CI the X-macro resolution loops are
+      compiled and never executed**, because the device-free suite stops at `Loader::Open`'s
+      second check — no `vulkan-1.dll`, no resolution. A test-only DLL exporting a stub
+      `vkGetInstanceProcAddr` that returns null for one named function would make the
+      "returned null for X" branch executable in CI, and would also make `Loader.cpp`'s
+      table-clearing on partial failure observable. Task 2 proved that path by mutation
+      instead, which is not the same as covering it.
+
+      **That premise is measured false, and the correction is narrower than its reversal.**
+      `vulkan-1.dll` opens on the runners. The probe's failure is
+      `Unsupported -- VK_KHR_surface`, which `VulkanBackend::State::BringUp` can only reach
+      *after* `Loader::Open` returned a Loader — and `Open` returns one only once
+      `vkGetInstanceProcAddr` resolved and all four Required global entries resolved through it.
+      So in CI the **global** resolution loop executes and every entry in it resolves; that has
+      been true since Task 2, unobserved.
+
+      What still does not execute there is everything past instance creation: the **instance**,
+      **debug-utils** and **device** loops all need a `VkInstance` or a `VkDevice`, and neither
+      exists on a machine with no ICD. Nor does the macro's Required-null *branch* — on the
+      runner no global lookup comes back null, so `Loader.cpp`'s report-and-clear path is still
+      only reached by mutation. `LoadInstanceFunctions`'s table-clearing is unreachable in CI
+      for the same reason it always was.
+
+      **The stub DLL is still not worth building, and the measurement is why rather than
+      despite it.** What it would cover has shrunk to one branch of one macro: the success path
+      it was partly aimed at now runs in CI on every job, and
+      `Tests/TestVulkanLoader.cpp`'s "a real library that is not the Vulkan loader" already
+      covers `Open`'s hand-written null check beside it. What it would cost has not shrunk — a
+      test-only *shared library* is a target kind this build has never produced, needing its own
+      convention, its own platform selection, and a path handed to the test at run time. A
+      third test binary reusing `_monarc_add_test_binary` verbatim cost about fifteen lines; this
+      does not, for less.
+
+### Notes carried over from Task 4's spec review
+
+- [ ] **Decide what gate 3 should say about test directories — a gate decision, not a code
+      change, which is why nothing was fixed when this was found.** `iter_sources` in
+      `Tools/check_architecture.py` walks only `Include/` and `Private/`, so every source-reading
+      gate skips `Tests/` and `TestsDevice/` by design: test targets are not modules and are
+      entitled to reach across a tier. Gate 3's forbidden list for tier 2 includes
+      `Monarc/Host/`, and it therefore cannot see a *tier-2* test that includes it.
+
+      The build stops that today for an unrelated reason — `monarc_test_module()` links only the
+      module under test, so `Monarc/Host/Window.h` is not on a `Monarc.RHI.Vulkan` test's include
+      path — but one `target_link_libraries` line in that module's CMakeLists.txt would lift the
+      obstacle, which is exactly what `Monarc.Host.Windowed/CMakeLists.txt` already does in the
+      allowed direction for its device suite. So the protection is a missing link line, not a
+      gate. Pre-existing and not introduced by Task 4. The options are to leave the exemption and
+      say so in [Module-Graph](../Architecture/Module-Graph.md) rule 3, or to police *upward*
+      includes in test directories while continuing to allow downward ones — which is a
+      different rule from the one gate 3 implements and needs a decision before code.
+
+      **Two corrections, made when the decision was taken.** "Rule 3" above is a slip: gate 3 is
+      [Module-Graph](../Architecture/Module-Graph.md)'s rule **4**, the renderer package
+      boundary; rule 3 is kind containment. And a third option was taken instead of either of
+      the two offered — policing the **link line** rather than the includes, as rule 10 and gate
+      14. [Status.md](../Status.md) records why, and why "a test may link at or below its own
+      module's tier" alone would have been the wrong form of it: tier 1 is outside the tier-2
+      package boundary exactly as tier 3 is. Also measured, since the note above calls the
+      protection accidental without proving it: adding that one `target_link_libraries` line and
+      then including `<Monarc/Host/Window.h>` in `TestsDevice/TestVulkanDevice.cpp` compiles
+      clean, and gate 3 reports PASS while it does.
+
+- [ ] **Take `Detail::WindowTestHooks` out of the shipped binary.** They have no shipped caller
+      and are nonetheless linked into every app that links `Monarc.Host.Windowed`: `dumpbin
+      /imports` on the Release `Monarc.FirstLight.exe` lists `GDI32.dll` (`BitBlt`,
+      `CreateCompatibleDC`) plus `WindowFromPoint`, `GetClassNameW`, `MonitorFromWindow`,
+      `GetMonitorInfoW`, `BringWindowToTop`, `SetForegroundWindow` and
+      `AdjustWindowRectExForDpi`, none of which any shipped path calls. An extra system DLL in a
+      first-light program's import table is a real cost.
+
+      **Not by moving them into the tests**, which was considered and measured: four of the ten
+      are not wrappers a test could write for itself, and they are the four that pull `GDI32`
+      and most of the unused imports in — so moving the `SetWindowPos`/`ShowWindow` wrappers
+      alone would put `<Windows.h>` in two test files, break the tree-wide "no test includes
+      `<Windows.h>`" claim, put platform code where gate 10 does not read it, and leave the cost
+      almost unchanged. The shape that works is a test-only translation unit under
+      `Private/Platform/<Platform>/` — still selected by directory, still inside gate 10's
+      reach, still shared by both of the module's test binaries — that `monarc_module()` does not
+      glob and `_monarc_add_test_binary()` does. That is a convention in
+      `CMake/MonarcModule.cmake` affecting every module, which is why it is a task and not a
+      drive-by. `WindowPlatform::NativeHandle` is already declared in `Private/WindowPlatform.h`,
+      so the new unit needs no friendship it does not have.
+
+### A note carried over from Task 3
+
+- [ ] **Add a death-test harness, and cover the fatal guards with it.** Monarc now has four
+      guards that deliberately end the process, and **not one of them has a case in any
+      suite**: `Array<T>::OnAllocationFailed`, `JobSystem::Wait`'s worker guard,
+      `JobSystem::PopQueueLocked`, and `ICommandList::Barrier`'s stale-handle refusal. Each
+      was verified once, by hand, with a scratch program that was then deleted — so nothing
+      stops a later edit from turning any of them back into a silent `return`, which is
+      exactly the regression three separate reviews on this branch have already caught in
+      other forms.
+
+      The shape is a registered CTest entry that runs a child process and asserts a non-zero
+      exit with an expected message. It covers all four at once, and **three of the four need
+      no GPU**, so most of it runs in CI. Worth its own pass rather than a comment in four
+      files saying "not testable" — the guards are testable, just not in-process, and the
+      difference is a harness nobody has written yet.
+
+      **"Four" was an undercount, corrected when the harness was built.** There are
+      **eleven** such places, and one of the four named above cannot be reached at all:
+      `JobSystem::PopQueueLocked`'s guard is private and called only after
+      `AnyQueuedLocked()` returned true under the same lock. Eight of the eleven are covered
+      and three cannot be — the other two being `Guid::Generate`'s entropy guard and the debug
+      messenger's callback. [Status.md](../Status.md) holds the full table and why each of the
+      three is unreachable.
 
 ---
 

@@ -12,6 +12,7 @@ const char* ToString(ErrorCode code) {
         case ErrorCode::PermissionDenied: return "PermissionDenied";
         case ErrorCode::IoFailure:        return "IoFailure";
         case ErrorCode::Unsupported:      return "Unsupported";
+        case ErrorCode::BackendFailure:   return "BackendFailure";
     }
     return "Unknown";
 }
