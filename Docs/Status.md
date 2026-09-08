@@ -1291,8 +1291,13 @@ swapchain readback on "NVIDIA GeForce RTX 3070 Ti": first pixel = (192, 128, 64,
 swapchain readback on "NVIDIA GeForce RTX 3070 Ti": 230400 of 230400 pixel(s) exact
 swapchain readback on "Intel(R) UHD Graphics 730": first pixel = (192, 128, 64, 255) as blue, green, red, alpha; expected (192, 128, 64, 255)
 swapchain readback on "Intel(R) UHD Graphics 730": 230400 of 230400 pixel(s) exact
-screen capture on "NVIDIA GeForce RTX 3070 Ti": first pixel = (192, 128, 64, 255) as blue, green, red, alpha; expected (192, 128, 64, 255)
+screen capture on "NVIDIA GeForce RTX 3070 Ti": first pixel = (192, 128, 64, 255) as blue, green, red, GDI padding; expected (192, 128, 64, 255)
 ```
+
+That last line said "alpha" until the review below: a 32-bit `BI_RGB` DIB's fourth byte is
+padding with no defined value, the capture case deliberately does not assert it, and one shared
+format string was labelling it for both callers. The readback's fourth byte *is* alpha and is
+asserted.
 
 The byte order is the finding as much as the values are. Task 3's `R8G8B8A8_UNORM` texture reads
 back `(64, 128, 192, 255)`; the swapchain is `B8G8R8A8_UNORM` and reads back `(192, 128, 64,
@@ -1315,7 +1320,9 @@ somebody else. The bytes it asserts are exact.
 
 **Four cases could report green having asserted nothing about their own subject, and that was
 found mechanically rather than by reading.** Each ended a `return` short of its assertions on a
-condition about the machine or the desktop:
+condition about the machine or the desktop. (**Four of six** -- the review below found the
+remaining two, one of them in this same file and one in the device-free window suite, so this
+sweep was not exhaustive when it was written up as such.)
 
 | case | declined on | did it decline here? |
 |---|---|---|
@@ -1648,20 +1655,310 @@ matches four lines, all comments — two in `Monarc/RHI/Device.h` and two in
 device-free cases and 504 assertions" was `Monarc.RHI` (51 / 174) plus `Monarc.RHI.Vulkan`
 (58 / 330) and did not include `Monarc.Host.Windowed`, which had three cases at the time. Now:
 
-| suite | cases | assertions |
-|---|---|---|
-| `Monarc.RHI.Tests` | 55 | 189 |
-| `Monarc.RHI.Vulkan.Tests` | 58 | 330 |
-| `Monarc.Host.Windowed.Tests` | 18 | 98 |
-| `Monarc.RHI.Vulkan.DeviceTests` | 38 | 384 |
-| `Monarc.Host.Windowed.DeviceTests` | 16 | 926 |
+| suite | cases | assertions | at first ship |
+|---|---|---|---|
+| `Monarc.RHI.Tests` | 55 | 189 | 55 / 189 |
+| `Monarc.RHI.Vulkan.Tests` | 65 | 360 | 58 / 330 |
+| `Monarc.Host.Windowed.Tests` | 18 | 104 | 18 / 98 |
+| `Monarc.RHI.Vulkan.DeviceTests` | 38 | 384 | 38 / 384 |
+| `Monarc.Host.Windowed.DeviceTests` | 17 | 952 | 16 / 926 |
 
-So **131 device-free cases / 617 assertions** and **54 device-required / 1310** across the three
+So **138 device-free cases / 653 assertions** and **55 device-required / 1336** across the three
 A3 modules. The window device suite was 15 cases and 884 assertions when Task 4 first shipped:
-the extra case is the acquire-ordering one above, and of the 42 extra assertions, 5 are the
-guards that stop three cases passing having asserted nothing and 12 are the fourth such case
-rebuilt on two devices rather than two adapters. All ten CTest entries pass on all six presets with zero warnings, and both `gpu`
-entries report **Skipped** when `--vulkan-library=` is pointed at a name that cannot resolve.
+of the two extra cases one is the acquire-ordering one above and one is the failed-recreation
+case from the review below, and of the 68 extra assertions, 6 are guards that stop four cases
+passing having asserted nothing and 12 are the cross-device refusal rebuilt on two devices
+rather than two adapters. All ten CTest entries pass on all six presets with zero warnings, and
+both `gpu` entries report **Skipped** when `--vulkan-library=` is pointed at a name that cannot
+resolve -- measured by giving `monarc_device_test_module`'s `add_test` that argument and
+re-running `ctest -L gpu`: `***Skipped 0.05 sec` and `***Skipped 0.06 sec`, both listed under
+"tests skipped".
+
+### A3 Task 4's code-quality review, and what it found
+
+A mutation-based review of the Task 4 diff. Nine mutations were run; three were caught and six
+were not, and **all six uncaught ones were in code the diff's own comments claimed was covered
+or decisive.** One Critical, four Important, ten Minor. Every finding below was measured, and so
+was every fix.
+
+**One defect could stop the process, and it is the same shape as the three holes Task 3's enum
+refactor was built for.** `VulkanSwapchainState::BringUp` has five failure paths *after*
+`vkCreateSwapchainKHR` has already succeeded -- an enumeration failure, a swapchain reporting no
+images, `AdoptImage` failing, and either `vkCreateSemaphore` -- and only the one where the create
+itself fails nulled the handle. `Recreate` returned that error unchanged, so `IsInitialized()`,
+which reads `swapchain != VK_NULL_HANDLE`, answered **`true`** for a swapchain with zero images
+and zero semaphores. `VulkanSwapchain.h` documented the opposite, in bold.
+
+The reachable route is resource pressure and not a driver bug: a window resize while the device's
+texture pool is near capacity makes `AdoptImage` return `OutOfMemory` after the swapchain exists.
+`Acquire` then passes its own `IsInitialized()` guard, passes the phase guard because the
+teardown set `phase = Idle`, takes no acquire-slot wait because `consumedByTimelineValue` is
+zero, and calls `vkAcquireNextImageKHR` with **both** the semaphore and the fence
+`VK_NULL_HANDLE`. Measured with a forced post-create failure standing in for the `AdoptImage`
+one:
+
+```
+CHECK_FALSE( swapchain.IsInitialized() ) is NOT correct!  values: CHECK_FALSE( true )
+CHECK( swapchain.ImageFormat() == Monarc::RHI::Format::Unknown ) is NOT correct!  values: CHECK( 2 == 0 )
+VUID-vkAcquireNextImageKHR-semaphore-01780 | vkAcquireNextImageKHR(): semaphore and fence are both VK_NULL_HANDLE.
+FATAL ERROR: test case CRASHED: Unhandled SEH exception caught
+```
+
+`Extent()` read `0 x 0` and `ImageCount()` zero at the same moment, so the accessors contradicted
+each other. Fatal under the Debug messenger; silent undefined behaviour in Release.
+
+**Fixed at the mutation site rather than at the accessor, and the two candidates are not
+equivalent.** `BringUp` is now a wrapper that calls `TearDownSwapchain` when its body failed and
+the handle is non-null. That condition is exact -- the only pre-create failure that touches the
+handle nulls it itself, so a refusal from the surface queries does not pay for a second
+`vkDeviceWaitIdle` -- and it is one place a sixth failure path cannot forget.
+
+Requiring a non-empty `images` in `IsInitialized()` was the other candidate, described as "one
+line and cannot be forgotten by a sixth failure path". **It is not sufficient**: the
+render-finished path pushes its partially built entry before returning and the acquire-semaphore
+path runs after the image loop has finished, so `images` is populated on two of the five paths
+and the guard would have caught three. It is also unreachable once the wrapper exists. Not
+applied. Nulling the handle on all five paths would have worked and does strictly less than the
+teardown, which also releases the pool slots `AdoptImage` claimed and destroys the semaphores
+built before the failure.
+
+The same forced failure now reports **21 assertions green with `Acquire` refusing by `Status`**,
+and across the whole suite it is caught as 14 of 17 cases red with no validation error and no
+crash.
+
+**A new device case observes the post-failure state instead of aborting on
+`REQUIRE(Recreate(...).has_value())`, and it reaches a real failed recreation** -- by destroying
+the window under a live surface, which is the "a window closed under the process" case
+`IsInitialized()`'s comment already named and nothing tested. Both of its branches assert, so a
+driver that answers the surface queries for a dead `HWND` is not a silent pass. On this machine
+the refusal branch runs:
+
+```
+vkGetPhysicalDeviceSurfaceCapabilitiesKHR failed: VK_ERROR_SURFACE_LOST_KHR (-1000000000)
+recreating on a surface whose window is gone was refused: BackendFailure -- VK_ERROR_SURFACE_LOST_KHR
+```
+
+**That log line read `<VkResult not in Monarc's table>` the first time it ran**, which is a
+second finding the review did not list. `TestVulkanTranslate.cpp` carried
+`CHECK(ToString(VK_ERROR_SURFACE_LOST_KHR) == unknown)` with the note "belongs to the swapchain,
+which is Task 4's; when that call arrives, this line is where it says so". The call arrived and
+nobody came back. Three rows added on the table's own rule that a result appears when a call that
+can produce it does: `VK_ERROR_SURFACE_LOST_KHR` (measured, from every surface query),
+`VK_ERROR_NATIVE_WINDOW_IN_USE_KHR` (`vkCreateWin32SurfaceKHR` and `vkCreateSwapchainKHR`, both
+of which stringify their result) and `VK_NOT_READY` (`vkAcquireNextImageKHR`, which `Acquire`
+already names beside `VK_TIMEOUT`). `VK_ERROR_OUT_OF_DATE_KHR` and `VK_SUBOPTIMAL_KHR` are
+deliberately **not** added, and `Translate.h` had predicted them: both are handled by name at
+both call sites before any path that stringifies a result, so neither can reach the table.
+`ToErrorCode(VK_ERROR_SURFACE_LOST_KHR)` is pinned to `BackendFailure` rather than `Unsupported`,
+because there is no different way to ask about a window that no longer exists.
+
+**Two more cases could report green having asserted nothing, which makes six in this task's
+file pair rather than four.** The table earlier in this section lists the first four.
+
+| case | declined on | measured as it stood |
+|---|---|---|
+| ten frames are acquired and presented, with no out-of-date loop | a bare `continue` for an adapter that cannot present | 14 of 16 cases red and **this one SUCCESS with 1 assertion** |
+| a window can be moved between monitors, and both monitors' DPI is reported (device-free) | `monitorCount < 2` | suite still 18 of 18 green, assertions 98 -> 93; run alone, 1 passed |
+
+The first was forced by making `VulkanDeviceState::swapchainEnabled` false -- the exact "this GPU
+cannot drive this monitor" configuration the `continue` exists to tolerate. Its one assertion was
+`REQUIRE_FALSE(Adapters().IsEmpty())`; nothing about ten frames, the out-of-date loop, or the
+timeline. `main()` gates on the adapter list being *empty* rather than on any adapter being able
+to present, so the skip does not cover it. It now counts presenting adapters, logs which declined
+and why, and ends on `CHECK(presenting >= 1)`, which the same mutation turns red at 16 of 17
+cases.
+
+**The second was not fixed by mirroring the device suite, and that is a deliberate asymmetry.**
+`TestsDevice`'s equivalent asserts `CHECK(monitorCount >= 2)` outright, on the argument that a
+suite already requiring a GPU and an interactive session can declare a second display alongside
+them -- and CI reports that suite Skipped, so the assertion never runs there. `Tests/` is the
+suite CI actually runs, and a GitHub runner reports one monitor: the same `CHECK` would be a
+permanently red assertion about the runner's hardware, which is the kind of red that teaches
+people to ignore reds. So the count picks a branch and both branches assert. Six assertions run
+on any machine -- a non-degenerate monitor rect, a non-zero DPI, and the rect lying inside the
+virtual screen, all of which a zeroed `MONITORINFO` turns red -- and the one-monitor branch
+asserts that the move stayed within the display and that the client size survived it.
+
+The count is also cross-checked, which closes the gap a bare `CHECK(>= 2)` and the old `return`
+would each have left: a machine with one monitor has a virtual screen that *is* that monitor, so
+its origin is that monitor's origin. Forcing the count to 1 here, where the second display sits
+at `(-1920, 0)`, now gives `CHECK( first.virtualLeft == first.left ) is NOT correct!` and 17 of
+18 cases -- so the mutation is caught in the CI suite as well as in the device one.
+
+**`TextureLayout` gained a ninth enumerator and the Vulkan-side list did not, and the comment
+that depended on it was the justification for deleting a test.** `TestBarrier.cpp`'s
+`kAllLayouts` got `PresentSource`; `TestVulkanBarrierTranslate.cpp`'s did not. So nothing
+asserted `ToVulkan(PresentSource)`, nothing asserted the reverse, and the round-trip loop skipped
+it -- while the comment above the layout case read "the eight `CHECK`s above are exhaustive over
+`kAllLayouts`" and was the stated reason a 28-comparison distinctness loop had been deleted.
+`Barrier.h` was correctly changed from "eight" to "nine" in the same commit, so the count was
+known.
+
+With `ToVulkan(PresentSource)` returning `VK_IMAGE_LAYOUT_GENERAL`, **both device-free suites
+were byte-identical** at 58 of 330 and 55 of 189. The device suite caught it --
+`VUID-VkPresentInfoKHR-pImageIndices-01430`, exit `0xc0000409` -- and that is the suite CI
+reports as Skipped, so **the mutation shipped green on all six CI presets**. In Release with no
+layer it is presentation from the wrong layout.
+
+**All three lists in that file had the hole and none had any guard, so the fix is a mechanism
+rather than a row.** Two `static_assert`s per list, resting on a `default`-less `IsEnumerator`
+switch per set, and it is airtight rather than a nudge. Measured by adding a tenth
+`TextureLayout` enumerator:
+
+| step | MSVC | clang-cl |
+|---|---|---|
+| enumerator added, `IsEnumerator` not told | `warning C4062: enumerator 'MutationProbe' ... is not handled`, fatal through `error C2220` | `error: enumeration value 'MutationProbe' not handled in switch [-Werror,-Wswitch]` |
+| `IsEnumerator` told, list still nine | `error C2338: static assertion failed: 'kAllLayouts is missing a TextureLayout enumerator...'` | the same, as `static assertion failed due to requirement '!IsEnumerator(static_cast<TextureLayout>(std::size(kAllLayouts)))'` |
+
+There is no order of edits that reaches a green build with a stale list. The second assertion per
+list -- that the list is in the enum's own order with no gaps or repeats -- is what makes "one
+past the last index" the right value to probe, and catches a list that traded a missing row for a
+duplicated one. `TestBarrier.cpp` guards its copies at runtime through `ToString`, which works
+there because `ToString` is the function under test; the equivalent probe in the Vulkan file would
+go through `ToVulkan`/`ToVulkanBit`, whose not-recognised answers are a *conservative mask*
+rather than a sentinel, so a new stage mapping to `ALL_COMMANDS` would slip past one. A compile
+error has neither problem and does not have to be run.
+
+**The two swapchain-choice helpers had no test, and the comment justifying their extraction says
+CI coverage is why they exist.** `Translate.h`: "they are here for the reason `FindMemoryType`
+is: this is the half of swapchain creation that CI can run ... it is the part with edge cases: an
+unbounded maximum, a maximum equal to the minimum, the 'surface has no preference' sentinel, and
+clamping a requested size into a range. Every one of those is a driver behaviour this machine does
+not exhibit, so a device test could not reach them even with a GPU present."
+`grep -rn "ChooseSwapchain" Source/` returned two declarations, two definitions, two call sites,
+and no test.
+
+| mutation | before | after |
+|---|---|---|
+| `ChooseSwapchainExtent`'s body replaced by `return requested;` | CTest 10 of 10 green, device suite byte-identical at 16 of 926 | 4 of 65 device-free cases red, 10 assertions |
+| `ChooseSwapchainImageCount`'s clamp changed to `maxImageCount + 7` | the same numbers | 1 case red, 3 assertions |
+
+The first also made `VulkanSwapchain.cpp`'s `chosen.IsEmpty()` guard dead code, unnoticed. **The
+naive form of it is not expressible at `/W4 /WX`**: an early `return requested;` is
+`warning C4702: unreachable code` on four following lines, fatal through `error C2220`, which
+joins the three mutations Task 3 recorded as needing a rewritten form. The figures come from
+replacing the whole body.
+
+Seven cases cover both extent branches, the mixed sentinel pair the code tests both dimensions
+for, per-dimension clamping, both bounds exactly, the minimised `0 x 0` the caller parks on,
+`maxImageCount` of zero meaning no limit, a maximum equal to the minimum, a malformed maximum
+below the minimum, and the claim that the image count is not derived from `kFramesInFlight` --
+which `ChooseSwapchainImageCount(3, 0) == 4` is what finally checks. One of them restates the
+device measurement where CI can check it: both local surfaces report `minImageCount` 2 with
+maxima of 8 and 64, and both give 3 images against 2 frames in flight.
+
+**Two hook contracts were wrong in the same direction: they described something the code does not
+do.**
+
+`WindowTestHooks::BringToForeground`'s declared return contract was **inverted**. "Returns false
+when the platform refused, which it may: a console process is not always allowed to take the
+foreground" describes the one case that returned `true` -- `SetForegroundWindow` being refused
+leaves the window topmost, which is what a screen capture needs; `false` meant a `SetWindowPos`
+failure. The screen-capture case logged it as `fronted {}`, so the one hook whose whole purpose is
+diagnosing a bad capture printed `true` for a window that was never activated. **Not
+hypothetical: it happens on this machine**, on the run that produced the fix --
+`SetForegroundWindow was refused; the window is topmost but not activated`. It is now a
+three-state `Foreground` outcome and the line reads "topmost but not activated"; the test's
+`ForegroundText` is a `default`-less switch, so a fourth outcome is a compile error there.
+
+`WindowAtClientPoint` claimed truncation for code that refuses. With `-1` as the source length
+`WideCharToMultiByte` requires the whole string *and* its terminator to fit, returning 0 with
+`ERROR_INSUFFICIENT_BUFFER` rather than writing what it can -- so a class name whose UTF-8 form
+exceeded 62 bytes produced exactly the empty string the comment said it avoids. Reachable for a
+non-ASCII class name, since `GetClassNameW` returns up to 63 UTF-16 code units and one can become
+four UTF-8 bytes. `ToWideTitle` already had a two-call fallback for the same problem; this needs a
+loop, because the byte length is not a function of the character count.
+
+**Two counting paths in the window class refcount, and the second one's diagnosis was half
+right.** `Destroy` called `OnDestroyed` whenever `DestroyWindow` returned zero, and
+`DestroyWindow` is documented to return zero on failure without saying how far it got -- so a
+failure after `WM_DESTROY` had been delivered ran the handler's bookkeeping twice.
+`MONARC_CHECK(g_liveWindows > 0)` catches that only when the count was 1; with a second window
+alive it drifts down silently. With `DestroyWindow(handle) == 0 || true` and the guard removed:
+`[assert] (g_liveWindows > 0) a window was destroyed that was never counted as live` and the case
+CRASHED. With the guard, the same mutation leaves 18 of 18 green.
+
+The second was `++g_liveWindows` running after `CreateWindowExW` returned, where the back-pointer
+is installed from *inside* it. **The review named `WM_NCCREATE` as the abort point and the
+measurement says it is `WM_CREATE`:**
+
+| abort point | pre-fix reading |
+|---|---|
+| `WM_NCCREATE` answered `FALSE` | count probes 0 before and after, one line per attempted window -- Windows sends `WM_NCDESTROY` without a `WM_DESTROY`, so `OnDestroyed` never runs and the check is **not** reached |
+| `WM_CREATE` answered `-1` | `[assert] (g_liveWindows > 0) a window was destroyed that was never counted as live`, the suite stops |
+
+So the reachable half exists, and nothing in `Window.cpp` handles `WM_CREATE`: the abort would
+have to be Windows' own. Counting before the call and restoring the saved value on failure is
+balanced whichever way the creation ends; post-fix the `WM_CREATE` mutation probes
+"count 0 (was 0 before the increment)" with no abort.
+
+**Four comments described mechanisms the code does not have, and were corrected rather than
+implemented.**
+
+- `Translate.h` said "the surface reports a minimum of 2 and no maximum, so the two numbers
+  happen to be 3 and 2". Both surfaces report a maximum -- `min 2 max 8` and `min 2 max 64`,
+  from `VulkanSwapchain.cpp`'s own creation log. `Docs/Status.md` had it right, so the header was
+  the stale copy. The derived 3 was correct; the premise named a *different branch* of
+  `ChooseSwapchainImageCount` from the one this machine takes, which is why the new cases had to
+  construct the unbounded maximum rather than read it.
+- `VulkanSurface.cpp` said "two other files in this module mention `<Windows.h>` in a comment".
+  One does. `grep -rniIl "windows\.h" Source/Monarc.RHI.Vulkan/` returns that file and
+  `Private/VulkanSwapchain.cpp`. The companion claim in `Window.cpp` -- "three other files" -- is
+  exact: `Window.h`, `WindowPlatform.h`, `Tests/TestWindow.cpp`.
+- `WindowPlatform.h` said the capture's bytes are "blue, green, red, alpha because that is what a
+  32-bit `BI_RGB` DIB holds -- `0x00RRGGBB` little-endian", whose two halves contradict each
+  other: little-endian, `0x00RRGGBB` is B, G, R, `0x00`.
+- `Present`'s hard-failure comment said the leftover render-finished semaphore is "recoverable"
+  because "`Recreate` destroys every semaphore" -- true of what `Recreate` does, and silent about
+  the caller being told to call it, since `needsRecreation` stays clear on that path. Keeping it
+  clear is right rather than an oversight, and the comment now says why: the two results that set
+  the flag are handled as successes, so it means "this frame worked and the next needs a new
+  swapchain", where a hard failure is a louder `Error` and `VK_ERROR_DEVICE_LOST` cannot be
+  recreated out of. Setting it would tell a frame loop to retry a swapchain on a dead device.
+
+**`Window::Events()`'s promise does not hold for a second window, and is now qualified rather
+than the mechanism changed.** `Pump` clears only the pumped window's event count and drains the
+whole thread queue by design, so with two windows the un-pumped one accumulates, and a `WM_CLOSE`
+posted to A can be consumed during B's pump and cleared by A's next pump before A reads it.
+`kMaxWindowEvents` and the handler's coalescing bound it at two entries, and the fact that matters
+is not lost either way -- `CloseRequested()` is sticky for exactly this. Two windows exist in both
+suites, so it is a real configuration; what it is not is worth a per-window queue while nothing
+needs the exactness.
+
+**A second guard with no observable failure, joining the acquire-semaphore wait above.** Moving
+`vkDestroySwapchainKHR` back to *after* both semaphore loops -- the pre-`aa877b4` order the review
+of Task 4 corrected -- leaves both device suites byte-identical: 17 of 952 and 38 of 384, all
+green, with the fatal messenger installed. The comment there already concedes the ordering is not
+provable, so this is not a defect; it is a correction a later edit can undo silently, and it is
+recorded here for that reason rather than because a test covers it.
+
+**Two test gaps closed.** `CheckAnsweredAsEmpty` is shared between the shut-down case and the new
+failed-recreation one, and that is what finally calls **`SubmitForPresent`** on a swapchain that
+is not initialised: it carries the same `IsInitialized()` guard as the other three fallible
+members and no case had ever exercised it. And
+`CHECK(attempted->ImageFormat() == R8G8B8A8_UNORM)` now says what it reaches: `m_state->format`
+is assigned straight from `description.format` and never re-read from the surface, so it catches
+a substitution that writes the field back -- the one recorded above, and the only assertion in the
+suite that caught it -- and not one that changes `swapchainInfo.imageFormat` alone. What would
+reach that is a readback, and that case asks for none.
+
+**Where the six uncaught mutations stand now.** Each was re-run against the fixed tree, rebuilt
+from a touched source with `ninja` confirmed to have recompiled:
+
+| mutation | was | is |
+|---|---|---|
+| `ToVulkan(TextureLayout::PresentSource)` returns `GENERAL` | both device-free suites byte-identical; device suite CRASHED on a VUID CI never runs | **caught**, 2 of 65 device-free cases red |
+| `ChooseSwapchainExtent` ignores `currentExtent` | 10 of 10 CTest green, device suite byte-identical | **caught**, 4 of 65 cases red, 10 assertions |
+| `ChooseSwapchainImageCount`'s clamp `maxImageCount + 7` | 10 of 10 green, device suite byte-identical | **caught**, 1 case red, 3 assertions |
+| `WindowTestHooks::Monitors` reports one monitor | device suite 14 of 16; CI suite 18 of 18 green with 5 fewer assertions | **caught in both**: CI suite 17 of 18 on `virtualLeft == left`, device suite 16 of 17 |
+| every device refuses to present (`swapchainEnabled` false) | 14 of 16 red with the ten-frames case reporting SUCCESS | **caught**, 16 of 17 red including that case |
+| `BringUp` fails after `vkCreateSwapchainKHR` | `IsInitialized()` true, `ImageCount()` 0, `Acquire` reaching `VUID-vkAcquireNextImageKHR-semaphore-01780`, CRASHED | **caught**, 14 of 17 red, no validation error and no crash |
+
+All six are caught, and four of the six are now caught by a suite CI runs rather than only by the
+one it skips.
+
+**Out of scope and left alone**, on the review's own judgement: `WindowTestHooks`' placement,
+which remains a Task 5 checkbox with its measurement.
 
 ## Verification gates
 
