@@ -10,13 +10,15 @@
 // the claim is now "the only two, both under this per-platform directory, one of which never
 // reaches an app".
 //
-// Checkable, and it has to match the *include* rather than the word, because three other files
-// in this module mention `<Windows.h>` in a comment:
+// Checkable, and it has to match the *include* rather than the word, because several other
+// files mention `<Windows.h>` in a comment:
 //
 //     grep -rniE '^[[:space:]]*#[[:space:]]*include[[:space:]]*<windows\.h>' Source/
 //
-// -- two lines in this module (this file and the TestSupport one) and five in Monarc.Core's own
-// platform layer.
+// -- eight lines across the tree, and every one under a `Private/Platform/Windows/` directory:
+// five in Monarc.Core's platform layer, two in this module (this file and the TestSupport one),
+// and one in Monarc.RHI.Vulkan's `VulkanSurface.cpp`. Counted rather than remembered; the
+// figure this comment carried before A3 Task 5 omitted the last of those.
 //
 // ADR-0016 selects it by *directory*: monarc_module() hands the compiler only the current
 // platform's Private/Platform/<Platform>/ tree, so a macOS build never sees this file rather

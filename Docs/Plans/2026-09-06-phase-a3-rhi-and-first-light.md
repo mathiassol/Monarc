@@ -420,6 +420,17 @@ That capture is the proof that the pixels came from where we think they did.
       includes in test directories while continuing to allow downward ones — which is a
       different rule from the one gate 3 implements and needs a decision before code.
 
+      **Two corrections, made when the decision was taken.** "Rule 3" above is a slip: gate 3 is
+      [Module-Graph](../Architecture/Module-Graph.md)'s rule **4**, the renderer package
+      boundary; rule 3 is kind containment. And a third option was taken instead of either of
+      the two offered — policing the **link line** rather than the includes, as rule 10 and gate
+      14. [Status.md](../Status.md) records why, and why "a test may link at or below its own
+      module's tier" alone would have been the wrong form of it: tier 1 is outside the tier-2
+      package boundary exactly as tier 3 is. Also measured, since the note above calls the
+      protection accidental without proving it: adding that one `target_link_libraries` line and
+      then including `<Monarc/Host/Window.h>` in `TestsDevice/TestVulkanDevice.cpp` compiles
+      clean, and gate 3 reports PASS while it does.
+
 - [ ] **Take `Detail::WindowTestHooks` out of the shipped binary.** They have no shipped caller
       and are nonetheless linked into every app that links `Monarc.Host.Windowed`: `dumpbin
       /imports` on the Release `Monarc.FirstLight.exe` lists `GDI32.dll` (`BitBlt`,
@@ -457,6 +468,14 @@ That capture is the proof that the pixels came from where we think they did.
       no GPU**, so most of it runs in CI. Worth its own pass rather than a comment in four
       files saying "not testable" — the guards are testable, just not in-process, and the
       difference is a harness nobody has written yet.
+
+      **"Four" was an undercount, corrected when the harness was built.** There are
+      **eleven** such places, and one of the four named above cannot be reached at all:
+      `JobSystem::PopQueueLocked`'s guard is private and called only after
+      `AnyQueuedLocked()` returned true under the same lock. Eight of the eleven are covered
+      and three cannot be — the other two being `Guid::Generate`'s entropy guard and the debug
+      messenger's callback. [Status.md](../Status.md) holds the full table and why each of the
+      three is unreachable.
 
 ---
 

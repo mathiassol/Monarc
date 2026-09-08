@@ -191,10 +191,19 @@ conditional there is judged by exactly the rule that governs the shipping half.
 
 The convention exists because of a measured cost. `Monarc.Host.Windowed`'s
 `Detail::WindowTestHooks` — ten functions with no shipped caller, written so that no test in the
-repository includes `<Windows.h>` — were compiled into the module, so the linker put them in
-every app that linked it. `dumpbin /imports` on the Release `Monarc.FirstLight.exe` listed
-`GDI32.dll` as an entire extra system DLL plus twelve USER32 imports no shipped path called; it
-now lists neither. [Status.md](../Status.md) holds both tables.
+repository includes `<Windows.h>` — sat at the foot of `Private/Platform/Windows/Window.cpp`,
+an object every app needs. A static library's members are selected whole and `/OPT:REF` is off
+under `/INCREMENTAL`, so `dumpbin /imports` on the Release `Monarc.FirstLight.exe` listed
+`GDI32.dll` as an entire extra system DLL plus twelve USER32 imports and one KERNEL32 import no
+shipped path called. It now lists none of them. [Status.md](../Status.md) holds both tables.
+
+**What the directory adds beyond a plain translation-unit split is worth being precise about**,
+because the measurement says the split is what removes the imports: with the file added back to
+the module and a *full* link, `GDI32.dll` still does not appear, since no symbol in that
+archive member is referenced and the linker never selects it. That property lasts exactly as
+long as nothing in the module references a helper. Not compiling it into the library at all
+holds regardless of `/OPT:REF`, of the configuration, and of what some future shipped object
+does — and it generalises, which a one-off file split does not.
 
 ## Enforced rules
 

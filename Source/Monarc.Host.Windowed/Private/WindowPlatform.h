@@ -141,11 +141,13 @@ struct WindowPlatform {
 /// `Window`.
 ///
 /// **"No shipped caller" was not the same as "not in the shipped binary", and a review made
-/// the difference measurable.** Until A3 Task 5 these were compiled into
-/// `Monarc.Host.Windowed`, so the linker pulled them into every app that linked the module:
-/// `dumpbin /imports` on the Release `Monarc.FirstLight.exe` listed `GDI32.dll` -- an entire
-/// extra system DLL, for `CaptureScreenPixel`'s `BitBlt` through a DIB -- plus twelve USER32
-/// imports no shipped path calls. `Docs/Status.md` holds the before and after tables.
+/// the difference measurable.** Until A3 Task 5 these sat at the foot of
+/// `Private/Platform/Windows/Window.cpp`, an object every app needs -- and a static library's
+/// members are selected whole, with `/OPT:REF` off under `/INCREMENTAL` -- so
+/// `dumpbin /imports` on the Release `Monarc.FirstLight.exe` listed `GDI32.dll`, an entire
+/// extra system DLL for `CaptureScreenPixel`'s `BitBlt` through a DIB, plus twelve USER32
+/// imports and one KERNEL32 import no shipped path calls. It now lists none of them.
+/// `Docs/Status.md` holds both tables and the counterfactual.
 ///
 /// **Moving them into the test files was considered and rejected.** Four are not wrappers a
 /// test could write for itself: `RequestClientSize` needs `Create`'s own window style, and a

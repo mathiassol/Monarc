@@ -4,8 +4,21 @@
 public headers contain no Vulkan, D3D12, or Metal types. Backends live in
 `Monarc.RHI.{Vulkan,D3D12,Metal}` and are selected at runtime from whatever is linked.
 
+**That first claim is structural rather than a discipline, as of Phase A3, and it is
+checkable.** `Monarc.RHI.Vulkan` links only `Vulkan::Headers` and links it `PRIVATE`, so a
+consumer of the backend's public header is never handed a Vulkan declaration. Every `Vk…` or
+`VK_…` token under `Monarc.RHI/Include/` and `Monarc.RHI.Vulkan/Include/` is in a comment —
+fifty-three mentions, no declarations — and `VK_USE_PLATFORM_WIN32_KHR` is defined in exactly
+two translation units, both under `Private/Platform/Windows/`, of which one includes
+`<Windows.h>` and the other reaches Win32 through `vulkan_win32.h`.
+
 Design decisions: [ADR-0005](../Architecture/Decisions/ADR-0005-rhi-sync-model.md) (barrier
 model), [ADR-0012](../Architecture/Decisions/ADR-0012-backend-rollout.md) (rollout order).
+
+**A note on what "implemented" means in this document.** Everything below marked as a phase's
+work is running and tested; where a number, a byte or a driver behaviour is stated, it was
+measured on the development machine's two GPUs and [Status.md](../Status.md) holds the run. The
+sections on resource binding and on what arrives later are still design, and say so.
 
 ## What the RHI is and is not
 
@@ -32,16 +45,25 @@ have converged. A barrier carries:
 | `accessBefore`, `accessAfter` | How memory was and will be accessed |
 | `layoutBefore`, `layoutAfter` | Texture layout transition (textures only) |
 
-with buffer, texture, and global variants, and support for split barriers.
+with buffer, texture, and global variants. Split barriers are part of the model's *design* and
+are not expressed yet — see below.
 
 **Implemented whole in Phase A3 Task 3** (`Monarc.RHI/Include/Monarc/RHI/Barrier.h`): fifteen
-pipeline stages, eighteen accesses and eight texture layouts, every one translated in both
-directions and tested with no device present, though A3 records three barriers. The membership
-rule for those lists is *not* "what A3 uses" — it is Vulkan 1.3 **core** only, and only stages
-Monarc has a plan for. So `VK_IMAGE_LAYOUT_PRESENT_SRC_KHR` arrives with the swapchain rather
-than here, and the ray-tracing and mesh-shading stages arrive with a phase that schedules them.
-This is the opposite of the rule `Format` in `Types.h` states for itself, and deliberately: a
-format costs a size claim nothing verifies, where a stage costs one row in one switch.
+pipeline stages, eighteen accesses and nine texture layouts, every one translated in both
+directions and tested with no device present. What the engine *records* is fewer, and the
+distinction is worth keeping: `Monarc.FirstLight` issues two texture barriers a frame — into
+`ColorAttachment` before the clear and into `PresentSource` before the present — and the
+readback test adds a third, a buffer barrier into the host stage that makes the copy's writes
+visible to a mapped read.
+
+The membership rule for those lists is *not* "what A3 uses" — it is Vulkan 1.3 **core** only,
+and only stages Monarc has a plan for. Which is why the ray-tracing and mesh-shading stages are
+still absent: they arrive with a phase that schedules them. `PresentSource` is the exception
+that proves the rule rather than breaking it — it needs `VK_KHR_swapchain`, so it was
+deliberately left out of Task 3 and arrived in Task 4 with `ISwapchain`, which is what makes
+the count nine rather than eight. This is the opposite of the rule `Format` in `Types.h` states
+for itself, and deliberately: a format costs a size claim nothing verifies, where a stage costs
+one row in one switch.
 
 **A texture barrier without its layout pair does not compile.** `GlobalBarrier` and
 `BufferBarrier` are aggregates whose fields all default to `None` — so `GlobalBarrier{}` is the
@@ -203,6 +225,17 @@ reallocated would move a slot out from under every handle naming it. A full pool
 `ErrorCode::OutOfMemory`; a stale handle resolves to a failure and never to the slot's new
 occupant ([ADR-0002](../Architecture/Decisions/ADR-0002-handles-not-pointers.md)).
 
+**Where the answer cannot be a `Status`, it is the end of the process — and as of A3 Task 5
+there is a test that says so.** `ICommandList::Barrier` returns void, and a dropped barrier is
+not a refused operation but a synchronisation hole whose symptom is wrong pixels or a GPU hang
+on some driver days later. So a barrier naming a resource this device does not have, or one
+whose handle is stale, ends the process; so does a barrier attempted inside a rendering
+instance, where `vkCmdPipelineBarrier2` has no legal call to make at all. Those three refusals
+have a CTest entry each, under the `gpu` label: a child process reaches the guard with an
+assert handler that declines to break, and the harness requires a non-zero exit and the guard's
+own message. Turning any of the three into a plain `return` turns its entry red, which is the
+regression a comment alone could not stop. `Tools/run_death_test.py` holds the conditions.
+
 ### GPU memory is one allocation per resource, and that is a placeholder
 
 A3 allocates a `VkDeviceMemory` per texture and per buffer. It is honest for a phase that
@@ -361,6 +394,17 @@ out to be load-bearing rather than good practice. Measured with a deliberately i
 `VkApplicationInfo::sType`: with the chain, the error reaches the callback and the process
 stops. Without it, the layer prints the same error to stderr on its own, `vkCreateInstance`
 *succeeds*, and the process exits zero.
+
+**This is the one fatal guard in the tree that A3 Task 5's death-test harness does not cover,
+and the reason is worth stating rather than leaving as a gap in a table.** The three others in
+this document — `Barrier`'s two stale-handle refusals and the rendering-instance one — each got
+a CTest entry, because a test can *call* them. This one cannot be called: the callback is a
+file-static in an anonymous namespace, so reaching it means provoking a genuine
+VALIDATION-severity finding, which means deliberately misusing Vulkan in a way Monarc's own
+guards do not already refuse first. It exists only in Debug, and only where the layer is
+installed, so an entry for it could run on neither the Release presets nor a machine without
+the SDK. What it has instead is the pNext measurement above, which is what proves the mechanism
+rather than the abort.
 
 Release builds create no messenger and load no layers. Asking for validation is not getting it,
 either: a machine with no Vulkan SDK has neither the layer nor the extension, and that is a

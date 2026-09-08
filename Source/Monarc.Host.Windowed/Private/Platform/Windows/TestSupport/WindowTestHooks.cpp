@@ -8,12 +8,22 @@
 // measurement that motivated it.
 //
 // **The measurement, because this file exists for a number.** These ten functions have no
-// shipped caller and were nonetheless compiled into `Monarc.Host.Windowed`, so the linker
-// pulled them into every app that links the module. `dumpbin /imports` on the Release
-// `Monarc.FirstLight.exe` listed `GDI32.dll` -- an entire extra system DLL, for `BitBlt`,
-// `CreateCompatibleDC`, `CreateDIBSection`, `SelectObject`, `DeleteDC`, `DeleteObject` and
-// `GdiFlush`, all from `CaptureScreenPixel` -- plus twelve USER32 imports no shipped path
-// calls. Docs/Status.md has the before and after tables.
+// shipped caller and sat at the foot of `../Window.cpp`, so the linker pulled them into every
+// app that links the module: a static library's members are selected whole, everything
+// references `Window.cpp.obj`, and both MSVC configurations link with `/INCREMENTAL`, which
+// disables `/OPT:REF`. `dumpbin /imports` on the Release `Monarc.FirstLight.exe` listed
+// `GDI32.dll` -- an entire extra system DLL, for `BitBlt`, `CreateCompatibleDC`,
+// `CreateDIBSection`, `SelectObject`, `DeleteDC`, `DeleteObject` and `GdiFlush`, all from
+// `CaptureScreenPixel` -- plus twelve USER32 imports and one KERNEL32 import no shipped path
+// calls. It now lists none of them. Docs/Status.md has both tables.
+//
+// **Being its own translation unit is what removes the imports; being outside the module is
+// what keeps them out.** Measured both ways: with this file added back to the module and a
+// *full* link, `GDI32.dll` still does not appear, because no symbol in this member is
+// referenced and the linker never selects it from the archive. That is a property of nothing
+// referencing it, which lasts exactly as long as nothing does. Not compiling it into the
+// library at all does not depend on `/OPT:REF`, on the configuration, or on a future shipped
+// object leaving it alone.
 //
 // **Still under `Private/Platform/<Platform>/`, which is the point of nesting TestSupport/
 // inside it rather than beside `Private/`.** Two rules keep applying unchanged: the build

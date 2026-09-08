@@ -13,11 +13,15 @@ diagnostics, container, math and platform foundations under test on two compiler
 sanitizers, and `Monarc.Jobs` — the first module beyond `Monarc.Core` — adds a thread
 pool, dependency graph, priorities and instrumentation on top of it.
 
-**A3 is under way: Tasks 1 through 4 are complete.** The module graph has six modules,
-`Monarc.RHI.Vulkan` opens `vulkan-1.dll` itself and brings up a real Vulkan 1.3 instance with a
-fatal validation messenger, adapter enumeration reports the two GPUs on this machine where raw
-enumeration reports five, and there is a logical device on each of them. **`Monarc.FirstLight`
-now opens a window, clears it, and exits zero when it is closed.** Task 5 is close-out. See
+**A3 is under way: Tasks 1 through 4 are complete and Task 5 is in progress.** The module graph
+has six modules, `Monarc.RHI.Vulkan` opens `vulkan-1.dll` itself and brings up a real Vulkan 1.3
+instance with a fatal validation messenger, adapter enumeration reports the two GPUs on this
+machine where raw enumeration reports five, and there is a logical device on each of them.
+**`Monarc.FirstLight` now opens a window, clears it, and exits zero when it is closed.** Task 5
+is close-out: the gate corrections, the gate-3-versus-tests decision, the death-test harness and
+the test-hooks move are done — see
+[A3 Task 5](#a3-task-5-the-gate-corrections-the-death-tests-and-the-test-hooks-move) — and what
+remains depends on reading CI's probe output. See
 [M0 — First Light](Milestones/M0-First-Light.md) for how the phases fit together.
 
 **First light is lit, and it is proved rather than looked at — twice.** A `R8G8B8A8_UNORM`
@@ -229,6 +233,27 @@ confirming it:
   MSVC-style flags CMake hands it: `clang: error: no such file or directory: '/DWIN32'`. The
   four Clang presets now pin `CMAKE_C_COMPILER` to `clang-cl` as well. Worth knowing because
   the failure is a wall of unrecognised-flag errors from a compiler nobody chose.
+- **`dumpbin /imports` can report the previous build's answer. Delete the binary first.**
+  Found in A3 Task 5 while measuring what taking `Detail::WindowTestHooks` out of
+  `Monarc.Host.Windowed` actually saved. The static library had visibly lost the object
+  (`lib /list`: two members, not three), `cmake --build` then reported `ninja: no work to do`,
+  and `dumpbin /imports` on `Monarc.FirstLight.exe` still listed `GDI32.dll` and every USER32
+  entry the hooks had pulled in. Deleting the exe and building again produced the real answer:
+  `GDI32.dll` gone, USER32 down from 33 imports to 21.
+
+  **What was not established is why**, and it is written that way rather than guessed at. Both
+  MSVC configurations link with `/INCREMENTAL` (CMake's default for `Debug` and
+  `RelWithDebInfo`), which disables `/OPT:REF`, so an incremental relink that patches the
+  previous image rather than rebuilding its import table is one candidate; ninja simply not
+  relinking is another, and the intervening build's output was not kept. Either way the rule is
+  the same, and it is the shape this file keeps repeating: a measurement that can report the old
+  answer without failing is not a measurement.
+- **A Python script that rewrites a source file in text mode changes its line endings.**
+  `pathlib.Path.write_text` translates `\n` to `\r\n` on Windows, and `.gitattributes` here
+  says `eol=lf`, so a mutation script that "restored" a file left every line ending altered —
+  `git diff` reports nothing (it normalises) while `git status` reports the file modified, which
+  reads like a failed restore of the content. Pass `newline=""` when round-tripping a source
+  file, and `git checkout --` the file if it has already happened.
 - Ninja 1.13.2 and LLVM's `bin` are on `PATH` as of 2026-09-06, which is what lets
   `CMakePresets.json` pin no absolute tool paths.
 - Windows long paths are **not** enabled (`LongPathsEnabled=0`, `core.longpaths` unset).
@@ -243,7 +268,7 @@ confirming it:
 | A2b | Math — vectors, matrices, quaternions, transforms | **Complete** |
 | A2c | Platform — files, paths, time, threads, dynamic libs, GUID | **Complete** |
 | A2d | Monarc.Jobs — thread pool, dependency graph, priorities | **Complete** |
-| A3 | RHI, Vulkan backend, Host.Windowed | **Tasks 1–2 complete**; 3–5 not started |
+| A3 | RHI, Vulkan backend, Host.Windowed | **Tasks 1–4 complete**; Task 5 in progress (this row said "1–2 complete; 3–5 not started" until A3 Task 5 corrected it) |
 | A4 | Minimal render graph | Not started |
 | B | ShaderCompiler, Shaders, Render | Not started |
 | C | Reflect, Serialize, Assets, Cook | Not started |
@@ -1958,7 +1983,224 @@ All six are caught, and four of the six are now caught by a suite CI runs rather
 one it skips.
 
 **Out of scope and left alone**, on the review's own judgement: `WindowTestHooks`' placement,
-which remains a Task 5 checkbox with its measurement.
+which A3 Task 5 then dealt with — see below.
+
+### A3 Task 5: the gate corrections, the death tests, and the test-hooks move
+
+The half of Task 5 that does not depend on CI's probe output. **Task 5's remaining items — CI's
+findings, the `TestsRuntime/` decision, the "A3 delivered" section and marking A3 complete in
+M0 — are not covered here and are still open.**
+
+**Gate 10 was named for a narrower rule than it enforces, and had never been made to fail.** It
+read "platform conditionals only in Core/Platform"; the mechanism has been the path
+`Private/Platform/<Platform>/`, in any module, since A2c — `PLATFORM_EXEMPT` names no module and
+`gate_platform_containment` walks every module in the graph. The name was harmless while
+`Monarc.Core` was the only module with platform code, and A3 is what made it wrong:
+`Monarc.RHI.Vulkan` and `Monarc.Host.Windowed` both hold genuinely platform-specific code.
+Nothing would have stopped someone "fixing" the mechanism to match the name, because all ten
+existing containment cases built a `Monarc.Core`-shaped tree.
+
+Corrected in the gate, in [Module-Graph](Architecture/Module-Graph.md) rule 7, in
+[M0](Milestones/M0-First-Light.md) gate 10, and in
+[ADR-0012](Architecture/Decisions/ADR-0012-backend-rollout.md)'s second Metal discipline — the
+last as a dated amendment rather than a silent edit. Two non-Core cases pin both directions and
+both were observed failing: scoping `gate_platform_containment` to `Monarc.Core` turns the
+"fails" case red and leaves every other case green; scoping `PLATFORM_EXEMPT` to `Monarc.Core`
+turns the "is exempt" case red.
+
+**Gate 3 made to fail on purpose against the real modules**, which Task 1 could only do against
+stubs. A `#include <Monarc/Host/Window.h>` added to `Monarc.RHI.Vulkan/Private/VulkanSwapchain.cpp`
+— a tier-2 translation unit including a tier-3 header:
+
+```
+[FAIL] Gate 3: renderer package boundary (tier 2 sees no tier 1 or 3)
+         Source/Monarc.RHI.Vulkan/Private/VulkanSwapchain.cpp:29 includes Monarc/Host/ (module Monarc.RHI.Vulkan)
+ARCHITECTURE GATES FAILED
+```
+
+and the build refuses it independently, which is worth having as a second mechanism:
+`fatal error C1083: Cannot open include file: 'Monarc/Host/Window.h': No such file or directory`
+— a tier-2 module does not have that header on its include path.
+
+**Gate 14: a test target links only what its module may depend on.** Gate 3 walks `Include/` and
+`Private/` only, because a test target is not a module, so it cannot see a tier-2 *test* that
+includes `Monarc/Host/`. The plan called the protection accidental; it is, and now measured:
+adding one `target_link_libraries` line to `Monarc.RHI.Vulkan.DeviceTests` and then including
+`<Monarc/Host/Window.h>` in it **compiles clean**, and gate 3 reports PASS while it does.
+
+Three options were on the table. Leaving the exemption documented was rejected because the
+protection is a missing line rather than a rule. Policing *includes* in test directories was
+rejected because it is a different rule from the one gate 3 implements — it would have to tell
+downward includes from upward ones — leaving two boundary rules to keep in agreement. Policing
+the **link line** was chosen: it is the lever, it is exact, and it is a configure-time fact
+CMake already knows.
+
+One correction to that option as stated: "at or below its own module's tier" is not enough. Tier
+1 is outside the tier-2 package boundary exactly as tier 3 is, so a plain downward rule would
+permit `Monarc.RHI.Vulkan.Tests` linking `Monarc.Assets`, which ADR-0007 forbids and gate 3
+already refuses in module code. The rule implemented is *a test target may link only what its
+own module may depend on* — downward by tier, inside the tier-2 package boundary, and never an
+app. `Monarc.Host.Windowed.DeviceTests` linking `Monarc.RHI.Vulkan` stays legal, which it has to.
+
+Observed failing on purpose:
+
+```
+[FAIL] Gate 14: test targets link only what their module may depend on
+         Monarc.RHI.Vulkan.DeviceTests links Monarc.Host.Windowed, which is tier 3, above tier 2 (Monarc.RHI.Vulkan is tier 2)
+```
+
+Not a superset of gate 3: a test that reached a forbidden header through a hand-written
+`target_include_directories`, with no link line, would pass. Recorded in
+[Module-Graph](Architecture/Module-Graph.md) rather than claimed away. `module-graph.json` grew
+a `testTargets` array for it, and escaping that array cost a bug worth remembering — see the
+`monarc_json_escape` entry under [toolchain quirks](#toolchain-quirks-worth-remembering)'s
+neighbours below and the commit: `clang-asan` and `clang-ubsan` put the Clang runtime on the
+link line by absolute Windows path, and unescaped backslashes made the gate unable to parse its
+own input. Caught only because all six presets were run.
+
+**The death-test harness, and the fatal guards it covers.** Monarc has **eleven** places that
+deliberately end the process, and until now not one had a case in any suite. The plan named
+four; the full list, found by grepping for `MONARC_DEBUG_BREAK` followed by `std::abort` and for
+`[[noreturn]]` helpers:
+
+| Guard | Covered | Why not |
+|---|---|---|
+| `Array<T>::OnAllocationFailed` | yes, `unit` | |
+| `HashMap<K,V>::OnAllocationFailed` | yes, `unit` | |
+| `String::OnAllocationFailed` | yes, `unit` | |
+| `Guid::Generate`'s entropy guard | **no** | Fires when `BCryptGenRandom` fails; nothing a test can do makes the platform's preferred RNG fail |
+| `JobSystem`'s `OnResourceExhausted` (5 call sites) | yes, `unit` | Provoked at the profile buffer's allocation — see below |
+| `JobSystem::Wait`'s worker guard | yes, `unit` | |
+| `JobSystem::PopQueueLocked` | **no** | Private, called from `WorkerLoop` only after `AnyQueuedLocked()` returned true under the same lock; no public call, legal or illegal, arrives there |
+| `VulkanCommandList::FailInsideRenderingPass` | yes, `gpu` | |
+| `Barrier(BufferBarrier)`'s stale-handle refusal | yes, `gpu` | |
+| `Barrier(TextureBarrier)`'s stale-handle refusal | yes, `gpu` | |
+| the debug messenger's validation abort | **no** | A file-static callback in an anonymous namespace: reaching it means provoking a real VALIDATION finding, not calling anything. Debug-only and layer-dependent, so it could run on neither Release preset nor a machine without the SDK. What it has instead is the `pNext` measurement in [RHI.md](Rendering/RHI.md) |
+
+Eight covered, three not, each with its reason written where a reader will look.
+
+The shape: a mode flag on an existing test binary (`--monarc-death-guard=<name>`) is the child,
+and `Tools/run_death_test.py` is the parent. Four conditions, each load-bearing — the child
+printed the entered marker (so a mistyped name cannot look like a death), it did not print the
+survived marker, the exit code is non-zero, and the guard's own `MONARC_CHECK` literal is in the
+output. A child that **hangs** is a failure and not a death: `JobSystem::Wait` with its abort
+removed waits on a condition variable forever, and reporting that as caught would hide the one
+regression that guard exists to prevent.
+
+Three details had to be right. The guards only reach their own abort under an assert handler
+that **declines to break** — the default handler breaks inside `MONARC_CHECK`, so a child using
+it would die whatever the guard did, and removing the guard would change nothing. That is the
+configuration every one of these guards is written against and says so in its comment. The mode
+runs in `main` *before* doctest, because doctest's SEH filter catches the debug break and
+reports exit 1 rather than letting the process die. And both markers are flushed explicitly,
+because `MONARC_DEBUG_BREAK()` takes the process without flushing stdio.
+
+**Exit codes are asserted as non-zero and never exactly.** Measured: `0x80000003` — the debug
+break's, not `abort`'s, because `MONARC_DEBUG_BREAK()` runs first. The same value arrives at the
+harness as `-2147483645` from one Python interpreter and `2147483651` from another, which is a
+second reason not to compare numbers.
+
+Five entries need no GPU and run in CI. The three device ones are labelled `gpu` with
+`SKIP_RETURN_CODE 77` and reuse the device suite's binary, whose `main` already returns 77 for a
+missing runtime or an empty adapter list; the harness propagates that. Under a forced no-device
+path all five `gpu` entries report Skipped:
+
+```
+1/5 Test #12: Monarc.RHI.Vulkan.DeviceTests .......................***Skipped   0.02 sec
+2/5 Test #13: Monarc.RHI.Vulkan.Death.BarrierInsideRendering ......***Skipped   0.09 sec
+3/5 Test #14: Monarc.RHI.Vulkan.Death.BufferBarrierStaleHandle ....***Skipped   0.09 sec
+4/5 Test #15: Monarc.RHI.Vulkan.Death.TextureBarrierStaleHandle ...***Skipped   0.09 sec
+5/5 Test #17: Monarc.Host.Windowed.DeviceTests ....................***Skipped   0.03 sec
+```
+
+**Every covered guard was observed both ways, and two of them did not behave as expected.**
+Turned into a plain `return`, six of the eight go red with the survived marker and exit 0 —
+`Array`, both `JobSystem` guards and all three barrier guards. `HashMap` and `String` do not:
+
+| Guard, with its abort turned into a plain return | What actually happened |
+|---|---|
+| `HashMap<K,V>::OnAllocationFailed` (`AllocateEntries`) | still dies, at the *other* guard on the same path — `HashMap.h:357`, `AllocateOccupied`, exit `0x80000003` |
+| `String::OnAllocationFailed` | still dies, at `Reserve`'s `newData[m_size] = '\0'` through the null buffer — exit `0xC0000005` |
+
+Neither has an operation that reaches its guard and then leaves the returned pointer alone, so
+neither can survive its removal. With their `MONARC_CHECK`s removed as well, both go red on the
+missing message — exit `0xC0000005`, nothing printed. So those two entries assert that an
+allocation failure stops the process **and says why**, which is a real regression to catch and
+not the same claim the `Array` entry makes. Written into the guards' own comments, including
+that `String`'s guard buys a message rather than safety: the failure was going to be loud either
+way, where `Array`'s absence would be silent heap corruption.
+
+`OnResourceExhausted` is provoked at the profile buffer's allocation rather than the job pool's
+for the same reason. Failing the pool reaches the guard, but with the guard removed the next line
+is `std::construct_at(&m_slots[0], ...)` through a null pointer — the child would crash either
+way and the entry would pass whether the guard was there or not. The profile buffer is the one
+allocation the rest of the constructor survives, so a threshold allocator refuses anything at or
+above 4096 bytes and nothing else in that constructor is that large.
+
+A death-test child costs about 2.5 s on this machine, almost all of it Windows Error Reporting
+handling the unhandled debug break: the five device-free entries run in 2.4–2.7 s and the three
+device ones in 3.6–5.4 s. `CMake/MonarcTest.cmake`'s `TIMEOUT` note carries the numbers.
+
+**`Detail::WindowTestHooks` out of the shipped binary.** `dumpbin /imports` on the Release
+`Monarc.FirstLight.exe`, before and after:
+
+| | before | after |
+|---|---|---|
+| `GDI32.dll` | 7 (`BitBlt`, `CreateCompatibleDC`, `CreateDIBSection`, `SelectObject`, `DeleteDC`, `DeleteObject`, `GdiFlush`) | **not imported at all** |
+| `USER32.dll` | 33 | 21 |
+| `KERNEL32.dll` | 18 | 17 |
+| `.idata` | 12288 bytes | 8192 |
+| `.rdata` | 290816 bytes | 286720 |
+
+The twelve USER32 imports that went: `BringWindowToTop`, `ClientToScreen`, `GetClassNameW`,
+`GetDC`, `GetDpiForWindow`, `GetMonitorInfoW`, `GetSystemMetrics`, `MonitorFromWindow`,
+`PostMessageW`, `ReleaseDC`, `SetForegroundWindow`, `WindowFromPoint`. The KERNEL32 one is
+`WideCharToMultiByte`, from `WindowAtClientPoint`'s class-name truncation loop. `msvc-debug`
+imports no `GDI32.dll` either.
+
+The mechanism, since the plan's note left it open: a static library's members are selected
+whole, and both MSVC configurations link with `/INCREMENTAL`, which disables `/OPT:REF`. Nothing
+in the app referenced a hook, but everything references `Window.cpp.obj`, and the hooks were at
+the foot of that file — so the dead code and its imports came along. **The counterfactual was
+measured**: with the hooks in a translation unit of their own but added *back* to the module by
+`target_sources`, and a full link, `GDI32.dll` still does not appear, because no symbol in that
+archive member is referenced and the linker never selects it.
+
+So the import saving is attributable to the translation-unit split, and what the
+`Private/**/TestSupport/` convention adds is that the property no longer depends on link-time
+dead-stripping or on nothing in the module ever referencing a helper — plus that it generalises
+to any module wanting test-only code with access to private state. That is a weaker case than
+the import count alone suggested, and it is stated rather than left implied.
+
+The convention: `monarc_module()` does not glob `Private/**/TestSupport/` and
+`_monarc_add_test_binary()` globs it into every test binary of the owning module. Nested
+*inside* `Private/Platform/<Platform>/` so that the build still selects the file by directory
+and gate 10 still governs it — a gate test pins the second, and narrowing `PLATFORM_EXEMPT` to
+direct children of the per-platform directory turns it red. The filter is anchored to `Private/`,
+so a `TestSupport/` under `Include/` is an ordinary public directory rather than a header no
+target compiles while the gates still read it. `kWindowStyle` keeps one definition in
+`Window.cpp` and the new unit reads it through `WindowPlatform::WindowStyle()`, a `u32` so the
+private header still names no platform type.
+
+**Counts.** 18 CTest entries, up from 10: eight death tests added. `Architecture.GateTests`
+grew from 46 cases to 59. Per-suite, on `msvc-debug`:
+
+| Suite | Cases | Assertions |
+|---|---|---|
+| `Monarc.Core.Tests` | 177 | 3667 |
+| `Monarc.Jobs.Tests` | 21 | 8939 |
+| `Monarc.RHI.Tests` | 55 | 189 |
+| `Monarc.RHI.Vulkan.Tests` | 65 | 360 |
+| `Monarc.RHI.Vulkan.DeviceTests` | 38 | 384 |
+| `Monarc.Host.Windowed.Tests` | 18 | 104 |
+| `Monarc.Host.Windowed.DeviceTests` | 17 | 952 |
+
+All six presets configure, build and test green with zero compiler warnings. The swapchain
+readback is unchanged — `(192, 128, 64, 255)` BGRA with 230400 of 230400 pixels exact on both
+the RTX 3070 Ti and the Intel UHD 730 — and the on-screen capture still reads
+`(192, 128, 64, 255)` off the desktop. `Monarc.FirstLight` with no arguments opens a window,
+presented 662 frames before its close button was used, and exited zero; `--frames=N`,
+`--adapter=` and `--adapters` all behave as before.
 
 ## Verification gates
 

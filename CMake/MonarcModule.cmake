@@ -37,13 +37,26 @@ endfunction()
 #
 # The convention exists because of a measured cost. `Monarc.Host.Windowed`'s
 # `Detail::WindowTestHooks` -- ten functions, no shipped caller, there so that no test in the
-# repository includes `<Windows.h>` -- were compiled into the module, so the linker pulled them
-# into every app that links it: `dumpbin /imports` on the Release `Monarc.FirstLight.exe` listed
-# `GDI32.dll` plus a dozen USER32 imports no shipped path calls. Moving them into the two test
-# directories that need them was considered and rejected (four are not wrappers a test could
-# write for itself, and it would put Win32 in two test files and outside the per-platform
-# directory ADR-0016 confines it to), so what is needed is a translation unit the module does
-# not glob and its test binaries do.
+# repository includes `<Windows.h>` -- sat at the foot of `Private/Platform/Windows/Window.cpp`,
+# and `dumpbin /imports` on the Release `Monarc.FirstLight.exe` listed `GDI32.dll` plus twelve
+# USER32 imports no shipped path calls. Moving them into the two test directories that need them
+# was considered and rejected (four are not wrappers a test could write for itself, and it would
+# put Win32 in two test files and outside the per-platform directory ADR-0016 confines it to).
+#
+# **The mechanism was measured too, and it is not quite what the cost suggests.** A static
+# library's members are selected whole: nothing in the app referenced a hook, but everything
+# referenced `Window.cpp.obj`, and both MSVC configurations link with `/INCREMENTAL` -- which
+# disables `/OPT:REF` -- so the dead code and its imports came along. Splitting the hooks into a
+# translation unit of their own is therefore what removes the imports, and the counterfactual
+# confirms it: with this file added back to the module by `target_sources` and a *full* link,
+# `GDI32.dll` still does not appear, because no symbol in that member is referenced and the
+# linker never selects it.
+#
+# So what excluding it from the module buys is not today's import count -- it is that the
+# property no longer depends on link-time dead-stripping or on nothing in the module ever
+# referencing it. Under `/OPT:NOREF` the day some shipped object does reference one hook, every
+# import in that unit returns silently. "Not in the library" holds on every toolchain and
+# configuration; "not currently referenced" holds until someone references it.
 #
 # A directory and not a filename suffix, because a directory composes with the rules already in
 # force: nested inside `Private/Platform/<Platform>/` it inherits the platform selection below
