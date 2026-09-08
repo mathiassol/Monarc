@@ -59,6 +59,25 @@ endfunction()
 # has this module's Private/ on its include path -- so a header may live there too.
 set(MONARC_TEST_SUPPORT_DIR "TestSupport")
 
+# Escapes `value` for use inside a JSON string literal.
+#
+# **Needed because module-graph.json's testTargets carries whatever is on a link line, and on
+# two of the six presets that includes an absolute Windows path.** `clang-asan` and
+# `clang-ubsan` add the Clang runtime by full path -- `C:\Program Files\LLVM\lib\clang\22/...`
+# -- and a backslash written straight into a JSON string makes `\P` and `\2`, which is an
+# invalid escape. Caught by the gate itself failing to parse its own input on those two presets
+# after the key was added, which is the argument for running all six rather than the two that
+# are quickest.
+#
+# Backslash first, then quote: reversing the order would escape the backslashes this function
+# just introduced. Those are the only two characters JSON requires escaped that a CMake target
+# name or path can contain; a control character cannot appear in either.
+function(monarc_json_escape value out_var)
+    string(REPLACE "\\" "\\\\" _escaped "${value}")
+    string(REPLACE "\"" "\\\"" _escaped "${_escaped}")
+    set(${out_var} "${_escaped}" PARENT_SCOPE)
+endfunction()
+
 # Declares a static library that participates in the module graph.
 function(monarc_module)
     _monarc_declare(LIBRARY ${ARGN})
@@ -276,6 +295,10 @@ function(monarc_validate_modules)
         get_property(_dir  GLOBAL PROPERTY MONARC_MOD_${_m}_DIR)
         get_property(_app  GLOBAL PROPERTY MONARC_MOD_${_m}_APP)
         file(RELATIVE_PATH _reldir "${CMAKE_SOURCE_DIR}" "${_dir}")
+        # file(RELATIVE_PATH) yields forward slashes, so this changes nothing today. Escaped
+        # anyway: a module declared outside the source tree would come back absolute, and a
+        # graph that the gates cannot parse is the same outage whichever key produced it.
+        monarc_json_escape("${_reldir}" _reldir)
 
         set(_pubjson "")
         foreach(_d IN LISTS _pub)
@@ -339,7 +362,8 @@ function(monarc_validate_modules)
         set(_linkjson "")
         if(_links)
             foreach(_l IN LISTS _links)
-                list(APPEND _linkjson "\"${_l}\"")
+                monarc_json_escape("${_l}" _lescaped)
+                list(APPEND _linkjson "\"${_lescaped}\"")
             endforeach()
         endif()
         list(JOIN _linkjson ", " _linkjson)
