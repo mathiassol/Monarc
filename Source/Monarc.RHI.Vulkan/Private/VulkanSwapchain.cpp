@@ -284,6 +284,17 @@ struct VulkanSwapchainState {
         return {};
     }
 
+    /// Negotiates with the surface, creates the swapchain, adopts its images and builds every
+    /// semaphore -- or tears down whatever it managed and reports why.
+    ///
+    /// **A swapchain that failed to come up leaves nothing behind, and that is enforced in one
+    /// place rather than asked of every failure path.** `BringUpPartial` below has five
+    /// failures *after* `vkCreateSwapchainKHR` has already succeeded, and a review found that
+    /// none of them undid it: `Recreate` returned the error unchanged, so `IsInitialized()` --
+    /// which reads `swapchain != VK_NULL_HANDLE` -- answered `true` for a swapchain with no
+    /// images and no semaphores, and `Acquire` then passed its own guard and called
+    /// `vkAcquireNextImageKHR` with both a null semaphore and a null fence
+    /// (`VUID-vkAcquireNextImageKHR-semaphore-01780`). Measured; see Docs/Status.md.
     [[nodiscard]] Status BringUp(Extent2D requested);
 
     /// Destroys the swapchain, its images' pool slots and every semaphore, keeping the
@@ -292,6 +303,12 @@ struct VulkanSwapchainState {
     void TearDownSwapchain();
 
     void Shutdown();
+
+private:
+    /// `BringUp`'s work, which may return having half done it. Private and called by nothing
+    /// else, which is what makes `BringUp`'s guarantee a property of this struct rather than a
+    /// rule two callers have to remember.
+    [[nodiscard]] Status BringUpPartial(Extent2D requested);
 };
 
 namespace {
@@ -324,6 +341,26 @@ namespace {
 }  // namespace
 
 Status VulkanSwapchainState::BringUp(Extent2D requested) {
+    Status brought = BringUpPartial(requested);
+    if (!brought && swapchain != VK_NULL_HANDLE) {
+        // **The one place a half-built swapchain is undone, and the condition is exact.**
+        // `swapchain != VK_NULL_HANDLE` is precisely "`vkCreateSwapchainKHR` succeeded and
+        // something after it did not": the only failure before that point which touches the
+        // handle nulls it itself, so a refusal from the surface queries -- the minimised
+        // window's `0 x 0`, a format the surface will not offer -- does not pay for a second
+        // `vkDeviceWaitIdle` here.
+        //
+        // Nulling the handle on each of the five paths was the alternative and this is
+        // strictly more: `TearDownSwapchain` also releases the pool slots `AdoptImage` claimed
+        // and destroys the semaphores that were built before the failure, which nulling the
+        // handle would have left claimed until the next `Recreate` or `Shutdown`. A sixth
+        // failure path added below cannot forget it, which is the property that matters.
+        TearDownSwapchain();
+    }
+    return brought;
+}
+
+Status VulkanSwapchainState::BringUpPartial(Extent2D requested) {
     const InstanceFunctions& instanceFunctions = loader->Instance();
 
     VkSurfaceCapabilitiesKHR capabilities{};
@@ -1073,6 +1110,12 @@ Status VulkanSwapchain::Recreate(Extent2D extent) {
     // A failure here leaves the surface owned and no swapchain, which `IsInitialized()`
     // reports and a further `Recreate` retries -- see that function's comment for why that is
     // the state rather than an attempt to put the old swapchain back.
+    //
+    // **`BringUp` and not `BringUpPartial` is what makes that true**, and it did not used to
+    // be: five of its six failure paths run after `vkCreateSwapchainKHR` has succeeded, and
+    // this line returning their error unchanged is how `IsInitialized()` came to answer `true`
+    // for a swapchain with no images. `BringUp` tears down what it managed; see its
+    // declaration.
     return m_state->BringUp(extent);
 }
 

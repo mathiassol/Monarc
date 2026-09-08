@@ -324,13 +324,60 @@ struct FrameResult {
            Monarc::RHI::BytesPerPixel(kSwapchainFormat);
 }
 
-void ReportBytes(const char* what, const char* adapterName, std::span<const Monarc::u8> bytes) {
+/// Reports a pixel, naming what its fourth byte actually is.
+///
+/// **`fourthByte` is a parameter because the two callers disagree about it, and one shared
+/// format string calling it "alpha" was wrong for one of them.** The swapchain readback's
+/// fourth byte is the image's alpha channel and reads 255; the screen capture's is the unused
+/// byte of a 32-bit `BI_RGB` DIB, which has no defined value and is GDI's padding rather than
+/// anything Monarc wrote. The capture case deliberately does not assert it -- see it -- so a
+/// log line calling it alpha was the only place that claimed otherwise.
+void ReportBytes(const char* what, const char* adapterName, std::span<const Monarc::u8> bytes,
+                 const char* fourthByte) {
     MONARC_LOG(SwapchainTest, Info,
-               "{} on \"{}\": first pixel = ({}, {}, {}, {}) as blue, green, red, alpha; "
+               "{} on \"{}\": first pixel = ({}, {}, {}, {}) as blue, green, red, {}; "
                "expected ({}, {}, {}, {})",
-               what, adapterName, bytes[0], bytes[1], bytes[2], bytes[3],
+               what, adapterName, bytes[0], bytes[1], bytes[2], bytes[3], fourthByte,
                kExpectedSwapchainBytes[0], kExpectedSwapchainBytes[1],
                kExpectedSwapchainBytes[2], kExpectedSwapchainBytes[3]);
+}
+
+/// Asserts that a swapchain which is not initialised answers every query as empty and refuses
+/// every fallible member.
+///
+/// **Four fallible members and not three.** `SubmitForPresent` carries the same
+/// `IsInitialized()` guard as `Acquire`, `Present` and `Recreate`, and was the one of the four
+/// no case had ever called on a swapchain that was not initialised.
+///
+/// `NeedsRecreation()` and `Recreate` are deliberately absent: neither answers the same way in
+/// the two states that reach here. `NeedsRecreation()` is not gated on `IsInitialized()` on
+/// purpose -- a recreation that failed leaves it set, which is exactly the caller that has to
+/// see it -- and `Recreate` refuses a shut-down swapchain, whose surface is gone, while
+/// retrying a failed one. Each case asserts those itself.
+void CheckAnsweredAsEmpty(Harness& harness) {
+    REQUIRE(harness.swapchain.has_value());
+    Monarc::RHI::VulkanSwapchain& swapchain = *harness.swapchain;
+
+    CHECK_FALSE(swapchain.IsInitialized());
+    // **The three accessors agree with `IsInitialized()`, which is the pair of readings that
+    // contradicted each other before a review.** A recreation that failed after
+    // `vkCreateSwapchainKHR` had already succeeded reported `IsInitialized() == true` beside
+    // an `ImageCount()` of 0 and an `Extent()` of `0 x 0`.
+    CHECK(swapchain.Extent().IsEmpty());
+    CHECK(swapchain.ImageCount() == 0);
+    CHECK(swapchain.ImageFormat() == Monarc::RHI::Format::Unknown);
+    CHECK_FALSE(swapchain.ReadbackAvailable());
+
+    // The one that reached Vulkan with a null semaphore and a null fence --
+    // `VUID-vkAcquireNextImageKHR-semaphore-01780`, fatal under the Debug messenger and
+    // silent in Release.
+    CHECK_FALSE(swapchain.Acquire().has_value());
+    CHECK_FALSE(swapchain.Present().has_value());
+
+    const Monarc::Result<Monarc::RHI::ICommandList*> commands = harness.device->BeginFrame();
+    REQUIRE(commands.has_value());
+    CHECK_FALSE(
+        swapchain.SubmitForPresent(harness.device->GraphicsQueue(), **commands).has_value());
 }
 
 }  // namespace
@@ -531,7 +578,7 @@ TEST_CASE("THE SWAPCHAIN READBACK: the clear reaches the image that gets present
         REQUIRE(mapped.has_value());
         REQUIRE(mapped->size() == ReadbackByteCount(extent));
 
-        ReportBytes("swapchain readback", adapter.name, *mapped);
+        ReportBytes("swapchain readback", adapter.name, *mapped, "alpha");
 
         CHECK((*mapped)[0] == kExpectedSwapchainBytes[0]);
         CHECK((*mapped)[1] == kExpectedSwapchainBytes[1]);
@@ -677,7 +724,9 @@ TEST_CASE("THE SCREEN CAPTURE: the window's own pixels are the clear colour") {
                batches, kFramesPerBatch, presented, settled);
     CHECK(settled);
 
-    ReportBytes("screen capture", Adapters()[0].name, pixel);
+    // "GDI padding" and not "alpha": a 32-bit `BI_RGB` DIB's fourth byte has no defined value.
+    // It has read 255 on every run of this that was Monarc's to read, and it is not asserted.
+    ReportBytes("screen capture", Adapters()[0].name, pixel, "GDI padding");
 
     // **Whose pixels those were, asked before they are asserted about.** The desktop has other
     // tenants, and a screen capture that did not check would sooner or later assert about one
@@ -1233,21 +1282,76 @@ TEST_CASE("a swapchain that has been shut down answers every query rather than d
     harness.swapchain->Shutdown();
     harness.swapchain->Shutdown();
 
-    CHECK_FALSE(harness.swapchain->IsInitialized());
-    CHECK(harness.swapchain->Extent().IsEmpty());
-    CHECK(harness.swapchain->ImageFormat() == Monarc::RHI::Format::Unknown);
-    CHECK(harness.swapchain->ImageCount() == 0);
-    CHECK_FALSE(harness.swapchain->ReadbackAvailable());
     CHECK_FALSE(harness.swapchain->NeedsRecreation());
-
-    CHECK_FALSE(harness.swapchain->Acquire().has_value());
-    CHECK_FALSE(harness.swapchain->Present().has_value());
     // Recreate refuses too, and its message says why: the surface went with the shutdown, so
     // only a fresh `CreateSwapchain` can replace it.
     const Monarc::Status recreated =
         harness.swapchain->Recreate(harness.window->ClientSize());
     REQUIRE_FALSE(recreated.has_value());
     CHECK(recreated.error().code == Monarc::ErrorCode::InvalidArgument);
+
+    // The five queries and the other three fallible members, shared with the failed-recreation
+    // case below -- which is what added `SubmitForPresent` to the set. Last, because it takes
+    // a frame from the device to have a command list to refuse.
+    CheckAnsweredAsEmpty(harness);
+}
+
+TEST_CASE("a recreation that fails leaves a swapchain that refuses rather than one that lies") {
+    // **The state `VulkanSwapchain::IsInitialized()` documents and a review measured it not
+    // being in.** `Recreate` tears the swapchain down before it builds, so a `BringUp` that
+    // fails leaves the surface owned and no swapchain -- and every accessor has to say so,
+    // because a caller told `IsInitialized() == true` goes on to `Acquire`, whose own guard is
+    // that same query. What it reached with it passing was
+    // `vkAcquireNextImageKHR` with a null semaphore *and* a null fence:
+    // `VUID-vkAcquireNextImageKHR-semaphore-01780`, fatal under this suite's messenger and
+    // undefined behaviour in a Release build with no layer loaded.
+    //
+    // **A surface whose window is gone is how the failure is reached here, and it is the one
+    // `IsInitialized()`'s comment already names** -- "a window closed under the process". The
+    // window is destroyed with the surface still alive, which `Window::Destroy` says is the
+    // caller's ordering mistake; it is made deliberately, and nothing is presented afterwards.
+    // What the surface queries answer for a dead `HWND` is the driver's to decide, so this
+    // case asserts about whichever answer comes back rather than requiring the failure --
+    // see the two branches below, both of which assert.
+    REQUIRE_FALSE(Adapters().IsEmpty());
+
+    Harness harness;
+    REQUIRE(harness.Open(Adapters()[0], false).has_value());
+
+    harness.window->PumpEvents();
+    REQUIRE(PresentOneFrame(harness, Monarc::RHI::BufferHandle{}).presented);
+    REQUIRE(harness.device->WaitIdle().has_value());
+
+    const Monarc::RHI::Extent2D size = harness.swapchain->Extent();
+    REQUIRE_FALSE(size.IsEmpty());
+
+    harness.window->Destroy();
+    REQUIRE_FALSE(harness.window->IsOpen());
+
+    const Monarc::Status recreated = harness.swapchain->Recreate(size);
+    if (recreated) {
+        // The driver answered the surface queries for a destroyed window and built a swapchain
+        // anyway. Asserted rather than shrugged at: whatever came back has to be internally
+        // consistent, which is the same property the other branch checks from the other side.
+        MONARC_LOG(SwapchainTest, Warning,
+                   "\"{}\" recreated a swapchain on a surface whose window is gone, so the "
+                   "failed-recreation half of this case is unexercised here; what is asserted "
+                   "instead is that the swapchain it returned is self-consistent",
+                   Adapters()[0].name);
+        CHECK(harness.swapchain->IsInitialized());
+        CHECK(harness.swapchain->ImageCount() > 0);
+        CHECK_FALSE(harness.swapchain->Extent().IsEmpty());
+        CHECK(harness.swapchain->ImageFormat() == kSwapchainFormat);
+    } else {
+        MONARC_LOG(SwapchainTest, Info,
+                   "recreating on a surface whose window is gone was refused: {} -- {}",
+                   Monarc::ToString(recreated.error().code), recreated.error().message);
+        CheckAnsweredAsEmpty(harness);
+    }
+
+    // The swapchain is shut down before `~Harness` gets to it either way, so the surface goes
+    // before the device does. It already is in the refused branch; `Shutdown` is idempotent.
+    harness.swapchain->Shutdown();
 }
 
 TEST_CASE("a swapchain is refused what it cannot honour") {

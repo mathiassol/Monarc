@@ -75,6 +75,14 @@ public:
     /// surface is still owned and whose swapchain is gone. Every accessor answers as empty and
     /// a further `Recreate` is what retries; the alternative was keeping a swapchain nobody
     /// could present to and reporting it as live.
+    ///
+    /// **That holds for a recreation that failed *after* `vkCreateSwapchainKHR` succeeded
+    /// too, and for a while it did not.** A review measured `IsInitialized()` answering
+    /// `true`, alongside an `Extent()` of `0 x 0` and an `ImageCount()` of zero, for a
+    /// recreation whose image adoption failed -- and `Acquire` then reached
+    /// `VUID-vkAcquireNextImageKHR-semaphore-01780` with a null semaphore. Bringing a
+    /// swapchain up now tears down whatever it managed before reporting the failure, so there
+    /// is one post-failure state rather than one per failure path.
     [[nodiscard]] bool IsInitialized() const;
 
     // ISwapchain. Every one of these answers safely on a shut-down or moved-from swapchain:
