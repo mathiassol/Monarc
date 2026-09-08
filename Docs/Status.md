@@ -7,21 +7,21 @@ _Last updated: 2026-09-08_
 
 ## Summary
 
-The architecture is designed and recorded, and **phases A1 through A2d are complete**:
+The architecture is designed and recorded, and **phases A1 through A3 are complete**:
 the build mechanically enforces the module graph, `Monarc.Core` has its memory,
 diagnostics, container, math and platform foundations under test on two compilers and two
 sanitizers, and `Monarc.Jobs` — the first module beyond `Monarc.Core` — adds a thread
 pool, dependency graph, priorities and instrumentation on top of it.
 
-**A3 is under way: Tasks 1 through 4 are complete and Task 5 is in progress.** The module graph
-has six modules, `Monarc.RHI.Vulkan` opens `vulkan-1.dll` itself and brings up a real Vulkan 1.3
-instance with a fatal validation messenger, adapter enumeration reports the two GPUs on this
-machine where raw enumeration reports five, and there is a logical device on each of them.
-**`Monarc.FirstLight` now opens a window, clears it, and exits zero when it is closed.** Task 5
-is close-out: the gate corrections, the gate-3-versus-tests decision, the death-test harness and
-the test-hooks move are done — see
-[A3 Task 5](#a3-task-5-the-gate-corrections-the-death-tests-and-the-test-hooks-move) — and what
-remains depends on reading CI's probe output. See
+**A3 is complete, all five tasks.** The module graph has six modules, `Monarc.RHI.Vulkan` opens
+`vulkan-1.dll` itself and brings up a real Vulkan 1.3 instance with a fatal validation
+messenger, adapter enumeration reports the two GPUs on this machine where raw enumeration
+reports five, and there is a logical device on each of them.
+**`Monarc.FirstLight` opens a window, clears it, and exits zero when it is closed.** Task 5 was
+close-out: the gate corrections, the gate-3-versus-tests decision, the death-test harness, the
+test-hooks move, and the two decisions that needed CI's probe output first — see
+[A3 Task 5](#a3-task-5-the-gate-corrections-the-death-tests-and-the-test-hooks-move) and
+[A3 delivered](#a3-delivered), which also states what A3 does *not* prove. See
 [M0 — First Light](Milestones/M0-First-Light.md) for how the phases fit together.
 
 **First light is lit, and it is proved rather than looked at — twice.** A `R8G8B8A8_UNORM`
@@ -86,6 +86,110 @@ The runner's toolchain differs from this machine usefully: the same MSVC family
 (19.51.36256 vs 19.51.36244 here) but **Clang 20.1.8 against 22.1.8 locally**, so the
 pairing spans two Clang major versions. That is better coverage than the MSVC spread that
 was expected and did not materialise.
+
+### What the runners actually have
+
+**Measured, by the CTest entries that exist to measure it — run 34241306503 for the findings
+below, and 34244613524 for the instance version and the runtime suite that 34241306503 could
+not report.** The A3 plan's third rule — a probe always runs and always reports, so that "CI has
+no Vulkan" is an observed fact rather than an assumption — took three commits to actually
+deliver, each fixing the same defect one level down. The entry was registered as always-passing
+and CTest discards a passing test's output, so from Task 2 until Task 5 it printed nothing at
+all; once it printed, it turned out to report the instance version only on the path where
+bring-up *succeeded*, which is not the path a runner takes. `.github/workflows/ci.yml` runs it
+verbosely for the first reason, and `VulkanBackend::State::BringUp` logs the version where it
+reads it for the second.
+
+`runs-on: windows-latest`, which resolved to image **`windows-2025-vs2026`** version
+20260824.214.3 — Windows Server 2025 Datacenter 10.0.26100, working directory
+`D:\a\Monarc\Monarc`, Azure region `eastus`. Visual Studio **18 Enterprise** with MSVC
+19.51.36256.0 (toolset 14.51.36231) and clang-cl 20.1.8, CMake 4.4.2, `python` 3.12.10 on
+`PATH` while CMake selected 3.14.7 from the hosted toolcache. Both Ninja
+(`C:\ProgramData\Chocolatey\bin\ninja.exe`) and LLVM (`C:\Program Files\LLVM\bin`) were already
+on the image, so neither `choco install` in the preflight step ran — it printed the resolved
+paths and nothing else. A fresh `Configuring done` took 34.1 s on the `msvc-debug` job of
+34241306503, including both `FetchContent` fetches, doctest and Vulkan-Headers.
+
+**Vulkan, as measured rather than as assumed:**
+
+| Question | Answer on the runner | How it is known |
+|---|---|---|
+| Is `vulkan-1.dll` there? | **Yes, and it opens.** | `Loader::Open` returned a Loader; a missing library gives `NotFound` and the message `could not open the Vulkan runtime library`, which is not what the log says |
+| Does it export `vkGetInstanceProcAddr`? | **Yes.** | Same: `Open` returns `NotFound` naming that function otherwise |
+| Do the global entry points resolve? | **All four.** | Every entry in `MONARC_VK_GLOBAL_FUNCTIONS` is `Required`, so `Open` returns `NotFound` naming the first null; it returned a Loader |
+| Instance version | **1.3.301**, from `vkEnumerateInstanceVersion` — the same on all six presets | Logged by `VulkanBackend::State::BringUp` where it reads it, which A3 Task 5 added for exactly this — the probe printed it only after `Create` succeeded, and `Create` does not succeed here |
+| Is `VK_KHR_surface` offered? | **No.** | `BringUp`'s required-extension loop refuses with `ErrorCode::Unsupported` and the extension's own name as the message |
+| Instance | **None created.** | Bring-up stops at the line above, before `vkCreateInstance` |
+| Adapters | **None listable.** | No instance to enumerate through |
+
+That is a Vulkan loader with **no ICD registered behind it** — the shape a machine with no
+graphics driver has, and the case `Monarc.RHI.Vulkan`'s loader decision was designed for
+([RHI.md](Rendering/RHI.md#how-the-vulkan-runtime-is-loaded)).
+
+**One inference the run does not license.** What is measured is that `VK_KHR_surface` was not
+in the list `vkEnumerateInstanceExtensionProperties` returned. Nothing logs the *count*, so
+"the runner offers no instance extensions at all" is a plausible reading of a loader with no
+ICD and not something this evidence establishes.
+
+The probe's output, verbatim, from the `msvc-debug` job of 34241306503 — the four non-Debug
+presets print the same four lines with `validation requested false`, since
+`MONARC_VULKAN_VALIDATION` follows `$<CONFIG:Debug>` and only `msvc-debug` and `clang-debug`
+are Debug:
+
+```
+18: Test command: D:\a\Monarc\Monarc\Build\msvc-debug\Source\Monarc.FirstLight\Monarc.FirstLight.exe "--adapters"
+18: [Error  ] FirstLight: probe: the Vulkan backend did not come up: Unsupported -- VK_KHR_surface
+18: [Info   ] FirstLight: probe: validation requested true
+18: [Warning] Vulkan: this Vulkan implementation does not offer the required instance extension VK_KHR_surface
+18: [Info   ] FirstLight: probe: no adapters can be listed on this machine. Exiting zero anyway -- this mode reports, and Monarc.RHI.Vulkan.DeviceTests is the gate.
+```
+
+**The skip behaviour, which is the phase's central rule, is confirmed on a real runner rather
+than by a forced local path.** All six presets of 34241306503 reported `100% tests passed out
+of 18` with five entries listed under CTest's own heading:
+
+```
+The following tests did not run:
+	 12 - Monarc.RHI.Vulkan.DeviceTests (Skipped)
+	 13 - Monarc.RHI.Vulkan.Death.BarrierInsideRendering (Skipped)
+	 14 - Monarc.RHI.Vulkan.Death.BufferBarrierStaleHandle (Skipped)
+	 15 - Monarc.RHI.Vulkan.Death.TextureBarrierStaleHandle (Skipped)
+	 17 - Monarc.Host.Windowed.DeviceTests (Skipped)
+```
+
+Thirteen of eighteen passed, five reported `***Skipped`, and `Monarc.RHI.Vulkan.DeviceTests`
+took 0.23 s to decide it could not run. No `gpu`-labelled entry has ever reported `Passed` in
+CI, which is the property the whole test split exists to hold.
+
+**34244613524 is the same picture with one more entry that runs.** Nineteen entries, fourteen
+passed, the same five `gpu` ones Skipped, on all six presets — and
+`Monarc.RHI.Vulkan.RuntimeTests` **ran** rather than skipping, 5 cases and 27 assertions green
+on every preset. That is the point of the third outcome: it is the first `Monarc.RHI.Vulkan`
+suite touching a real Vulkan runtime that CI has ever executed. Its own line, verbatim from the
+`msvc-debug` job:
+
+```
+12: [Info   ] VulkanRuntimeTest: instance version 1.3.301 through the global table
+12: [Warning] VulkanLoader: "kernel32.dll" opened but does not export vkGetInstanceProcAddr, so it is not a Vulkan runtime library
+12: [doctest] test cases:  5 |  5 passed | 0 failed | 0 skipped
+12: [doctest] assertions: 27 | 27 passed | 0 failed |
+```
+
+The `kernel32.dll` warning is a case succeeding, not a fault: it is "opening a library that is
+not the Vulkan loader still fails on a machine that has one", and the warning is
+`Loader::Open` reporting the thing that case asserts.
+
+**What this measurement corrected.** The A3 plan asserted that "in CI the X-macro resolution
+loops are compiled and never executed, because the device-free suite stops at `Loader::Open`'s
+second check — no `vulkan-1.dll`, no resolution". That is false, and had been since Task 2. The
+**global** loop executes on every CI job and every entry in it resolves; reaching the
+`VK_KHR_surface` refusal is only possible past it. What genuinely does not execute in CI is
+everything from `vkCreateInstance` onward — the instance, debug-utils and device loops all need
+a handle no ICD-less machine can produce — and the resolver macro's `Required`-null *branch*,
+since no global lookup comes back null there. That branch remains covered by mutation only.
+
+The correction cost four device-gated test cases their gate: see
+[A3 delivered](#a3-delivered).
 
 ### Hardware
 
@@ -268,7 +372,7 @@ confirming it:
 | A2b | Math — vectors, matrices, quaternions, transforms | **Complete** |
 | A2c | Platform — files, paths, time, threads, dynamic libs, GUID | **Complete** |
 | A2d | Monarc.Jobs — thread pool, dependency graph, priorities | **Complete** |
-| A3 | RHI, Vulkan backend, Host.Windowed | **Tasks 1–4 complete**; Task 5 in progress (this row said "1–2 complete; 3–5 not started" until A3 Task 5 corrected it) |
+| A3 | RHI, Vulkan backend, Host.Windowed | **Complete** — all five tasks; device half verified locally on two adapters, device-free and runtime halves in CI (this row said "1–2 complete; 3–5 not started" until A3 Task 5 corrected it) |
 | A4 | Minimal render graph | Not started |
 | B | ShaderCompiler, Shaders, Render | Not started |
 | C | Reflect, Serialize, Assets, Cook | Not started |
@@ -2182,8 +2286,63 @@ target compiles while the gates still read it. `kWindowStyle` keeps one definiti
 `Window.cpp` and the new unit reads it through `WindowPlatform::WindowStyle()`, a `u32` so the
 private header still names no platform type.
 
-**Counts.** 18 CTest entries, up from 10: eight death tests added. `Architecture.GateTests`
-grew from 46 cases to 59. Per-suite, on `msvc-debug`:
+**`TestsRuntime/` earned a third test outcome, and the plan was right to defer the decision.**
+The A3 plan listed six cases in `TestsDevice/TestVulkanDevice.cpp` as needing a Vulkan
+*runtime* rather than a *device*, and said the question of whether that was worth a third
+binary depended entirely on what the runners have — which is
+[the section above](#what-the-runners-actually-have). They are exactly that machine. Checked
+case by case against what the runner has, rather than taken as a group of six:
+
+| Case | Needs | Can it run on a loader with no ICD? |
+|---|---|---|
+| a loader that is open transfers on move and leaves the source closed and empty | `Loader::Open` | **Yes** |
+| move-assigning a loader to itself leaves it open | `Loader::Open` | **Yes** |
+| move assignment clears the source's tables, and not only move construction does | two `Loader::Open`s | **Yes** |
+| opening a library that is not the Vulkan loader still fails on a machine that has one | `Platform::Library::SystemLibraryName()` | **Yes** |
+| the instance reports a version at or above Monarc's 1.3 baseline | `Backend().InstanceApiVersion()` | **No** — needs a `VkInstance` |
+| a messenger is only ever installed when the validation layer actually loaded | `Backend().DebugMessengerInstalled()` | **No** — same |
+
+**Four, not six.** The last two read state off a live `VulkanBackend`, and
+`VulkanBackend::Create` is precisely what fails where there is no ICD, so moving them would
+have made a suite that skips honestly into one that cannot run on the machine it was added
+for. They stay `gpu`-labelled.
+
+**The threshold was not the count.** Four cases would not on their own justify a tree-wide test
+convention; what justifies it is that three of them assert an invariant no runner could
+previously execute at all — that `Loader`'s hand-written moves clear the source's tables, so a
+moved-from Loader cannot hold live-looking pointers into a module it no longer owns. The class
+comment gives three paragraphs of reasons and says "verified by defaulting them"; the only
+automated guard was a suite that skips on every machine without a GPU. Both mutations were
+re-run against the new suite:
+
+| Mutation | Result |
+|---|---|
+| `Loader`'s move constructor and move assignment both `= default` | **2 of 5 cases red**, on the two `CHECK(AllTablesEmpty(*source))` lines; 25 of 27 assertions still pass |
+| `this != &other` removed from `Loader::operator=` | **1 of 5 cases red** — the self-assignment one, on both of its assertions (`IsOpen()` false and `vkCreateInstance` null) |
+
+Neither mutation is caught by the other's case, which is why both cases exist. The cost on the
+build side was `monarc_runtime_test_module()` in `CMake/MonarcTest.cmake`, fifteen lines
+delegating to the same `_monarc_add_test_binary()` the other two use.
+
+A fifth case is new rather than moved: it calls `vkEnumerateInstanceVersion` *through* the
+resolved global table. `Loader::Open` refuses a null for any `Required` entry, so a populated
+table only proves the resolver returned something — that it returned the function it was asked
+for is a separate claim, and one call is what tests it. It asserts nothing about Monarc's 1.3
+floor on purpose: an older loader is a *skip* for the device suite, and making it a failure here
+would put this suite in the business of judging a machine it has nothing to say about.
+
+**The stub-DLL idea in the same plan bullet was judged and declined.** A test-only DLL
+exporting a `vkGetInstanceProcAddr` that returns null for one named function would make the
+resolver macro's `Required`-null branch executable in CI. What it would cover shrank with this
+measurement — the success path it was half aimed at now runs on every CI job, and
+`Tests/TestVulkanLoader.cpp` already covers `Open`'s own hand-written null check beside it —
+while what it would cost did not: a test-only *shared library* is a target kind this build has
+never produced, needing a convention, platform selection and a path handed to the test at run
+time. Task 2's mutation stays the evidence for that one branch, and it is written down as such
+rather than left looking covered.
+
+**Counts.** 19 CTest entries, up from 10: eight death tests and the runtime suite added.
+`Architecture.GateTests` grew from 46 cases to 59. Per-suite, on `msvc-debug`:
 
 | Suite | Cases | Assertions |
 |---|---|---|
@@ -2191,9 +2350,13 @@ grew from 46 cases to 59. Per-suite, on `msvc-debug`:
 | `Monarc.Jobs.Tests` | 21 | 8939 |
 | `Monarc.RHI.Tests` | 55 | 189 |
 | `Monarc.RHI.Vulkan.Tests` | 65 | 360 |
-| `Monarc.RHI.Vulkan.DeviceTests` | 38 | 384 |
+| `Monarc.RHI.Vulkan.RuntimeTests` | 5 | 27 |
+| `Monarc.RHI.Vulkan.DeviceTests` | 34 | 363 |
 | `Monarc.Host.Windowed.Tests` | 18 | 104 |
 | `Monarc.Host.Windowed.DeviceTests` | 17 | 952 |
+
+The device suite lost four cases and 21 assertions to the runtime suite, which is where 21 of
+its 27 came from; the remaining six are the new case's.
 
 All six presets configure, build and test green with zero compiler warnings. The swapchain
 readback is unchanged — `(192, 128, 64, 255)` BGRA with 230400 of 230400 pixels exact on both
@@ -2201,6 +2364,97 @@ the RTX 3070 Ti and the Intel UHD 730 — and the on-screen capture still reads
 `(192, 128, 64, 255)` off the desktop. `Monarc.FirstLight` with no arguments opens a window,
 presented 662 frames before its close button was used, and exited zero; `--frames=N`,
 `--adapter=` and `--adapters` all behave as before.
+
+### A3 delivered
+
+**Phase A3 is complete.** `Monarc.FirstLight` opens a window on either of this machine's two
+GPUs, clears it to a known colour through `Monarc.RHI` and a real Vulkan 1.3 backend, and exits
+zero when the window is closed. The five task sections above are the detail; this is the phase
+in one place, and what its evidence does and does not cover.
+
+**What exists.** Six nodes in `module-graph.json` — `Monarc.Core` and `Monarc.Jobs` (tier 0),
+`Monarc.RHI` and `Monarc.RHI.Vulkan` (tier 2), `Monarc.Host.Windowed` (tier 3, the project's
+first) and the `Monarc.FirstLight` app (tier 3) — with a backend-free RHI interface, a Vulkan
+implementation that owns every Vulkan type privately, a Win32 window and surface, a swapchain,
+a timeline-synchronised queue, `synchronization2` barriers, dynamic rendering and a readback
+path.
+
+**What runs, and where.** 19 CTest entries on six presets locally, all green with zero compiler
+warnings; 19 in CI with 14 passing and the 5 `gpu`-labelled entries reporting `***Skipped`.
+
+| Entry | Label | Local | CI |
+|---|---|---|---|
+| `Architecture.Gates`, `Architecture.GateTests` | `architecture` | Pass | Pass |
+| `Monarc.Core.Tests`, `Monarc.Jobs.Tests`, `Monarc.RHI.Tests`, `Monarc.RHI.Vulkan.Tests`, `Monarc.Host.Windowed.Tests` | `unit` | Pass | Pass |
+| 5 death tests over `Monarc.Core` and `Monarc.Jobs` guards | `unit` | Pass | Pass |
+| `Monarc.RHI.Vulkan.RuntimeTests` | `runtime` | Pass | **Pass** |
+| `Monarc.RHI.Vulkan.DeviceTests`, `Monarc.Host.Windowed.DeviceTests`, 3 barrier death tests | `gpu` | Pass | **Skipped** |
+| `Monarc.RHI.Vulkan.Probe` | `probe` | Pass | Pass, and prints |
+
+**Be clear about the shape of the evidence, because the two halves are not equally covered.**
+
+- **Locally, on two vendors, byte-exact.** A `R8G8B8A8_UNORM` texture cleared through
+  `BeginRendering` reads back as `(64, 128, 192, 255)`, and the *swapchain image that gets
+  presented* reads back as `(192, 128, 64, 255)` in the swapchain's own `B8G8R8A8_UNORM` order —
+  230400 of 230400 pixels exact, on both the RTX 3070 Ti and the Intel UHD 730, with no
+  tolerance anywhere. The window's own pixels, read off the desktop with `BitBlt`, agree to the
+  byte. Every `gpu` entry passes here.
+- **In CI, the device-free half only, plus the runtime half as of Task 5.** Everything from
+  `vkCreateInstance` onward is unexecuted there and reported as Skipped rather than Passed.
+  What CI does verify of `Monarc.RHI.Vulkan` is the pure translation layer, the adapter
+  deduplication, the loader's failure paths, and — new in Task 5 — a real `vulkan-1.dll` opened,
+  its four global entry points resolved, one of them called, and `Loader`'s move semantics.
+  See [What the runners actually have](#what-the-runners-actually-have).
+
+**The RenderDoc captures.** Two, one per adapter, in `Build/Captures/` (outside version control
+— `/Build/` is git-ignored), each with an `.rdc` and an XML dump of the frame:
+
+| File | Frame |
+|---|---|
+| `monarc-firstlight-nvidia-rtx3070ti_frame345.rdc` / `.xml` | 345 |
+| `monarc-firstlight-intel-uhd730_frame331.rdc` / `.xml` | 331 |
+
+Read out of the XML dumps rather than eyeballed in the UI, and **identical on both adapters**:
+
+- **Exactly one `vkCmdBeginRendering`**, with `loadOp` `VK_ATTACHMENT_LOAD_OP_CLEAR` and
+  `clearValue.color.float32` = `0.25098040699958801`, `0.50196081399917603`,
+  `0.75294119119644165`, `1` — which is `(64, 128, 192)` over 255, the colour the readback
+  asserts. (The same float appears a second time in each dump as
+  `clearValue.depthStencil.depth`: it is the union's other view of the same four bytes, not a
+  second clear.)
+- **Exactly two `vkCmdPipelineBarrier2`**, and they are the layout transitions the frame needs:
+  `VK_IMAGE_LAYOUT_UNDEFINED` → `VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL` before the clear, and
+  `VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL` → `VK_IMAGE_LAYOUT_PRESENT_SRC_KHR` after it.
+- **Zero render-pass chunks** — no `vkCreateRenderPass`, no `vkCmdBeginRenderPass`. Dynamic
+  rendering is what actually happens, not a fallback that happens to produce the right pixels.
+
+### What A3 does not prove
+
+[M0](Milestones/M0-First-Light.md#what-m0-does-not-prove) states this for the milestone; A3's
+own version is narrower and worth having beside the evidence above.
+
+- **Nothing about the RHI's honesty.** One backend. An abstraction validated against a single
+  implementation is not validated — it is a description of that implementation with an
+  interface in front of it, and every place Vulkan's shape leaked into `Monarc.RHI` is
+  currently invisible. That is what D3D12 immediately after M0 is for
+  ([ADR-0012](Architecture/Decisions/ADR-0012-backend-rollout.md)), and it is a stated
+  consequence of the decision rather than an oversight.
+- **Nothing about anyone else's machine.** Two GPUs, one vendor pair, one driver each, one
+  Windows version, two monitors at equal DPI. The `WM_DPICHANGED` path has never run. The
+  four-duplicate adapter list this machine produces is a fact about this machine, and the
+  dedupe rule it motivated is tested against fixtures rather than against a second machine
+  that needs it.
+- **Nothing about CI having exercised the backend.** CI is green and CI has no GPU. The device
+  half of A3 is verified on exactly one machine, by one person, and reported as Skipped
+  everywhere else — which is honest, and is not the same as covered.
+- **Nothing about macOS.** No machine, no Metal backend, and `Monarc.Host.Headless` does not
+  exist yet, so "the headless binary links no graphics API" is a rule with nothing to check.
+- **Nothing about performance, pacing or device loss.** One clear per frame, FIFO present, no
+  frame pacing, no device-loss recovery. `Monarc.FirstLight` presented 662 frames in a row and
+  exited zero; that is a liveness observation, not a performance one.
+- **Nothing about sRGB clear semantics.** A3 uses UNORM throughout precisely to avoid the
+  question of whether a clear value is encoded or written through unchanged. The phase plan
+  lists it as an open question and Phase B settles it with a shader and a reason to care.
 
 ## Verification gates
 

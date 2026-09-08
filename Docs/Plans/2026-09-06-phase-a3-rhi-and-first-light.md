@@ -393,6 +393,16 @@ That capture is the proof that the pixels came from where we think they did.
       every one could have run. Whether that is worth a third outcome depends entirely on what
       the runners actually have, which is the checkbox above this one.
 
+      **It earned it, and "all six" was an overcount — it is four.** The runners are that
+      machine, measured. But two of the six read state off a live `VulkanBackend`, not off a
+      `Loader`: the instance-version case calls `Backend().InstanceApiVersion()` and the
+      validation-implication case calls `Backend().DebugMessengerInstalled()`, and
+      `VulkanBackend::Create` is exactly what fails where there is no ICD. Those two stay
+      device-gated. The four that moved are the three move cases and the not-the-loader one, and
+      three of those four assert an invariant — that `Loader`'s hand-written moves clear the
+      source's tables — that no runner could previously execute at all.
+      [Status.md](../Status.md) has the case-by-case verdict and both mutations.
+
       Related, and independent of that decision: **in CI the X-macro resolution loops are
       compiled and never executed**, because the device-free suite stops at `Loader::Open`'s
       second check — no `vulkan-1.dll`, no resolution. A test-only DLL exporting a stub
@@ -400,6 +410,31 @@ That capture is the proof that the pixels came from where we think they did.
       "returned null for X" branch executable in CI, and would also make `Loader.cpp`'s
       table-clearing on partial failure observable. Task 2 proved that path by mutation
       instead, which is not the same as covering it.
+
+      **That premise is measured false, and the correction is narrower than its reversal.**
+      `vulkan-1.dll` opens on the runners. The probe's failure is
+      `Unsupported -- VK_KHR_surface`, which `VulkanBackend::State::BringUp` can only reach
+      *after* `Loader::Open` returned a Loader — and `Open` returns one only once
+      `vkGetInstanceProcAddr` resolved and all four Required global entries resolved through it.
+      So in CI the **global** resolution loop executes and every entry in it resolves; that has
+      been true since Task 2, unobserved.
+
+      What still does not execute there is everything past instance creation: the **instance**,
+      **debug-utils** and **device** loops all need a `VkInstance` or a `VkDevice`, and neither
+      exists on a machine with no ICD. Nor does the macro's Required-null *branch* — on the
+      runner no global lookup comes back null, so `Loader.cpp`'s report-and-clear path is still
+      only reached by mutation. `LoadInstanceFunctions`'s table-clearing is unreachable in CI
+      for the same reason it always was.
+
+      **The stub DLL is still not worth building, and the measurement is why rather than
+      despite it.** What it would cover has shrunk to one branch of one macro: the success path
+      it was partly aimed at now runs in CI on every job, and
+      `Tests/TestVulkanLoader.cpp`'s "a real library that is not the Vulkan loader" already
+      covers `Open`'s hand-written null check beside it. What it would cost has not shrunk — a
+      test-only *shared library* is a target kind this build has never produced, needing its own
+      convention, its own platform selection, and a path handed to the test at run time. A
+      third test binary reusing `_monarc_add_test_binary` verbatim cost about fifteen lines; this
+      does not, for less.
 
 ### Notes carried over from Task 4's spec review
 

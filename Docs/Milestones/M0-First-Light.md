@@ -45,20 +45,31 @@ from the start, so BC7 later is a cooker change rather than a format change.
 Each phase ends in something that runs. That is what stops a large first milestone from
 stalling — there is always a working thing, and always a place to redirect.
 
-| Phase | Contents | Runnable proof |
-|---|---|---|
-| **A1** | Build system, `monarc_module`, architecture gates, Core's memory and diagnostics foundation | A build that enforces the architecture, and a tested `Monarc.Core` — [plan](../Plans/2026-09-05-phase-a1-foundation.md) |
-| **A2a** | `Hash`, `String`, `HashMap` | The vocabulary types the rest of Core is written in — [plan](../Plans/2026-09-06-phase-a2a-strings-and-maps.md) |
-| **A2b** | Math — vectors, matrices, quaternions, transforms | Testable math with the conventions of [ADR-0015](../Architecture/Decisions/ADR-0015-math-conventions.md) locked in by tests — [plan](../Plans/2026-09-06-phase-a2b-math.md) |
-| **A2c** | Platform — files, paths, time, threads, dynamic libraries, GUID | The OS boundary, selected by directory rather than `#ifdef` ([ADR-0016](../Architecture/Decisions/ADR-0016-platform-code-selection.md)) — [plan](../Plans/2026-09-06-phase-a2c-platform.md) |
-| **A2d** | `Monarc.Jobs` | A parallel job graph with dependencies, under test — the first module beyond `Monarc.Core` — [plan](../Plans/2026-09-06-phase-a2d-jobs.md) |
-| **A3** | `RHI`, `RHI.Vulkan`, `Host.Windowed` | A window with a cleared screen, via the RHI directly, plus a headless readback test that proves the colour — [plan](../Plans/2026-09-06-phase-a3-rhi-and-first-light.md) |
-| **A4** | Minimal render graph | A window opens and the screen clears **through the real render graph** |
-| **B** | `ShaderCompiler`, `Shaders`, `Render` | A cube renders from in-memory data via `RenderScene` and a Slang shader |
-| **C** | `Reflect`, `Serialize`, `Assets`, `Cook` | A glTF mesh and texture are imported, cooked, loaded by handle, and rendered |
-| **D** | `World`, `Engine` | An Actor with a `StaticMeshComponent` and a camera, in a saved scene |
-| **E** | `Editor` | Viewport, inspector, undo/redo, content browser, play-in-editor |
-| **F** | `Hub`, `Build` | Project created from the Hub; standalone runs; export verified clean |
+The `State` column is a pointer, not the record. [Status.md](../Status.md) is the honest
+account of what is true; a phase is marked complete here once it has a
+`### <phase> delivered` section there.
+
+| Phase | Contents | Runnable proof | State |
+|---|---|---|---|
+| **A1** | Build system, `monarc_module`, architecture gates, Core's memory and diagnostics foundation | A build that enforces the architecture, and a tested `Monarc.Core` — [plan](../Plans/2026-09-05-phase-a1-foundation.md) | **Complete** |
+| **A2a** | `Hash`, `String`, `HashMap` | The vocabulary types the rest of Core is written in — [plan](../Plans/2026-09-06-phase-a2a-strings-and-maps.md) | **Complete** |
+| **A2b** | Math — vectors, matrices, quaternions, transforms | Testable math with the conventions of [ADR-0015](../Architecture/Decisions/ADR-0015-math-conventions.md) locked in by tests — [plan](../Plans/2026-09-06-phase-a2b-math.md) | **Complete** |
+| **A2c** | Platform — files, paths, time, threads, dynamic libraries, GUID | The OS boundary, selected by directory rather than `#ifdef` ([ADR-0016](../Architecture/Decisions/ADR-0016-platform-code-selection.md)) — [plan](../Plans/2026-09-06-phase-a2c-platform.md) | **Complete** |
+| **A2d** | `Monarc.Jobs` | A parallel job graph with dependencies, under test — the first module beyond `Monarc.Core` — [plan](../Plans/2026-09-06-phase-a2d-jobs.md) | **Complete** |
+| **A3** | `RHI`, `RHI.Vulkan`, `Host.Windowed` | A window with a cleared screen, via the RHI directly, plus a headless readback test that proves the colour — [plan](../Plans/2026-09-06-phase-a3-rhi-and-first-light.md) | **Complete** — [what it delivered, and what it does not prove](../Status.md#a3-delivered) |
+| **A4** | Minimal render graph | A window opens and the screen clears **through the real render graph** | Not started |
+| **B** | `ShaderCompiler`, `Shaders`, `Render` | A cube renders from in-memory data via `RenderScene` and a Slang shader | Not started |
+| **C** | `Reflect`, `Serialize`, `Assets`, `Cook` | A glTF mesh and texture are imported, cooked, loaded by handle, and rendered | Not started |
+| **D** | `World`, `Engine` | An Actor with a `StaticMeshComponent` and a camera, in a saved scene | Not started |
+| **E** | `Editor` | Viewport, inspector, undo/redo, content browser, play-in-editor | Not started |
+| **F** | `Hub`, `Build` | Project created from the Hub; standalone runs; export verified clean | Not started |
+
+**A3's proof is met with one qualification, stated because the column cannot hold it.** The
+window, the clear and the byte-exact readback are real on both of this machine's adapters. They
+are verified on *this machine only*: GitHub's runners have a Vulkan loader with no driver behind
+it, so every device-requiring entry reports Skipped there rather than Passed. A3 also added a
+third test outcome for what needs the runtime but not a device, which CI does run — see
+[Status.md](../Status.md#what-the-runners-actually-have).
 
 ## Verification gates
 

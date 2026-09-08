@@ -189,7 +189,8 @@ were behind the device gate could have been running in CI from the day they were
 **`Private/**/TestSupport/` is the one that needs explaining.** `monarc_module()` does not glob
 it; `_monarc_add_test_binary()` globs it into *every* test binary of the owning module. It is
 for code that is neither a test nor part of the module: helpers that need the module's private
-state or its platform headers, that two suites share, and that must not reach a shipped binary.
+state or its platform headers, that more than one suite shares, and that must not reach a
+shipped binary.
 
 Two places, one name — `Private/TestSupport/` for platform-neutral helpers, and
 `Private/Platform/<Platform>/TestSupport/` for one platform's. The nesting is deliberate and

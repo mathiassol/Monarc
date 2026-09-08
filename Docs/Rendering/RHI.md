@@ -123,6 +123,15 @@ Two things make that a property rather than a discipline:
   rather than `find_package(Vulkan)`. A CI runner with no SDK still configures and builds — see
   [ADR-0014](../Architecture/Decisions/ADR-0014-dependency-policy.md).
 
+**And the case this was designed for is now a machine that exists, rather than a hypothesis.**
+GitHub's `windows-2025-vs2026` image has `vulkan-1.dll` and no ICD registered behind it, which
+is what a player with no graphics driver installed looks like. Measured there in A3 Task 5:
+`Loader::Open` succeeds, all four global entry points resolve, and `VulkanBackend::Create`
+refuses afterwards with `ErrorCode::Unsupported` naming `VK_KHR_surface` — an ordinary `Result`
+with a message, which is the whole of what this decision was for. What the runners do *not*
+demonstrate is the import-library failure mode itself: that needs the DLL to be absent, and
+theirs is present. See [Status.md](../Status.md#what-the-runners-actually-have).
+
 ### The lifecycle is a factory, and the messages are literals
 
 `Detail::Loader::Open` and `VulkanBackend::Create` are static functions returning a

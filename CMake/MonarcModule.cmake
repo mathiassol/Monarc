@@ -359,7 +359,7 @@ function(monarc_validate_modules)
     #
     # Read here rather than in _monarc_add_test_binary because a module's CMakeLists.txt appends
     # to the link line after that function returns -- Monarc.Host.Windowed's device suite and
-    # Monarc.RHI.Vulkan's two suites all do. This function runs once from the top-level
+    # Monarc.RHI.Vulkan's three suites all do. This function runs once from the top-level
     # CMakeLists after every add_subdirectory, which is the first moment the answer is final.
     #
     # LINK_LIBRARIES is the *direct* link line, which is the right granularity: a transitive

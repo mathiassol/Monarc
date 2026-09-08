@@ -22,9 +22,10 @@ include(MonarcModule)
 #   Monarc.RHI.Vulkan.RuntimeTests     0.05 s   <- opens a library; creates no instance at all
 #   every other unit suite            <0.25 s
 #
-# A3 Task 5 added a *ninth* kind, and it is slower than it looks: a death test's child ends at
-# an unhandled debug break, and Windows Error Reporting spends about two and a half seconds on
-# that before the process is gone. Measured on msvc-debug -- the device-free entries 2.4 to
+# A3 Task 5 added two more kinds, at opposite ends. The runtime suite is the cheapest entry in
+# the tree -- it opens a library and creates nothing. A death test is slower than it looks: its
+# child ends at an unhandled debug break, and Windows Error Reporting spends about two and a
+# half seconds on that before the process is gone. Measured on msvc-debug -- the device-free entries 2.4 to
 # 2.7 s each and the three device ones 3.6 to 5.4 s, the difference being Vulkan bring-up. So
 # 60 s is ~11x the slowest of them, and Tools/run_death_test.py's own 30 s timeout fires first
 # anyway, which is deliberate: the harness's message about a guard that hung is more use than
@@ -40,11 +41,11 @@ include(MonarcModule)
 set(MONARC_TEST_TIMEOUT_SECONDS 60)
 set(MONARC_DEVICE_TEST_TIMEOUT_SECONDS 180)
 
-# The shared body of monarc_test_module() and monarc_device_test_module(): build one test
-# executable from `source_dir` under the calling module's directory, link doctest and the
-# module, and hand it back through `out_target`. Nothing is registered with CTest here --
-# registration is the only thing the two callers actually differ in, and it is the thing that
-# matters.
+# The shared body of monarc_test_module(), monarc_runtime_test_module() and
+# monarc_device_test_module(): build one test executable from `source_dir` under the calling
+# module's directory, link doctest and the module, and hand it back through `out_target`.
+# Nothing is registered with CTest here -- registration is the only thing the three callers
+# actually differ in, and it is the thing that matters.
 #
 # Underscore-prefixed because it is not part of the vocabulary a CMakeLists.txt should use, the
 # same convention _monarc_declare follows in MonarcModule.cmake.
@@ -65,8 +66,8 @@ function(_monarc_add_test_binary module source_dir target_suffix out_target)
     # MONARC_TEST_SUPPORT_DIR in MonarcModule.cmake holds the convention and the measurement
     # that motivated it; monarc_module() drops exactly these files.
     #
-    # Both trees are globbed for every test binary of the module, so a helper two suites need
-    # is written once. The per-platform one is named directly rather than filtered afterwards,
+    # Both trees are globbed for every test binary of the module, so a helper several suites
+    # need is written once. The per-platform one is named directly rather than filtered afterwards,
     # which is what keeps a Windows-only file from ever reaching a macOS compiler.
     monarc_platform_directory(_monarc_platform)
     file(GLOB_RECURSE _support_sources CONFIGURE_DEPENDS
@@ -260,7 +261,7 @@ endfunction()
 
 # Registers a CTest entry whose job is to print, not to assert.
 #
-# The third of Phase A3's three test outcomes. A probe runs on every machine, reports what it
+# The fourth of Phase A3's four test outcomes. A probe runs on every machine, reports what it
 # found -- loader present or not, instance version, the raw and deduplicated adapter lists --
 # and exits zero regardless of what it finds. Its value is that it puts the truth about each
 # machine into the CI log, so "CI has no Vulkan" becomes an observed fact in the record rather
