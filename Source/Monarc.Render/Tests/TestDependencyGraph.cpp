@@ -385,6 +385,65 @@ TEST_CASE("two cycles in one graph stay apart") {
     CHECK(inspection.diagnostics[0].group != inspection.diagnostics[2].group);
 }
 
+TEST_CASE("two cycles sharing a pass arrive as one group of three") {
+    // **The deviation's own headline behaviour, which nothing asserted until this case.** A
+    // group is a set of passes among which no order exists rather than an elementary cycle, so
+    // two cycles that share a pass are *one* group of three. Every other cycle case in this
+    // file has independent cycles, where the two readings agree; the hand-built case in
+    // Tests/TestGraphInspection.cpp renders two overlapping groups of two, and says in its own
+    // comment that the detector cannot produce that report -- this is the case that pins what
+    // the detector produces instead.
+    //
+    // Pass 1 is in both cycles: 0 and 1 depend on each other through `P` and `Q`, 1 and 2
+    // through `R` and `S`. An elementary-cycle enumeration would report {0,1} and {1,2} -- four
+    // rows, pass 1 named twice, in two groups. A detector that split the mutually-dependent set
+    // any other way would produce some other count. Three rows in one group is the only answer
+    // that passes below.
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    Result<PassBuilder> first = graph.AddPass("First");
+    REQUIRE(first.has_value());
+    const Result<TextureId> p = first->CreateTexture("P", kBaseDescription);
+    REQUIRE(p.has_value());
+    const Result<TextureId> q = first->CreateTexture("Q", kBaseDescription);
+    REQUIRE(q.has_value());
+    const Result<TextureId> r = first->CreateTexture("R", kBaseDescription);
+    REQUIRE(r.has_value());
+    const Result<TextureId> s = first->CreateTexture("S", kBaseDescription);
+    REQUIRE(s.has_value());
+    REQUIRE(first->Write(*p, ResourceAccess::ColorAttachmentWrite));
+    REQUIRE(first->Read(*q, ResourceAccess::SampledRead));
+
+    Result<PassBuilder> middle = graph.AddPass("Middle");
+    REQUIRE(middle.has_value());
+    REQUIRE(middle->Read(*p, ResourceAccess::SampledRead));
+    REQUIRE(middle->Write(*q, ResourceAccess::ColorAttachmentWrite));
+    REQUIRE(middle->Write(*r, ResourceAccess::ColorAttachmentWrite));
+    REQUIRE(middle->Read(*s, ResourceAccess::SampledRead));
+
+    Result<PassBuilder> last = graph.AddPass("Last");
+    REQUIRE(last.has_value());
+    REQUIRE(last->Read(*r, ResourceAccess::SampledRead));
+    REQUIRE(last->Write(*s, ResourceAccess::ColorAttachmentWrite));
+
+    REQUIRE_FALSE(graph.Compile().has_value());
+
+    const GraphInspection inspection = graph.Inspect();
+    // Three rows, not four: the shared pass is named once.
+    REQUIRE(inspection.diagnostics.size() == 3u);
+    CHECK(inspection.diagnosticsDropped == 0u);
+    CHECK(DiagnosticsOfKind(inspection, DiagnosticKind::DependencyCycle) == 3);
+    for (Monarc::u32 i = 0; i < 3u; ++i) {
+        CHECK(inspection.diagnostics[i].pass == i);
+        CHECK(inspection.diagnostics[i].group != kNoDiagnosticGroup);
+    }
+    // One group, not two -- the assertion the case exists for, and the one that separates a set
+    // of mutually dependent passes from an enumeration of cycles.
+    CHECK(inspection.diagnostics[1].group == inspection.diagnostics[0].group);
+    CHECK(inspection.diagnostics[2].group == inspection.diagnostics[0].group);
+}
+
 TEST_CASE("a pass that depends on a cycle is not itself in one") {
     // **The set a group reports is the passes with no order *among themselves*, and a pass that
     // merely reads what a cycle produces is not one of them.** It has no order either -- nothing
