@@ -610,6 +610,43 @@ TEST_CASE("a read-modify-write of a transient nothing else writes is not refused
     CHECK(graph.Inspect().diagnostics.empty());
 }
 
+TEST_CASE("two read-modify-write passes on one resource are a cycle") {
+    // **The step `DiagnosticKind::UnorderedOverwrite`'s completeness argument rests on, and it
+    // belongs to the *cycle* refusal rather than to that one.** That predicate is "a read, plus
+    // two or more passes that write and do not read", and what makes it complete is that a
+    // writer which also reads has every other writer of the resource before it -- so it is the
+    // last write before anyone else's read, and there can be at most one of them. At most one,
+    // because two are exactly this graph: each writes what the other reads, in both directions,
+    // on one resource and with no other declaration involved.
+    //
+    // So the report is two `DependencyCycle` rows in one group and **no** `UnorderedOverwrite`
+    // row: neither pass is a write-only writer, so the count that refusal takes is zero. A
+    // completeness argument that had been wrong here would show up as the wrong kind.
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    PassBuilder             blend  = AnchoredPass(graph, "Blend", 0);
+    const Result<TextureId> target = blend.CreateTexture("Target", kBaseDescription);
+    REQUIRE(target.has_value());
+    REQUIRE(blend.Read(*target, ResourceAccess::ColorAttachmentRead));
+    REQUIRE(blend.Write(*target, ResourceAccess::ColorAttachmentWrite));
+
+    PassBuilder accumulate = AnchoredPass(graph, "Accumulate", 1);
+    REQUIRE(accumulate.Read(*target, ResourceAccess::ColorAttachmentRead));
+    REQUIRE(accumulate.Write(*target, ResourceAccess::ColorAttachmentWrite));
+
+    REQUIRE_FALSE(graph.Compile().has_value());
+
+    const GraphInspection inspection = graph.Inspect();
+    REQUIRE(inspection.diagnostics.size() == 2u);
+    CHECK(DiagnosticsOfKind(inspection, DiagnosticKind::DependencyCycle) == 2);
+    CHECK(DiagnosticsOfKind(inspection, DiagnosticKind::UnorderedOverwrite) == 0);
+    CHECK(inspection.diagnostics[0].pass == 0u);
+    CHECK(inspection.diagnostics[1].pass == 1u);
+    CHECK(inspection.diagnostics[0].group == inspection.diagnostics[1].group);
+    CHECK(inspection.diagnostics[0].group != kNoDiagnosticGroup);
+}
+
 TEST_CASE("the frame this sort would have ordered wrong is refused instead") {
     // **The declaration the graph used to accept and answer wrongly, which is worse than a
     // refusal and worse than a crash.** "A renders into T, B samples T, C reuses T as a scratch
