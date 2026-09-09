@@ -98,6 +98,7 @@ constexpr DiagnosticKind kAllDiagnosticKinds[] = {
     DiagnosticKind::DuplicateImport,         DiagnosticKind::InvalidImport,
     DiagnosticKind::RecordAlreadySet,        DiagnosticKind::AlreadyCompiled,
     DiagnosticKind::DependencyCycle,         DiagnosticKind::TransientNeverWritten,
+    DiagnosticKind::UnorderedOverwrite,
 };
 
 // ---------------------------------------------------------------------------------------
@@ -165,6 +166,7 @@ constexpr DiagnosticKind kAllDiagnosticKinds[] = {
         case DiagnosticKind::AlreadyCompiled:
         case DiagnosticKind::DependencyCycle:
         case DiagnosticKind::TransientNeverWritten:
+        case DiagnosticKind::UnorderedOverwrite:
             return true;
     }
     return false;

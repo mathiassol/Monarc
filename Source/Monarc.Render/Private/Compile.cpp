@@ -36,13 +36,29 @@
 // order. Their relative order is settled by the sort's declaration-order tie-break instead,
 // which is what a caller who wrote them in that order asked for.
 //
+// That tie-break is an answer only while **nothing reads** the twice-written resource, which is
+// the case above: no read means no access whose contents depend on which write came last. Put a
+// read on it and the two unordered writes stop being harmless and the graph refuses --
+// `RefuseUnorderedOverwrites` below is that refusal, and derives its exact shape from this rule
+// and the next one.
+//
 // **No write-after-read edge either, and this one cannot be written down at all.** An
 // anti-dependency is "this read must happen before that overwrite", which presupposes knowing
 // which of the two comes first -- and that is the thing being computed. Adding the edge
 // naively is self-contradictory: any resource with a writer P and a reader Q gets a
 // write-then-read edge P->Q *and* a read-then-write edge Q->P, so every single
-// producer/consumer pair in the graph would be reported as a cycle. So a read of a resource
-// another pass overwrites is ordered by the tie-break, exactly as two writes are.
+// producer/consumer pair in the graph would be reported as a cycle.
+//
+// **What follows from that is the opposite of a tie-break, and it is worth stating plainly
+// because a comment here claimed the opposite until a review measured it.** A read is *not*
+// ordered against an overwrite by the tie-break: the write-then-read edge puts every writer of
+// a resource before every different pass that reads it, so an inter-pass write-after-read is
+// not merely untested here, it is unrepresentable -- P is before Q in every topological order
+// this sort can produce. `RefuseUnorderedOverwrites` is where that stops being a silent wrong
+// answer: the declaration that needs the missing edge is refused rather than ordered, and
+// `DiagnosticKind::UnorderedOverwrite` says that resource versioning is what would make it
+// expressible. `RefuseUnwrittenTransients` leans on the same theorem for the opposite
+// purpose, and states it again at its own head.
 //
 // **And no self-edge.** A pass that declares both a read and a write of one resource is the
 // read-modify-write attachment `PassBuilder::Write` states is legal -- a `LoadOp::Load` target
@@ -442,6 +458,115 @@ Status RenderGraph::RefuseUnwrittenTransients() {
                "RenderGraph::Compile: a transient this build reads is written by no pass");
 }
 
+bool RenderGraph::PassReadsResource(u32 pass, u32 resource) const {
+    for (const u32 index : AccessesOfResource(resource)) {
+        const AccessInspection& access = m_accesses[index];
+        if (access.pass == pass && !IsWrite(access.access)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+Status RenderGraph::RefuseUnorderedOverwrites() {
+    // **The one declaration this graph would answer wrongly rather than refuse, and the reason
+    // this stage exists.** Take the ordinary frame "A renders into T, B samples T, C reuses T
+    // as a scratch target". A writes T, B reads T, C writes T; the edges are A->B and C->B and
+    // there is no A/C edge, because there is deliberately no write-after-write one. In-degrees
+    // are A:0, B:2, C:0, so lowest-ready-first places A, then C, then B -- and B samples what C
+    // already overwrote. The declaration's meaning is not in doubt; the order the sort emits
+    // for it reads the wrong bytes, and nothing said so.
+    //
+    // **The fix is not an extra edge, it is versioning, and Monarc has none.** "This read
+    // happens before that overwrite" needs the two accesses to name different things -- A
+    // writes version 1, B reads version 1, C writes version 2 -- and then C's write is ordered
+    // after B's read by a write-after-read edge between two distinct versions. Without
+    // versions the read and the overwrite name one resource, the anti-dependency cannot be
+    // written down (the head of this file argues why), and the frame is unrepresentable. So it
+    // is refused. `DiagnosticKind::UnorderedOverwrite` carries that in the report; the shapes
+    // refused here become legal declarations when versioning arrives.
+    //
+    // **The predicate, derived from the edge rule rather than guessed.** Every foreign write of
+    // a resource precedes every read of it, in every order this sort can produce, so what a
+    // read sees is the *last* foreign write -- and that is determined only if the foreign
+    // writers have a last one that every order agrees on. A writer that also reads the resource
+    // has every other writer of it before it, by the same edge, so it is that last write; and
+    // there is at most one such pass, because two of them are a two-pass cycle on that resource
+    // alone and are already refused as one. Writers that do *not* read the resource have no
+    // edge between them, so nothing declared orders them and the declaration-order tie-break
+    // picks which one a reader sees. **Two of those plus one read is exactly the refusable
+    // shape**, and everything else on one resource is orderable as declared:
+    //
+    //   - one writer and any number of readers -- one foreign write, so no choice to make;
+    //   - a read-modify-write pass alone with a resource -- no foreign write at all;
+    //   - one write-only writer and one read-modify-write pass, the `LoadOp::Load` chain
+    //     `PassBuilder::Write` calls legal: the writer is ordered before the modifier by the
+    //     edge on the resource itself, so the modifier's read has a determined write behind it
+    //     and any later reader has the modifier's write behind it;
+    //   - two writers and *no* reader, which is the write-after-write case this file's head
+    //     argues is not ordered by anything real and is settled by the tie-break on purpose.
+    //     Nothing reads it, so nothing reads the wrong bytes.
+    //
+    // **It needs no execution order**, for `RefuseUnwrittenTransients`' reason: it counts
+    // declarations, and the counts are the same whatever order the sort found or failed to
+    // find.
+    //
+    // **This is an addition, not a checkbox.** No line of the phase plan's Task 2 asks for it;
+    // it follows from the edge rule, and it exists because a review proved the consequence of
+    // that rule and nothing in the suite had noticed. It is recorded as an addition so a later
+    // reader does not take it for a requirement and preserve it for the wrong reason -- and the
+    // plan's open questions record what it costs Task 3, which now has no inter-pass
+    // write-after-read declaration left to exercise.
+    bool refused = false;
+
+    for (u32 resource = 0; resource < static_cast<u32>(m_resources.Size()); ++resource) {
+        u32 firstRead       = kNoPass;
+        u32 firstWriteOnly  = kNoPass;
+        u32 secondWriteOnly = kNoPass;
+
+        for (const u32 index : AccessesOfResource(resource)) {
+            const AccessInspection& access = m_accesses[index];
+            if (!IsWrite(access.access)) {
+                if (firstRead == kNoPass) {
+                    firstRead = access.pass;
+                }
+                continue;
+            }
+            // Distinct *passes* are what count, not accesses: one pass may declare two
+            // different writes of one resource, and that is one writer.
+            if (access.pass == firstWriteOnly || access.pass == secondWriteOnly ||
+                PassReadsResource(access.pass, resource)) {
+                continue;
+            }
+            if (firstWriteOnly == kNoPass) {
+                firstWriteOnly = access.pass;
+            } else if (secondWriteOnly == kNoPass) {
+                secondWriteOnly = access.pass;
+            }
+        }
+        if (firstRead == kNoPass || secondWriteOnly == kNoPass) {
+            continue;
+        }
+
+        // One row for the resource, `TransientNeverWritten`'s shape and its reason: one
+        // resource declared this way is one mistake however many passes read or overwrite it.
+        // The pass named is the one that declared the earliest read, which is the access that
+        // would have been handed the wrong bytes.
+        static_cast<void>(Refuse(DiagnosticKind::UnorderedOverwrite, ErrorCode::InvalidArgument,
+                                 "RenderGraph::Compile: this pass reads a resource two other "
+                                 "passes overwrite in no declared order",
+                                 firstRead, m_resources[resource].id));
+        refused = true;
+    }
+
+    if (!refused) {
+        return {};
+    }
+    return Err(ErrorCode::InvalidArgument,
+               "RenderGraph::Compile: a resource this build reads is written by two passes "
+               "nothing orders");
+}
+
 void RenderGraph::CullPasses() {
     // **A pass survives because something consumes what it wrote, and a recording callback is
     // not something it wrote.** ADR-0006's contract is that a pass declares its reads and
@@ -660,21 +785,26 @@ Status RenderGraph::Compile() {
 
     BuildAccessBuckets();
 
-    // **The two refusals both run, and neither short-circuits the other, because they are
-    // about different mistakes.** A cycle is a mutual dependency and an unwritten transient is
-    // an absent one; a build can have both, and reporting only whichever check happens to run
-    // first would hide half of what is wrong from the one report the caller gets to read. The
-    // cycle's rows come first because that is the order the stages run in, and the code the
-    // caller is handed is the cycle's for the same reason.
+    // **All three refusals run, and none short-circuits another, because they are about
+    // different mistakes.** A cycle is a mutual dependency, an unwritten transient is an absent
+    // one, and an unordered overwrite is a dependency the declarations cannot express at all; a
+    // build can have all three, and reporting only whichever check happens to run first would
+    // hide most of what is wrong from the one report the caller gets to read. The cycle's rows
+    // come first because that is the order the stages run in, and the code the caller is handed
+    // is the earliest failing stage's for the same reason.
     const Status ordered    = OrderPasses();
     const Status allWritten = RefuseUnwrittenTransients();
-    if (!ordered || !allWritten) {
+    const Status allOrdered = RefuseUnorderedOverwrites();
+    if (!ordered || !allWritten || !allOrdered) {
         // Nothing downstream runs, so no execution order, culling decision, lifetime or alias
         // group is reported: every pass keeps `executionOrder == kNoPass` and `culled == false`,
         // and every resource an empty lifetime and no group. A graph that had reported half a
         // frame would be a graph whose report disagreed with its refusal.
         m_phase = GraphPhase::CompileFailed;
-        return ordered.has_value() ? allWritten : ordered;
+        if (!ordered) {
+            return ordered;
+        }
+        return allWritten.has_value() ? allOrdered : allWritten;
     }
 
     // **The remaining four stages are ordered by what they read, and two of the orderings are

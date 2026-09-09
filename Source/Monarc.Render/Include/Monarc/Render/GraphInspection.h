@@ -380,7 +380,7 @@ struct DerivedBarrier {
 /// **One enumerator per refusal the graph can produce, and no placeholders for later tasks.**
 /// A diagnostic kind is what a test asserts on instead of matching a message, so an
 /// enumerator nothing emits would be an assertion nobody could write. The first twelve are
-/// declaration refusals; the last two are Task 2's, and are the only two `Compile` itself
+/// declaration refusals; the last three are Task 2's, and are the only three `Compile` itself
 /// records about the declarations it was given.
 enum class DiagnosticKind : u32 {
     /// `AddPass` was called with every pass slot occupied.
@@ -447,6 +447,42 @@ enum class DiagnosticKind : u32 {
     /// the resource, which is one mistake however many passes read it. `pass` names the pass
     /// that declared the earliest of those reads.
     TransientNeverWritten,
+
+    /// A resource some pass reads, and that two or more passes write without reading -- so
+    /// which of those writes the read sees is not something the declarations say.
+    ///
+    /// **This is a stated limit of a graph whose resources have no versions, not a rule about
+    /// what a frame may do.** The standard answer is versioning: a write produces a new
+    /// version of a resource and a read names one, at which point "B reads what A wrote and C
+    /// overwrites it afterwards" is a declaration -- A writes version 1, B reads version 1, C
+    /// writes version 2, and C's write is ordered after B's read by a write-after-read edge
+    /// that is now well-defined because the two accesses name different versions. Monarc's
+    /// resources have one identity and no version, so that frame cannot be declared here, and
+    /// this refusal is what says so instead of ordering it wrong. Every declaration refused by
+    /// this kind becomes a legal declaration the day versioning arrives; no call site changes
+    /// shape.
+    ///
+    /// **Why exactly this shape, from the edge rule.** An edge runs from a writer of a
+    /// resource to every *different* pass that reads it and nothing else is an edge, so every
+    /// foreign write of a resource precedes every read of it in every order the sort can
+    /// produce -- and a reader's own write follows its own read, which is what a
+    /// read-modify-write pass means. What a read sees is therefore the last of the foreign
+    /// writes, and that is determined only when the foreign writers have a last one. A writer
+    /// that *also* reads the resource has every other writer of it before it, by that same
+    /// edge, and there can be at most one such pass (two are a two-pass cycle on that resource
+    /// alone, and are refused as one). Two writers that do *not* read it have no edge between
+    /// them -- there is deliberately no write-after-write edge -- so nothing the declarations
+    /// say orders them, and the sort's declaration-order tie-break picks which one the read
+    /// sees. Hence: a read, plus two passes that write and do not read.
+    ///
+    /// One row per resource rather than per reading or writing pass, for
+    /// `TransientNeverWritten`'s reason: it is one mistake about one resource however many
+    /// passes are caught in it. `pass` names the pass that declared the earliest read, which
+    /// is the access that would have been handed the wrong bytes. **Imported resources are
+    /// refused too**, unlike `TransientNeverWritten`: an import declares what state it arrives
+    /// in, which makes reading it first meaningful, and says nothing at all about which of two
+    /// passes overwrote it first.
+    UnorderedOverwrite,
 };
 
 /// One refusal, with what it was about.

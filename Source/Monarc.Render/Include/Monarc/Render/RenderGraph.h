@@ -143,8 +143,11 @@ public:
     ///
     /// **What it does, in the order it does it, because two of the orderings are
     /// load-bearing.** It builds the dependency graph from the declared reads and writes;
-    /// refuses a graph with a dependency cycle, or with a transient some pass reads and none
-    /// writes; derives execution order by topological sort; culls the passes nothing consumes;
+    /// refuses a graph with a dependency cycle, with a transient some pass reads and none
+    /// writes, or with a resource some pass reads that two passes write without reading --
+    /// see `DiagnosticKind::UnorderedOverwrite`, which is a stated limit of resources that
+    /// have no versions; derives execution order by topological sort; culls the passes nothing
+    /// consumes;
     /// computes each resource's lifetime over the passes that survived; and groups transients
     /// whose lifetimes do not overlap and whose descriptions agree. Culling comes before
     /// lifetimes so that a culled reader shortens a lifetime rather than extending it, and
@@ -157,8 +160,9 @@ public:
     /// Fails with `ErrorCode::InvalidArgument` if the graph is not accepting declarations, with
     /// the code of the first recorded diagnostic if any declaration was refused -- a graph with
     /// a rejected declaration does not compile, whether or not the caller checked the `Status`
-    /// that refusal returned -- and with `ErrorCode::InvalidArgument` for a cycle or an
-    /// unwritten transient. Either way the phase becomes `GraphPhase::CompileFailed`,
+    /// that refusal returned -- and with `ErrorCode::InvalidArgument` for a cycle, an
+    /// unwritten transient or an unordered overwrite. Either way the phase becomes
+    /// `GraphPhase::CompileFailed`,
     /// inspection stays readable, and no execution order, culling decision, lifetime or alias
     /// group is reported, because none was settled.
     [[nodiscard]] Status Compile();
@@ -317,6 +321,15 @@ private:
     /// Refuses every transient that some pass reads and no pass writes. Independent of
     /// execution order, so it runs whether or not `OrderPasses` succeeded.
     [[nodiscard]] Status RefuseUnwrittenTransients();
+
+    /// Refuses every resource some pass reads that two or more passes write without reading --
+    /// the declaration whose meaning the edge rule cannot fix, and whose order the sort would
+    /// otherwise settle by a tie-break. See `DiagnosticKind::UnorderedOverwrite`. Independent
+    /// of execution order for `RefuseUnwrittenTransients`' reason.
+    [[nodiscard]] Status RefuseUnorderedOverwrites();
+
+    /// Whether `pass` declares a read of `resource`. Valid only after `BuildAccessBuckets`.
+    [[nodiscard]] bool PassReadsResource(u32 pass, u32 resource) const;
 
     /// Marks every pass nothing consumes, transitively. Needs `m_passOrder`.
     void CullPasses();

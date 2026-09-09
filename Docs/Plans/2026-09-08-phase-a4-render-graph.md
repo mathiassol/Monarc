@@ -362,3 +362,26 @@ say nothing about whether it is fast.
   compatible descriptions is the conservative rule and the right starting point; a real
   allocator may want a looser one keyed on size and alignment. Revisit when the allocator
   exists rather than guessing its requirements now.
+- **Task 3 has no inter-pass write-after-read declaration to exercise, and its checklist line
+  assumes one.** *"Read-after-write and write-after-read each yield one with the right
+  direction"* is written as though a frame could declare a read that precedes an overwrite. It
+  cannot. Task 2 found the reason: an edge runs from every writer of a resource to every
+  different pass that reads it, so a writer is before a reader in **every** topological order
+  the sort can produce, and a read that is meant to happen before another pass's write is not
+  merely untested but unrepresentable. Task 2 turned the frame that needs it — *A renders into
+  T, B samples T, C reuses T as scratch* — from a silently wrong order into a named refusal,
+  `DiagnosticKind::UnorderedOverwrite`.
+
+  So the write-after-read instances the derivation can actually be given are two, and Task 3
+  must be written against those rather than against a shape it cannot get: an **intra-pass**
+  one, where a read-modify-write pass reads and then writes one resource, and an imported
+  resource's **declared outgoing transition**, whose last access may be a read. Both are worth
+  a case; neither is the inter-pass anti-dependency the line implies.
+
+  **What would restore the general case is resource versioning** — a write produces a new
+  version, a read names one — which is a change to resource *identity* reaching `ResourceId`,
+  `PassBuilder`, lifetimes and aliasing. It is deliberately not in A4: M0 needs no frame that
+  reuses a resource after reading it, A4 has one pass and one imported resource, and Phase B's
+  depth and forward passes consume rather than reuse. It arrives with its first user, and the
+  refusal foreclosing nothing is what makes that safe — a declaration refused today becomes an
+  accepted one, and no call site changes shape.

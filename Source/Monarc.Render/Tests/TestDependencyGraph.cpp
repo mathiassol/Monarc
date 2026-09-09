@@ -33,6 +33,7 @@ using Monarc::Render::kNoPass;
 using Monarc::Render::PassBuilder;
 using Monarc::Render::RenderGraph;
 using Monarc::Render::ResourceAccess;
+using Monarc::Render::ResourceOrigin;
 using Monarc::Render::TextureId;
 using Monarc::Render::TextureImport;
 using Monarc::Render::TextureState;
@@ -548,6 +549,214 @@ TEST_CASE("a read-modify-write of a transient nothing else writes is not refused
 
     CHECK(graph.Compile());
     CHECK(graph.Inspect().diagnostics.empty());
+}
+
+TEST_CASE("the frame this sort would have ordered wrong is refused instead") {
+    // **The declaration the graph used to accept and answer wrongly, which is worse than a
+    // refusal and worse than a crash.** "A renders into T, B samples T, C reuses T as a scratch
+    // target" is an ordinary frame. A writes T, B reads T, C writes T -- so the edges are A->B
+    // and C->B, and there is no A/C edge at all, because there is deliberately no
+    // write-after-write one. In-degrees are A:0, B:2, C:0, lowest-ready-first takes A, then C,
+    // then B, and **B samples exactly the bytes C overwrote**.
+    //
+    // Nothing about that order contradicts the edges. What is missing is any way to declare "C
+    // overwrites T after B has read it": an inter-pass write-after-read edge cannot be written
+    // down without reporting every producer/consumer pair as a cycle -- Private/Compile.cpp
+    // argues it -- and the declaration that would replace it needs T to have *versions*, which
+    // Monarc's resources do not have. So the graph refuses, and
+    // `DiagnosticKind::UnorderedOverwrite` records that versioning is what makes the shape
+    // expressible.
+    //
+    // **A second transient of the legal shape sits beside it**, written once and read once, so
+    // that what the refusal is about is this shape rather than any resource with both a read
+    // and a write in the build.
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    PassBuilder             render = AnchoredPass(graph, "Render", 0);
+    const Result<TextureId> target = render.CreateTexture("Target", kBaseDescription);
+    REQUIRE(target.has_value());
+    const Result<TextureId> legal = render.CreateTexture("Legal", kBaseDescription);
+    REQUIRE(legal.has_value());
+    REQUIRE(render.Write(*target, ResourceAccess::ColorAttachmentWrite));
+    REQUIRE(render.Write(*legal, ResourceAccess::ColorAttachmentWrite));
+
+    PassBuilder sample = AnchoredPass(graph, "Sample", 1);
+    REQUIRE(sample.Read(*target, ResourceAccess::SampledRead));
+    REQUIRE(sample.Read(*legal, ResourceAccess::SampledRead));
+
+    PassBuilder scratch = AnchoredPass(graph, "Scratch", 2);
+    REQUIRE(scratch.Write(*target, ResourceAccess::ColorAttachmentWrite));
+
+    const Status compiled = graph.Compile();
+    REQUIRE_FALSE(compiled.has_value());
+    CHECK(compiled.error().code == ErrorCode::InvalidArgument);
+
+    const GraphInspection inspection = graph.Inspect();
+    CHECK(inspection.phase == GraphPhase::CompileFailed);
+    CHECK(inspection.diagnosticsDropped == 0u);
+    REQUIRE(inspection.diagnostics.size() == 1u);
+    CHECK(inspection.diagnostics[0].kind == DiagnosticKind::UnorderedOverwrite);
+    // The reading pass, which is the access that would have been handed the wrong bytes, and
+    // the resource it would have read.
+    CHECK(inspection.diagnostics[0].pass == 1u);
+    CHECK(inspection.diagnostics[0].resource == *target);
+    // One resource, so the row stands alone rather than being one of a grouped report.
+    CHECK(inspection.diagnostics[0].group == kNoDiagnosticGroup);
+    // Not the other refusal about a resource's writes: something does write this one.
+    CHECK(DiagnosticsOfKind(inspection, DiagnosticKind::TransientNeverWritten) == 0);
+    CHECK(DiagnosticsOfKind(inspection, DiagnosticKind::DependencyCycle) == 0);
+
+    // Nothing downstream ran, so the report says no order was settled rather than half of one.
+    for (const Monarc::Render::PassInspection& pass : inspection.passes) {
+        CHECK(pass.executionOrder == kNoPass);
+        CHECK_FALSE(pass.culled);
+    }
+    for (const Monarc::Render::ResourceInspection& resource : inspection.resources) {
+        CHECK(resource.lifetime.IsUnused());
+    }
+}
+
+TEST_CASE("one row per unorderable resource, however many passes read or overwrite it") {
+    // **Three overwriting passes and two readers, and one row**, which is `TransientNeverWritten`'s
+    // shape and its reason: one resource declared this way is one mistake, however many passes
+    // are caught in it. The row names the pass that declared the earliest read.
+    //
+    // It also pins that the count is a count of *passes* and not of accesses or of pairs: a
+    // report per (writer, reader) pair would be six rows here, and one per writer would be
+    // three.
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    PassBuilder             first  = AnchoredPass(graph, "First", 0);
+    const Result<TextureId> shared = first.CreateTexture("Shared", kBaseDescription);
+    REQUIRE(shared.has_value());
+    REQUIRE(first.Write(*shared, ResourceAccess::ColorAttachmentWrite));
+
+    PassBuilder earlyReader = AnchoredPass(graph, "EarlyReader", 1);
+    REQUIRE(earlyReader.Read(*shared, ResourceAccess::SampledRead));
+
+    PassBuilder second = AnchoredPass(graph, "Second", 2);
+    REQUIRE(second.Write(*shared, ResourceAccess::ColorAttachmentWrite));
+
+    PassBuilder lateReader = AnchoredPass(graph, "LateReader", 3);
+    REQUIRE(lateReader.Read(*shared, ResourceAccess::SampledRead));
+
+    PassBuilder third = AnchoredPass(graph, "Third", 4);
+    REQUIRE(third.Write(*shared, ResourceAccess::ColorAttachmentWrite));
+
+    REQUIRE_FALSE(graph.Compile().has_value());
+
+    const GraphInspection inspection = graph.Inspect();
+    REQUIRE(inspection.diagnostics.size() == 1u);
+    CHECK(inspection.diagnostics[0].kind == DiagnosticKind::UnorderedOverwrite);
+    CHECK(inspection.diagnostics[0].pass == 1u);
+    CHECK(inspection.diagnostics[0].resource == *shared);
+}
+
+TEST_CASE("an imported resource two passes overwrite is refused as well") {
+    // **The half of this refusal that `TransientNeverWritten` does not have, and the reason the
+    // two are separate kinds.** An import declares the state it arrives in, which is what makes
+    // reading it first meaningful and keeps it out of the unwritten-transient refusal entirely.
+    // It says nothing whatever about which of two passes overwrote it first, so a read of it
+    // between two unordered writes is the same silent wrong answer as a transient's, and is
+    // refused the same way.
+    //
+    // The declaration is a plausible one: a pass composites into the swapchain image, a second
+    // samples it, and a third clears it for another use.
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    Result<PassBuilder> composite = graph.AddPass("Composite");
+    REQUIRE(composite.has_value());
+    const Result<TextureId> screen = composite->ImportTexture("Screen", Anchor(0));
+    REQUIRE(screen.has_value());
+    REQUIRE(composite->Write(*screen, ResourceAccess::ColorAttachmentWrite));
+
+    Result<PassBuilder> readback = graph.AddPass("Readback");
+    REQUIRE(readback.has_value());
+    REQUIRE(readback->Read(*screen, ResourceAccess::SampledRead));
+
+    Result<PassBuilder> clear = graph.AddPass("Clear");
+    REQUIRE(clear.has_value());
+    REQUIRE(clear->Write(*screen, ResourceAccess::ColorAttachmentWrite));
+
+    REQUIRE_FALSE(graph.Compile().has_value());
+
+    const GraphInspection inspection = graph.Inspect();
+    REQUIRE(inspection.resources.size() == 1u);
+    CHECK(inspection.resources[0].origin == ResourceOrigin::Imported);
+    REQUIRE(inspection.diagnostics.size() == 1u);
+    CHECK(inspection.diagnostics[0].kind == DiagnosticKind::UnorderedOverwrite);
+    CHECK(inspection.diagnostics[0].pass == 1u);
+    CHECK(inspection.diagnostics[0].resource == *screen);
+    // The refusal that is transient-only did not fire, which is what keeps the two distinct.
+    CHECK(DiagnosticsOfKind(inspection, DiagnosticKind::TransientNeverWritten) == 0);
+}
+
+TEST_CASE("the five shapes the edge rule can order are all still accepted") {
+    // **The other side of the refusal, in one graph, because a predicate drawn one enumerator
+    // too wide would refuse a legal frame and a suite of refusals alone would not notice.**
+    // Every resource below is a shape whose access order the declarations *do* fix:
+    //
+    //   - `Fanout`: one writer and two readers. One foreign write, so a reader has no choice
+    //     to make about which write it sees.
+    //   - `Solo`: read and written by one pass and nothing else -- the read-modify-write
+    //     attachment `PassBuilder::Write` calls legal. No foreign write at all.
+    //   - `Blended`: the same, on an *imported* resource read and then written by one pass,
+    //     which is what a blended present looks like.
+    //   - `Chain`: one write-only writer, then a read-modify-write pass, then a reader. Two
+    //     writes and two reads, and every one of them ordered -- the modifier is after the
+    //     writer by the edge on `Chain` itself, and the reader is after the modifier by the
+    //     same edge. **This is the shape a predicate of "two writers and a reader" would
+    //     wrongly refuse**, and it is the ordinary `LoadOp::Load` accumulation.
+    //   - `Discarded`: written by two passes with nothing reading it. Their order is settled by
+    //     the declaration-order tie-break on purpose, and nothing reads the wrong bytes because
+    //     nothing reads it at all.
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    PassBuilder             producer = AnchoredPass(graph, "Producer", 0);
+    const Result<TextureId> fanout   = producer.CreateTexture("Fanout", kBaseDescription);
+    REQUIRE(fanout.has_value());
+    const Result<TextureId> chain = producer.CreateTexture("Chain", kBaseDescription);
+    REQUIRE(chain.has_value());
+    const Result<TextureId> discarded = producer.CreateTexture("Discarded", kBaseDescription);
+    REQUIRE(discarded.has_value());
+    REQUIRE(producer.Write(*fanout, ResourceAccess::ColorAttachmentWrite));
+    REQUIRE(producer.Write(*chain, ResourceAccess::ColorAttachmentWrite));
+    REQUIRE(producer.Write(*discarded, ResourceAccess::ColorAttachmentWrite));
+
+    PassBuilder             modifier = AnchoredPass(graph, "Modifier", 1);
+    const Result<TextureId> solo     = modifier.CreateTexture("Solo", kBaseDescription);
+    REQUIRE(solo.has_value());
+    REQUIRE(modifier.Read(*solo, ResourceAccess::ColorAttachmentRead));
+    REQUIRE(modifier.Write(*solo, ResourceAccess::ColorAttachmentWrite));
+    REQUIRE(modifier.Read(*fanout, ResourceAccess::SampledRead));
+    REQUIRE(modifier.Read(*chain, ResourceAccess::ColorAttachmentRead));
+    REQUIRE(modifier.Write(*chain, ResourceAccess::ColorAttachmentWrite));
+
+    Result<PassBuilder> consumer = graph.AddPass("Consumer");
+    REQUIRE(consumer.has_value());
+    const Result<TextureId> blended = consumer->ImportTexture("Blended", Anchor(2));
+    REQUIRE(blended.has_value());
+    REQUIRE(consumer->Read(*blended, ResourceAccess::ColorAttachmentRead));
+    REQUIRE(consumer->Write(*blended, ResourceAccess::ColorAttachmentWrite));
+    REQUIRE(consumer->Read(*fanout, ResourceAccess::SampledRead));
+    REQUIRE(consumer->Read(*chain, ResourceAccess::SampledRead));
+    REQUIRE(consumer->Write(*discarded, ResourceAccess::ColorAttachmentWrite));
+
+    REQUIRE(graph.Compile());
+
+    const GraphInspection inspection = graph.Inspect();
+    CHECK(inspection.phase == GraphPhase::Compiled);
+    CHECK(inspection.diagnostics.empty());
+    CHECK(inspection.diagnosticsDropped == 0u);
+    REQUIRE(inspection.passes.size() == 3u);
+    for (const Monarc::Render::PassInspection& pass : inspection.passes) {
+        CHECK_FALSE(pass.culled);
+        CHECK(pass.executionOrder == pass.index);
+    }
 }
 
 TEST_CASE("a second build reports its own decisions, not the previous build's") {

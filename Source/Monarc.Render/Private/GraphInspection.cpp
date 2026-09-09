@@ -67,6 +67,7 @@ const char* ToString(DiagnosticKind kind) {
         case DiagnosticKind::AlreadyCompiled:         return "AlreadyCompiled";
         case DiagnosticKind::DependencyCycle:         return "DependencyCycle";
         case DiagnosticKind::TransientNeverWritten:   return "TransientNeverWritten";
+        case DiagnosticKind::UnorderedOverwrite:      return "UnorderedOverwrite";
     }
     return "<invalid DiagnosticKind>";
 }

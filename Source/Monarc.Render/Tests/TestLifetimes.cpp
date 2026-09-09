@@ -128,14 +128,22 @@ TEST_CASE("a transient read several passes later is live across the gap") {
 }
 
 TEST_CASE("a transient written twice is live from the first write, not the last") {
-    // **The distinction a maximum would get wrong.** Written at positions 0 and 1 and read at 2,
-    // so the lifetime is `0..2`; a `firstPass` that took the last write would say `1..2` and a
-    // resource would be reported as dead while a pass was writing it.
+    // **The distinction a maximum would get wrong.** A `firstPass` that took the last write
+    // would report a resource as dead while a pass was still writing it.
+    //
+    // **The two writes are a write-only pass and a read-modify-write pass, and that is the only
+    // shape this graph has for a twice-written resource that something reads.** Two passes that
+    // write one resource *without* reading it are unordered with respect to each other -- there
+    // is no write-after-write edge -- so a read of that resource is refused with
+    // `DiagnosticKind::UnorderedOverwrite` rather than ordered by a tie-break. A
+    // `LoadOp::Load` modifier is ordered after the writer by the edge on the resource itself,
+    // so its write is a genuine second write at a genuine later position.
     //
     // Two double-written transients, whose writes are in the opposite declaration order to one
-    // another: `Ascending` is written by the pass declared earlier first, `Descending` by the
-    // pass declared later first. A computation that took the first write *in declaration order*
-    // rather than in execution order would get `Descending` wrong.
+    // another: `Ascending`'s first write is declared by the earlier pass, `Descending`'s by the
+    // later one. A computation that took the first write *in declaration order* rather than in
+    // execution order would get `Descending` wrong -- `Blend`'s write of it is declared first
+    // and executes second.
     SystemAllocator allocator;
     RenderGraph     graph(allocator, RenderGraph::Config{});
 
@@ -144,20 +152,18 @@ TEST_CASE("a transient written twice is live from the first write, not the last"
     REQUIRE(ascending.has_value());
     const Result<TextureId> descending = owner.CreateTexture("Descending", kBaseDescription);
     REQUIRE(descending.has_value());
-    const Result<TextureId> gate = owner.CreateTexture("Gate", kBaseDescription);
-    REQUIRE(gate.has_value());
     REQUIRE(owner.Write(*ascending, ResourceAccess::ColorAttachmentWrite));
 
-    // Declared second, but ordered *after* the pass declared third, because it reads what that
-    // one writes.
-    PassBuilder second = AnchoredPass(graph, "Second", 1);
-    REQUIRE(second.Read(*gate, ResourceAccess::SampledRead));
-    REQUIRE(second.Write(*descending, ResourceAccess::ColorAttachmentWrite));
+    // Modifies both: after `Owner` for `Ascending`, and after the pass declared *below* it for
+    // `Descending`, because in both cases it reads what the other pass writes.
+    PassBuilder blend = AnchoredPass(graph, "Blend", 1);
+    REQUIRE(blend.Read(*ascending, ResourceAccess::ColorAttachmentRead));
+    REQUIRE(blend.Write(*ascending, ResourceAccess::ColorAttachmentWrite));
+    REQUIRE(blend.Read(*descending, ResourceAccess::ColorAttachmentRead));
+    REQUIRE(blend.Write(*descending, ResourceAccess::ColorAttachmentWrite));
 
-    PassBuilder third = AnchoredPass(graph, "Third", 2);
-    REQUIRE(third.Write(*gate, ResourceAccess::ColorAttachmentWrite));
-    REQUIRE(third.Write(*descending, ResourceAccess::ColorAttachmentWrite));
-    REQUIRE(third.Write(*ascending, ResourceAccess::ColorAttachmentWrite));
+    PassBuilder late = AnchoredPass(graph, "Late", 2);
+    REQUIRE(late.Write(*descending, ResourceAccess::ColorAttachmentWrite));
 
     PassBuilder reader = AnchoredPass(graph, "Reader", 3);
     REQUIRE(reader.Read(*ascending, ResourceAccess::SampledRead));
@@ -166,21 +172,21 @@ TEST_CASE("a transient written twice is live from the first write, not the last"
     REQUIRE(graph.Compile());
 
     const GraphInspection inspection = graph.Inspect();
-    // Execution order is Owner, Third, Second, Reader -- pass 2 before pass 1, because pass 1
-    // reads the gate pass 2 writes.
+    // Execution order is Owner, Late, Blend, Reader -- pass 2 before pass 1, because pass 1
+    // reads what pass 2 writes.
     REQUIRE(inspection.passes.size() == 4u);
     CHECK(inspection.passes[0].executionOrder == 0u);
     CHECK(inspection.passes[1].executionOrder == 2u);
     CHECK(inspection.passes[2].executionOrder == 1u);
     CHECK(inspection.passes[3].executionOrder == 3u);
 
-    REQUIRE(inspection.resources.size() == 7u);
+    REQUIRE(inspection.resources.size() == 6u);
     CHECK(inspection.resources[1].name == "Ascending");
-    // Written at 0 by Owner and at 1 by Third, read at 3.
+    // Written at 0 by Owner and at 2 by Blend, read at 3.
     CHECK(inspection.resources[1].lifetime == ResourceLifetime{0, 3});
     CHECK(inspection.resources[2].name == "Descending");
-    // Written at 1 by Third and at 2 by Second -- so the *earlier execution position* is the
-    // pass declared later -- and read at 3.
+    // Written at 1 by Late and at 2 by Blend -- so the *earlier execution position* is the pass
+    // declared later -- and read at 3.
     CHECK(inspection.resources[2].lifetime == ResourceLifetime{1, 3});
 }
 
