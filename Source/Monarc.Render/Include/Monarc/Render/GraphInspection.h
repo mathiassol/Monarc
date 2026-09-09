@@ -559,8 +559,12 @@ struct GraphDiagnostic {
     /// merges two cycles that share a pass into one group of three rather than reporting two
     /// groups of two. That is a deliberate narrowing of what this field could express, and
     /// Private/Compile.cpp argues it where the grouping happens: enumerating every elementary
-    /// cycle is exponential in the pass count, and the mutually-dependent set is both
-    /// computable in linear time and the minimal set of declarations that has to change.
+    /// cycle is exponential in the pass count, while the mutually-dependent set is a forward
+    /// and a backward sweep per group -- O(passes x edges) in the worst case, which is
+    /// polynomial rather than the linear cost Tarjan's algorithm would give and this comment
+    /// claimed. Every pass in a group lies on a cycle and at least one declaration inside the
+    /// group has to change; the group is not claimed to be the *smallest* such set, and
+    /// Private/Compile.cpp gives the chained counterexample.
     u32 group = kNoDiagnosticGroup;
 
     constexpr bool operator==(const GraphDiagnostic&) const = default;

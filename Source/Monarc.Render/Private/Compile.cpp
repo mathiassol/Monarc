@@ -219,7 +219,8 @@ void RenderGraph::ForEachPredecessor(u32 pass, Visit visit) const {
     // away leaves the whole suite green, which was measured rather than assumed. It stays
     // because the claim these two functions make about each other is that they walk the same
     // edges, and a reader-modifier pass being its own predecessor and not its own successor
-    // would make that false for the next thing that walks them.
+    // would make that false for the next thing that walks them. The first of the four
+    // survivors recorded in this file; `GroupAliases`' loop bound lists all four.
     for (const u32 readIndex : AccessesOfPass(pass)) {
         const AccessInspection& read = m_accesses[readIndex];
         if (IsWrite(read.access)) {
@@ -309,10 +310,22 @@ Error RenderGraph::ReportDependencyCycles() {
     // than "one group per cycle" and the narrowing is on purpose.** Two cycles sharing a pass
     // are one such set, and arrive as one group of three rather than two groups of two.
     // Reporting every elementary cycle separately is exponential in the pass count -- a graph
-    // of n passes can have that many distinct cycles -- while the mutually-reachable set is two
-    // sweeps per group and is the minimal set of declarations that has to change: no subset of
-    // it can be ordered either. `GraphDiagnostic::group` records this where a reader of the
-    // report will meet it.
+    // of n passes can have that many distinct cycles -- while the mutually-reachable set costs
+    // one forward and one backward sweep per group, plus one pair for each unplaced pass that
+    // turns out to be in no cycle and settles only itself. That is O(passes x edges) in the
+    // worst case: polynomial against an exponential, which is the trade this makes, and **not**
+    // the linear pass Tarjan's algorithm would give -- `GraphDiagnostic::group` said linear
+    // until a review pointed at this loop.
+    //
+    // **What the group is: every pass in it lies on a cycle, and at least one declaration
+    // inside it has to change.** Both follow from mutual reachability -- a set of two or more
+    // mutually reachable passes has a cycle through each of its members, and nothing outside
+    // the set can be edited to give the set an order. What it deliberately does *not* claim is
+    // minimality: a chained set {0<->1, 1<->2, 2<->3} arrives as one group of four, and the
+    // subset {0, 2} has no edge between its members and orders perfectly well. The group is the
+    // set with no order among *all* of its members, which is a report, not a repair plan.
+    // `GraphDiagnostic::group` records the membership where a reader of the report will meet
+    // it.
     //
     // **A pass that cannot be ordered is not necessarily in a cycle**, and gets no row when it
     // is not. A pass reading what a cycle produces has no order and no way to acquire one, but
@@ -384,6 +397,8 @@ void RenderGraph::MarkReachable(u32 from, bool forward) {
     // which by the same argument are never in the forward set and so never in the intersection
     // `ReportDependencyCycles` takes. Mutating it away leaves the whole suite green, which is
     // recorded here rather than left for the next reader to rediscover as a hole in the tests.
+    // The second of the four survivors recorded in this file; `GroupAliases`' loop bound lists
+    // all four.
     u32 depth            = 0;
     m_passStack[depth++] = from;
     m_passMark[from] |= flag;
@@ -628,6 +643,15 @@ void RenderGraph::ComputeLifetimes() {
     // declarations suggest, and computing the two the other way round would record a reader
     // that never runs.
     for (u32 resource = 0; resource < static_cast<u32>(m_resources.Size()); ++resource) {
+        // **A fresh lifetime rather than the resource's current one, and the difference is not
+        // observable -- measured, not assumed.** Starting from `m_resources[resource].lifetime`
+        // instead leaves the whole suite green, because a resource never survives to be
+        // compiled twice: `Compile` refuses a second call with `DiagnosticKind::AlreadyCompiled`,
+        // and `Reset` empties `m_resources`, so the second build's entries are fresh
+        // `ResourceInspection`s whose lifetimes are already `{kNoPass, kNoPass}`. It stays
+        // written this way because "compute a lifetime" is not "extend the one that is there",
+        // and the day a build can be recompiled in place the two stop agreeing. The third of
+        // the four survivors recorded in this file; `GroupAliases`' loop bound lists the others.
         ResourceLifetime lifetime{};
 
         for (const u32 index : AccessesOfResource(resource)) {
@@ -697,6 +721,15 @@ void RenderGraph::GroupAliases() {
         u32 chosen = binCount;
         for (u32 bin = 0; bin < binCount; ++bin) {
             bool fits = true;
+            // **`other < resource` rather than `other < resourceCount`, and widening it changes
+            // no answer -- measured, not assumed.** Every resource from `resource` upwards still
+            // holds `kNoBin` from the loop above, `kNoBin` is not a bin number, so the extra
+            // iterations all `continue`. It stays narrow because a first-fit member check is
+            // about the candidates already placed, and scanning past the candidate would say
+            // otherwise to the next reader. Mutating the bound to `resourceCount` leaves the
+            // whole suite green; that is the fourth of the four survivors this file records --
+            // see `ForEachPredecessor`'s self-exclusion and `MarkReachable`'s `kOrdered` guard
+            // for the other two in this file, and `ComputeLifetimes`' fresh local for the last.
             for (u32 other = 0; other < resource; ++other) {
                 if (m_resourceBin[other] != bin) {
                     continue;
