@@ -525,10 +525,20 @@ TEST_CASE("diagnostics of one report carry their group, and overlapping reports 
     // reader can reassemble either cycle; under a group id they are two reports of two passes
     // each, and pass 2 appearing in both is expressible rather than a contradiction.
     //
-    // Hand-built, because nothing detects a cycle yet -- Task 2 does -- and carrying an
-    // existing `kind`, because Task 2 brings its own enumerator and this module does not add
-    // enumerators nothing emits. What is under test here is the grouping and its rendering, not
-    // the kind.
+    // **Hand-built, and it has to stay hand-built, because the detector cannot produce this
+    // report.** `ReportDependencyCycles` groups by *mutually-dependent set* rather than by
+    // elementary cycle -- Private/Compile.cpp argues why: enumerating every cycle is
+    // exponential in the pass count, while the set among which no order exists is two sweeps
+    // and is the minimal set of declarations that has to change. Two cycles sharing a pass are
+    // one such set, so a real graph of that shape arrives as one group of three rather than as
+    // the two groups of two below.
+    //
+    // So what this case pins is what the *type and the rendering* can carry, which is a
+    // different and still necessary thing: one pass appearing in two reports is expressible
+    // here and is a contradiction under one `pass` field per row. The narrowing lives in the
+    // detector and could be lifted there without changing this line. Carrying an existing
+    // `kind` for the same reason it did before -- what is under test is the grouping and its
+    // rendering, not the kind.
     //
     // The standalone row beside them is the shape every refusal a *declaration* produces has:
     // `group=none`, because it is about one pass. And `dropped=2` is there because the two
