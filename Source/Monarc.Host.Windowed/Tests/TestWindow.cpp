@@ -56,7 +56,20 @@ constexpr int kSkipReturnCode = 77;
 /// A window small enough to be unobtrusive and large enough that a swapchain could be created
 /// from it. Not `WindowDescription`'s default, because a case that resized the window would
 /// otherwise have no size to compare against that was not also the default.
-constexpr WindowDescription kTestWindow{.size = {480, 270}, .title = "Monarc test window"};
+///
+/// `activateOnShow` is false for every window this suite opens. Sixteen of them open here and
+/// twenty more in the device suite, and a run that took the focus thirty-six times would make
+/// the machine unusable for as long as it lasted. Nothing below asserts anything about
+/// activation -- see the field's own comment in Monarc/Host/Window.h.
+constexpr WindowDescription kTestWindow{
+    .size = {480, 270}, .title = "Monarc test window", .activateOnShow = false};
+
+// The default is the shipped behaviour and flipping it would change Monarc.FirstLight silently,
+// so it is pinned here rather than left to whoever reads the header next. The suite's own
+// windows opt out above; that is a choice each caller makes, not a new default.
+static_assert(WindowDescription{}.activateOnShow,
+              "a window shown by an application should take the focus; only the test suites "
+              "opt out");
 
 /// Everything `Settle` saw, accumulated across pumps.
 struct SettledEvents {

@@ -88,8 +88,16 @@ constexpr Monarc::u64 kWaitTimeoutNanoseconds = 5'000'000'000ULL;
 /// the readback's staging buffer stays under a megabyte. The size matters for one case: the
 /// on-screen capture reads the *centre* pixel, so the window has to be big enough that its
 /// centre is unambiguously inside the client area.
-constexpr WindowDescription kHarnessWindow{.size  = {640, 360},
-                                           .title = "Monarc -- swapchain test"};
+///
+/// `activateOnShow` is false, as it is for the device-free suite: twenty windows open here and
+/// each one taking the focus would make the machine unusable for the length of a run. **The
+/// screen-capture case is unaffected**, because it does not rely on having been activated at
+/// creation -- it calls `WindowTestHooks::BringToForeground` and then asks `WindowFromPoint` who
+/// is actually on top, refusing to assert if the answer is not Monarc's window. Verified: the
+/// capture still reads the clear exactly with this false.
+constexpr WindowDescription kHarnessWindow{.size           = {640, 360},
+                                           .title          = "Monarc -- swapchain test",
+                                           .activateOnShow = false};
 
 constexpr Monarc::RHI::Format kSwapchainFormat = Monarc::RHI::Format::B8G8R8A8_UNORM;
 
