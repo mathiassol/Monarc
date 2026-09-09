@@ -286,7 +286,7 @@ TEST_CASE("a two-pass cycle is refused, naming both passes in one group") {
         CHECK_FALSE(pass.culled);
     }
     for (const Monarc::Render::ResourceInspection& resource : inspection.resources) {
-        CHECK(resource.lifetime.IsEmpty());
+        CHECK(resource.lifetime.HasNoWrite());
     }
 }
 
@@ -589,7 +589,7 @@ TEST_CASE("a second build reports its own decisions, not the previous build's") 
     }
     CHECK(first.resources[1].aliasGroup != Monarc::Render::kNoAliasGroup);
     CHECK(first.resources[1].aliasGroup == first.resources[2].aliasGroup);
-    CHECK_FALSE(first.resources[1].lifetime.IsEmpty());
+    CHECK_FALSE(first.resources[1].lifetime.HasNoWrite());
 
     graph.Reset();
 
@@ -608,7 +608,7 @@ TEST_CASE("a second build reports its own decisions, not the previous build's") 
     CHECK(second.passes[0].culled);
     CHECK(second.passes[0].executionOrder == kNoPass);
     REQUIRE(second.resources.size() == 1u);
-    CHECK(second.resources[0].lifetime.IsEmpty());
+    CHECK(second.resources[0].lifetime.HasNoWrite());
     CHECK(second.resources[0].lifetime.lastPass == kNoPass);
     CHECK(second.resources[0].aliasGroup == Monarc::Render::kNoAliasGroup);
 }

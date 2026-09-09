@@ -399,8 +399,8 @@ TEST_CASE("a transient nothing accesses groups with nothing") {
     const GraphInspection inspection = graph.Inspect();
     CHECK(inspection.resources[1].name == "Untouched");
     CHECK(inspection.resources[2].name == "Orphaned");
-    CHECK(inspection.resources[1].lifetime.IsEmpty());
-    CHECK(inspection.resources[2].lifetime.IsEmpty());
+    CHECK(inspection.resources[1].lifetime.HasNoWrite());
+    CHECK(inspection.resources[2].lifetime.HasNoWrite());
     CHECK(inspection.resources[1].aliasGroup == kNoAliasGroup);
     CHECK(inspection.resources[2].aliasGroup == kNoAliasGroup);
 
@@ -459,6 +459,6 @@ TEST_CASE("a lone transient candidate is not a group of one") {
 
     const GraphInspection inspection = graph.Inspect();
     CHECK(inspection.resources[1].name == "Only");
-    CHECK_FALSE(inspection.resources[1].lifetime.IsEmpty());
+    CHECK_FALSE(inspection.resources[1].lifetime.HasNoWrite());
     CHECK(inspection.resources[1].aliasGroup == kNoAliasGroup);
 }

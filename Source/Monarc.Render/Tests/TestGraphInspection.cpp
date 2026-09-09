@@ -753,22 +753,36 @@ TEST_CASE("a whole report that exactly fits is not reported as truncated") {
     CHECK(clipped.written == counted.needed - 1);
 }
 
-// `IsEmpty` reads `firstPass` and only `firstPass`, which is right -- a resource with a first
-// write always has a last use -- and **the two half-empty lifetimes are what actually pin it.**
-// The four assertions below them do not: every one of them holds unchanged if `IsEmpty()` is
-// rewritten to read `lastPass`, because in all four both ends agree. So the premise was
-// written down and not asserted until these two lines existed.
+// `HasNoWrite` reads `firstPass` and only `firstPass`, `IsUnused` reads both, and **the two
+// half-empty lifetimes are what actually pin either of them.** The four assertions below them
+// do not: every one of them holds unchanged if `HasNoWrite()` is rewritten to read `lastPass`,
+// because in all four both ends agree. So the premise was written down and not asserted until
+// these two lines existed.
 //
 // The senses are opposite on purpose, and each fails under the swap on its own: a lifetime with
-// no first pass *is* empty however late its last use, and one with a first pass is *not* empty
+// no first pass names no write however late its last use, and one with a first pass names one
 // however missing its last.
-static_assert(ResourceLifetime{kNoPass, 5}.IsEmpty());
-static_assert(!ResourceLifetime{0, kNoPass}.IsEmpty());
+static_assert(ResourceLifetime{kNoPass, 5}.HasNoWrite());
+static_assert(!ResourceLifetime{0, kNoPass}.HasNoWrite());
 
-static_assert(ResourceLifetime{}.IsEmpty());
-static_assert(ResourceLifetime{kNoPass, kNoPass}.IsEmpty());
-static_assert(!ResourceLifetime{0, 0}.IsEmpty());
-static_assert(!ResourceLifetime{3, 7}.IsEmpty());
+// **And the pair of lines the two queries exist for.** `{kNoPass, 5}` is the read-only imported
+// resource: no first write and a real last use, so it names no write and is emphatically not
+// unused. A single query reading `firstPass` answers `true` to both questions here, which is
+// the wrong answer to the second one and the reason there are two names. `{0, kNoPass}` is the
+// other diagonal and is unreachable from a real compile -- a first write is a last use -- but
+// pins that `IsUnused` reads `firstPass` too rather than only `lastPass`.
+static_assert(!ResourceLifetime{kNoPass, 5}.IsUnused());
+static_assert(!ResourceLifetime{0, kNoPass}.IsUnused());
+
+static_assert(ResourceLifetime{}.HasNoWrite());
+static_assert(ResourceLifetime{kNoPass, kNoPass}.HasNoWrite());
+static_assert(!ResourceLifetime{0, 0}.HasNoWrite());
+static_assert(!ResourceLifetime{3, 7}.HasNoWrite());
+
+static_assert(ResourceLifetime{}.IsUnused());
+static_assert(ResourceLifetime{kNoPass, kNoPass}.IsUnused());
+static_assert(!ResourceLifetime{0, 0}.IsUnused());
+static_assert(!ResourceLifetime{3, 7}.IsUnused());
 
 // The three sentinels are deliberately named separately -- one is a pass index, one a group of
 // aliased resources, one a group of diagnostic rows -- and there is no assertion that they are

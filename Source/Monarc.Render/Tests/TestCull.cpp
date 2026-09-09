@@ -389,7 +389,7 @@ TEST_CASE("a graph that imports nothing is culled entirely") {
     // neither is grouped with anything.
     REQUIRE(inspection.resources.size() == 2u);
     for (const Monarc::Render::ResourceInspection& resource : inspection.resources) {
-        CHECK(resource.lifetime.IsEmpty());
+        CHECK(resource.lifetime.HasNoWrite());
         CHECK(resource.lifetime.lastPass == kNoPass);
         CHECK(resource.aliasGroup == Monarc::Render::kNoAliasGroup);
     }

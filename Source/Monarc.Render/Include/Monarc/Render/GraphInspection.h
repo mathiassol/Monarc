@@ -116,10 +116,31 @@ struct ResourceLifetime {
     /// `kNoPass`.
     u32 lastPass = kNoPass;
 
-    /// Whether this names no *write* -- which for a transient means nothing that runs uses the
-    /// resource at all, and for an imported one may instead mean every surviving use is a read.
-    /// `lastPass` is what separates those two.
-    [[nodiscard]] constexpr bool IsEmpty() const { return firstPass == kNoPass; }
+    /// Whether this names no *write*.
+    ///
+    /// **Two queries and not one, because the one they were split out of answered the wrong
+    /// question for a resource class A4's headline barriers are about.** A single `IsEmpty()`
+    /// reading `firstPass` reported `true` for a read-only imported resource -- which has no
+    /// first write and a perfectly real `lastPass`, and is genuinely used. Nothing lied while
+    /// the only caller was the alias grouping, which asks this question about transients under
+    /// `ResourceOrigin::Transient` and gets the same answer either way. The next caller is
+    /// Task 3's barrier derivation, which asks "does this resource have a lifetime at all?" --
+    /// and for a read-only import the honest answer is yes. So the two questions have two
+    /// names, and neither of them is the ambiguous one.
+    ///
+    /// For a transient the two coincide after culling, which is why the alias grouping is
+    /// indifferent: a surviving reader of a transient implies a surviving writer -- culling
+    /// keeps a pass whose reader survives -- so a transient with a last use has a first write.
+    /// An imported resource is where they come apart, because its first contents came from
+    /// outside the graph.
+    /// @{
+    [[nodiscard]] constexpr bool HasNoWrite() const { return firstPass == kNoPass; }
+
+    /// Whether this names no surviving use of any kind -- no write and no read.
+    [[nodiscard]] constexpr bool IsUnused() const {
+        return firstPass == kNoPass && lastPass == kNoPass;
+    }
+    /// @}
 
     constexpr bool operator==(const ResourceLifetime&) const = default;
 };
@@ -222,8 +243,9 @@ struct ResourceInspection {
     TextureState outgoing = {};
 
     /// The span of execution order over which the resource is live. See `ResourceLifetime`,
-    /// which is where the two ends' exact meanings are, and note that an empty one does not
-    /// always mean unused.
+    /// which is where the two ends' exact meanings are -- and ask it `IsUnused()` rather than
+    /// `HasNoWrite()` for "is this resource used at all", because a read-only imported
+    /// resource has no first write and is used.
     ResourceLifetime lifetime = {};
 
     /// The group of resources this one shares memory with, or `kNoAliasGroup`.

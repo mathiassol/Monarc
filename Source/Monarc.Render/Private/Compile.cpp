@@ -123,11 +123,17 @@ void BucketAccesses(std::span<const AccessInspection> accesses, u32 keyCount, Ar
 ///
 /// **Imported resources are never candidates**, because the graph does not own their memory:
 /// `ResourceOrigin::Imported` says so, and handing one an alias group would be claiming a
-/// decision about somebody else's allocation. Neither is a resource with an empty lifetime,
-/// which after culling means no pass that runs writes it -- there is no live range to place, so
-/// there is nothing to place it beside.
+/// decision about somebody else's allocation. Neither is a resource with no first write, which
+/// after culling means no pass that runs writes it -- there is no live range to place, so there
+/// is nothing to place it beside.
+///
+/// **`HasNoWrite()` and not `IsUnused()`, and for a transient the two cannot disagree**: a
+/// surviving reader of a transient implies a surviving writer, because culling keeps a pass
+/// whose reader survives. The two come apart only for an imported resource, which the first
+/// condition has already excluded. `ResourceLifetime` argues the split; the question asked here
+/// is "is there a live range to place", which is the one `HasNoWrite()` answers.
 [[nodiscard]] bool IsAliasCandidate(const ResourceInspection& resource) {
-    return resource.origin == ResourceOrigin::Transient && !resource.lifetime.IsEmpty();
+    return resource.origin == ResourceOrigin::Transient && !resource.lifetime.HasNoWrite();
 }
 
 /// Whether two lifetimes are both live at some execution position.

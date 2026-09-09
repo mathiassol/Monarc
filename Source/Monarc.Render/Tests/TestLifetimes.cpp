@@ -269,11 +269,16 @@ TEST_CASE("a resource no surviving pass touches has an empty lifetime") {
     CHECK(inspection.passes[1].culled);
     REQUIRE(inspection.resources.size() == 3u);
     CHECK(inspection.resources[1].name == "Untouched");
-    CHECK(inspection.resources[1].lifetime.IsEmpty());
+    CHECK(inspection.resources[1].lifetime.HasNoWrite());
     CHECK(inspection.resources[1].lifetime.lastPass == kNoPass);
     CHECK(inspection.resources[2].name == "Orphaned");
-    CHECK(inspection.resources[2].lifetime.IsEmpty());
+    CHECK(inspection.resources[2].lifetime.HasNoWrite());
     CHECK(inspection.resources[2].lifetime.lastPass == kNoPass);
+    // And here the two queries agree, which is the other half of the pair: a resource with no
+    // surviving use of either kind is unused as well as unwritten. The read-only import case
+    // below is where they disagree.
+    CHECK(inspection.resources[1].lifetime.IsUnused());
+    CHECK(inspection.resources[2].lifetime.IsUnused());
 }
 
 TEST_CASE("an imported resource only read has a last pass and no first one") {
@@ -281,8 +286,13 @@ TEST_CASE("an imported resource only read has a last pass and no first one") {
     // accidental.** `firstPass` is the first *write*, because a resource is not live before
     // something puts contents in it -- and an imported resource's contents came from outside
     // the graph, which is what its declared `incoming` state says. So a read-only import has a
-    // real last use and no first write, and `IsEmpty()` reads `firstPass`, so it reports empty
-    // for a resource that is genuinely used.
+    // real last use and no first write.
+    //
+    // **Which is why `ResourceLifetime` has two queries and not one**: `HasNoWrite()` is true
+    // here and `IsUnused()` is false, for a resource two passes below genuinely read. Task 3
+    // asks the second question -- does this resource have a lifetime to derive barriers over --
+    // and a single query reading `firstPass` would answer it wrongly for exactly the resource
+    // class A4's headline barriers are about.
     //
     // Two read-only imports, read at different positions, so the answer is not one constant.
     // Only a transient can be refused for this shape -- see
@@ -308,8 +318,10 @@ TEST_CASE("an imported resource only read has a last pass and no first one") {
     CHECK(inspection.resources[1].lifetime == ResourceLifetime{kNoPass, 0});
     CHECK(inspection.resources[2].name == "LateSource");
     CHECK(inspection.resources[2].lifetime == ResourceLifetime{kNoPass, 1});
-    CHECK(inspection.resources[1].lifetime.IsEmpty());
-    CHECK(inspection.resources[2].lifetime.IsEmpty());
+    CHECK(inspection.resources[1].lifetime.HasNoWrite());
+    CHECK(inspection.resources[2].lifetime.HasNoWrite());
+    CHECK_FALSE(inspection.resources[1].lifetime.IsUnused());
+    CHECK_FALSE(inspection.resources[2].lifetime.IsUnused());
     // And the graph compiled: reading an import first is legal, unlike reading a transient
     // nothing wrote.
     CHECK(inspection.diagnostics.empty());
