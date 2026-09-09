@@ -17,6 +17,23 @@ MONARC_LOG_CATEGORY(RenderGraph, Info);
 
 }  // namespace LogCategories
 
+namespace {
+
+/// Reserves `count` slots in `array` and value-initialises every one of them, so that indexing
+/// it is valid from construction and nothing ever appends.
+///
+/// `Array` has no `Resize`, which is why this is a loop rather than a call. It is the shape the
+/// constructor already used for `m_records`, lifted out once the compile scratch made it the
+/// seventh caller.
+void FillToCapacity(Array<u32>& array, u32 count) {
+    array.Reserve(count);
+    for (u32 i = 0; i < count; ++i) {
+        array.Emplace();
+    }
+}
+
+}  // namespace
+
 RenderGraph::RenderGraph(IAllocator& allocator, const Config& config)
     : m_config(config),
       m_passes(allocator),
@@ -24,7 +41,16 @@ RenderGraph::RenderGraph(IAllocator& allocator, const Config& config)
       m_accesses(allocator),
       m_barriers(allocator),
       m_diagnostics(allocator),
-      m_records(allocator) {
+      m_records(allocator),
+      m_accessesByResource(allocator),
+      m_resourceBucketStart(allocator),
+      m_accessesByPass(allocator),
+      m_passBucketStart(allocator),
+      m_passOrder(allocator),
+      m_passIndegree(allocator),
+      m_passMark(allocator),
+      m_passStack(allocator),
+      m_resourceBin(allocator) {
     // The only allocation this class ever makes, and it happens here. Every pool is reserved
     // to its configured capacity and never grows -- `Array::Reserve` is what buys the buffer,
     // and every append below refuses rather than reaching `Emplace`'s growth path. See the
@@ -41,6 +67,21 @@ RenderGraph::RenderGraph(IAllocator& allocator, const Config& config)
     for (u32 i = 0; i < m_config.maxPasses; ++i) {
         m_records.Emplace();
     }
+
+    // Compilation's scratch, sized from the same three capacities and filled for the same
+    // reason -- see the fields. **`+ 1` on the two bucket-boundary arrays is the end sentinel**:
+    // bucket `k` runs from `start[k]` to `start[k + 1]`, so the last bucket needs a boundary
+    // past it. A zero-capacity pool still gets its one boundary, which is what makes a graph
+    // configured with no resources compile rather than index nothing.
+    FillToCapacity(m_accessesByResource, m_config.maxAccesses);
+    FillToCapacity(m_resourceBucketStart, m_config.maxResources + 1);
+    FillToCapacity(m_accessesByPass, m_config.maxAccesses);
+    FillToCapacity(m_passBucketStart, m_config.maxPasses + 1);
+    FillToCapacity(m_passOrder, m_config.maxPasses);
+    FillToCapacity(m_passIndegree, m_config.maxPasses);
+    FillToCapacity(m_passMark, m_config.maxPasses);
+    FillToCapacity(m_passStack, m_config.maxPasses);
+    FillToCapacity(m_resourceBin, m_config.maxResources);
 }
 
 RenderGraph::~RenderGraph() { DestroyRecords(); }
@@ -126,7 +167,7 @@ bool RenderGraph::IsCurrentPass(u32 pass, u32 generation) const {
 }
 
 Error RenderGraph::Refuse(DiagnosticKind kind, ErrorCode code, const char* message, u32 pass,
-                          TextureId resource) {
+                          TextureId resource, u32 group) {
     // The log line carries the composed detail and the diagnostic carries the structure, and
     // both exist for the reason `GraphDiagnostic` gives: `Error::message` is a non-owning view
     // and therefore a string literal, so "an error naming the resource" cannot be said through
@@ -137,22 +178,35 @@ Error RenderGraph::Refuse(DiagnosticKind kind, ErrorCode code, const char* messa
     // this module's overload set, and `ErrorCode`'s lives in `Monarc`, so the second call
     // reaches it only through ADL. It works, and saying which namespace answers is worth more
     // than the four characters -- the same spelling Private/GraphInspection.cpp uses.
-    MONARC_LOG(LogCategories::RenderGraph, Error,
-               "refused: {} ({}) pass {} resource {}:{} -- {}", ToString(kind),
-               Monarc::ToString(code), pass, resource.index, resource.generation, message);
+    // **Two spellings, and the grouped one exists for the human rather than for symmetry.**
+    // Four lines all reading "this pass is in a dependency cycle" are four unrelated
+    // complaints in a log unless something says which report each belongs to -- that is the
+    // whole argument for `GraphDiagnostic::group`, and it applies just as much to the line
+    // beside the row. The ungrouped spelling is left byte-identical rather than given a
+    // `report none` field, because twelve of the fourteen refusals have no grouping and a
+    // field that always says "none" is noise on every line that a reader has to learn to skip.
+    if (group == kNoDiagnosticGroup) {
+        MONARC_LOG(LogCategories::RenderGraph, Error,
+                   "refused: {} ({}) pass {} resource {}:{} -- {}", ToString(kind),
+                   Monarc::ToString(code), pass, resource.index, resource.generation, message);
+    } else {
+        MONARC_LOG(LogCategories::RenderGraph, Error,
+                   "refused: {} ({}) pass {} resource {}:{} report {} -- {}", ToString(kind),
+                   Monarc::ToString(code), pass, resource.index, resource.generation, group,
+                   message);
+    }
 
     if (m_diagnostics.Size() < m_config.maxDiagnostics) {
-        // `group` is deliberately left at its default rather than assigned like the five fields
-        // below it: every refusal a *declaration* can produce is about one pass and one
-        // resource, so every row this function writes stands alone, and a redundant write would
-        // read as though something here chose a group. Task 2's cycle report is the first
-        // caller with a reason to set one -- see `GraphDiagnostic::group`.
+        // `group` is written like the five fields beside it now that a caller chooses one.
+        // Every refusal a *declaration* produces passes `kNoDiagnosticGroup`, which is the
+        // default and the truth about it: that row stands alone.
         GraphDiagnostic diagnostic{};
         diagnostic.kind     = kind;
         diagnostic.code     = code;
         diagnostic.message  = message;
         diagnostic.pass     = pass;
         diagnostic.resource = resource;
+        diagnostic.group    = group;
         m_diagnostics.Push(diagnostic);
     } else {
         // Counted rather than dropped silently. A truncated diagnostics list that read as a

@@ -65,6 +65,8 @@ const char* ToString(DiagnosticKind kind) {
         case DiagnosticKind::InvalidImport:           return "InvalidImport";
         case DiagnosticKind::RecordAlreadySet:        return "RecordAlreadySet";
         case DiagnosticKind::AlreadyCompiled:         return "AlreadyCompiled";
+        case DiagnosticKind::DependencyCycle:         return "DependencyCycle";
+        case DiagnosticKind::TransientNeverWritten:   return "TransientNeverWritten";
     }
     return "<invalid DiagnosticKind>";
 }

@@ -11,6 +11,7 @@
 #include <Monarc/Render/ResourceId.h>
 
 #include <cstddef>
+#include <span>
 #include <string_view>
 
 namespace Monarc::Render {
@@ -92,8 +93,8 @@ public:
         /// other.
         u32 maxAccesses = 512;
 
-        /// Capacity of the derived-barrier list. **Nothing fills it in Task 1** -- derivation
-        /// is Task 3's -- so this sizes a pool that is currently always empty, and is here
+        /// Capacity of the derived-barrier list. **Nothing fills it yet** -- derivation is
+        /// Task 3's -- so this sizes a pool that is currently always empty, and is here
         /// because the pool has to be allocated at construction rather than when the first
         /// barrier is derived.
         u32 maxBarriers = 256;
@@ -140,24 +141,32 @@ public:
     ///
     /// **Callable with no device, deliberately and permanently -- see the class comment.**
     ///
-    /// **What it does in Phase A4 Task 1, stated exactly, because the rest of the phase is
-    /// what fills it in.** It validates the declarations and settles execution order as
-    /// declaration order, with nothing culled. It computes no lifetimes, groups no aliases and
-    /// derives no barriers: Task 2 is the first two and Task 3 the third, and until then
-    /// inspection reports every lifetime empty, every alias group absent and the barrier list
-    /// empty. A green suite here is not evidence that any of those work.
+    /// **What it does, in the order it does it, because two of the orderings are
+    /// load-bearing.** It builds the dependency graph from the declared reads and writes;
+    /// refuses a graph with a dependency cycle, or with a transient some pass reads and none
+    /// writes; derives execution order by topological sort; culls the passes nothing consumes;
+    /// computes each resource's lifetime over the passes that survived; and groups transients
+    /// whose lifetimes do not overlap and whose descriptions agree. Culling comes before
+    /// lifetimes so that a culled reader shortens a lifetime rather than extending it, and
+    /// ordering comes before both because a lifetime is a pair of execution positions.
     ///
-    /// Fails with `ErrorCode::InvalidArgument` if the graph is not accepting declarations, and
-    /// with the code of the first recorded diagnostic if any declaration was refused -- a
-    /// graph with a rejected declaration does not compile, whether or not the caller checked
-    /// the `Status` that refusal returned. Either way the phase becomes
-    /// `GraphPhase::CompileFailed` and inspection stays readable.
+    /// **It derives no barriers.** Task 3 of the phase plan is that, and until it lands
+    /// `GraphInspection::barriers` is empty -- so a green suite here is not evidence that any
+    /// barrier is derived.
+    ///
+    /// Fails with `ErrorCode::InvalidArgument` if the graph is not accepting declarations, with
+    /// the code of the first recorded diagnostic if any declaration was refused -- a graph with
+    /// a rejected declaration does not compile, whether or not the caller checked the `Status`
+    /// that refusal returned -- and with `ErrorCode::InvalidArgument` for a cycle or an
+    /// unwritten transient. Either way the phase becomes `GraphPhase::CompileFailed`,
+    /// inspection stays readable, and no execution order, culling decision, lifetime or alias
+    /// group is reported, because none was settled.
     [[nodiscard]] Status Compile();
 
     /// Records the compiled frame into `commands`, creating and destroying the transient
     /// resources it needs on `device`.
     ///
-    /// **Not implemented in Task 1, and it refuses rather than doing nothing.** Task 4 of the
+    /// **Not implemented yet, and it refuses rather than doing nothing.** Task 4 of the
     /// phase plan is what writes it, in Private/Execute.cpp -- the only file in this module
     /// that will touch an `RHI::ICommandList`. Until then this returns
     /// `ErrorCode::Unsupported`, because a call that silently succeeded having recorded
@@ -243,11 +252,87 @@ private:
     /// about the build being unfinished rather than about the declarations in it.
     ///
     /// `message` must be a string literal -- `Error::message` is a non-owning view.
+    ///
+    /// `group` is defaulted because exactly one caller passes one: the cycle report, which is
+    /// the only refusal in the module that is about several passes at once. Defaulted rather
+    /// than required so that the twelve declaration refusals keep saying nothing about a
+    /// grouping they do not have -- see `GraphDiagnostic::group`.
     [[nodiscard]] Error Refuse(DiagnosticKind kind, ErrorCode code, const char* message,
-                               u32 pass, TextureId resource);
+                               u32 pass, TextureId resource,
+                               u32 group = kNoDiagnosticGroup);
 
     /// Destroys every stored recording callback. Called by `Reset` and by the destructor.
     void DestroyRecords();
+
+    // ---------------------------------------------------------------------------------
+    // Compilation's stages, in Private/Compile.cpp and called only by `Compile` in the
+    // order they are declared. Each is a pure function of the declarations plus what the
+    // stages before it wrote -- there is no device anywhere below this line.
+    // ---------------------------------------------------------------------------------
+
+    /// Buckets the flat access list by resource and by pass, so that every later stage can
+    /// enumerate one pass's accesses or one resource's accesses without scanning all of them.
+    void BuildAccessBuckets();
+
+    /// The accesses naming one resource, or declared by one pass, as indices into
+    /// `m_accesses` and in declaration order. Valid only after `BuildAccessBuckets`.
+    /// @{
+    [[nodiscard]] std::span<const u32> AccessesOfResource(u32 resource) const;
+    [[nodiscard]] std::span<const u32> AccessesOfPass(u32 pass) const;
+    /// @}
+
+    /// Visits the dependency edges leaving `pass` -- `visit(reader)` once per other pass that
+    /// reads a resource `pass` writes -- or those entering it. The two walk the same edge set
+    /// with the same multiplicity, in the two directions.
+    ///
+    /// **What is and is not an edge is argued at length at the head of Private/Compile.cpp**,
+    /// which is also the only translation unit that instantiates these: they are templates so
+    /// that a visitor costs no indirect call and no type erasure on a path a frame runs, and
+    /// private because the edge rule is compilation's business and nothing else's.
+    /// @{
+    template <typename Visit>
+    void ForEachSuccessor(u32 pass, Visit visit) const;
+
+    template <typename Visit>
+    void ForEachPredecessor(u32 pass, Visit visit) const;
+    /// @}
+
+    /// Fills `m_passOrder` with a topological order of the declared dependencies, refusing a
+    /// graph that has none.
+    ///
+    /// A dependency cycle is the only way this fails, and it reports one
+    /// `DiagnosticKind::DependencyCycle` per pass in each cycle, grouped.
+    [[nodiscard]] Status OrderPasses();
+
+    /// Records one `DiagnosticKind::DependencyCycle` row per pass in each cycle, grouped, and
+    /// returns the refusal `Compile` hands its caller. Called only from `OrderPasses`, and only
+    /// on the path where it could not place every pass.
+    [[nodiscard]] Error ReportDependencyCycles();
+
+    /// Marks every pass `OrderPasses` could not place that is reachable from `from`, following
+    /// dependency edges forwards or backwards. The two sweeps together are what identify one
+    /// mutually-dependent set; see `ReportDependencyCycles`.
+    void MarkReachable(u32 from, bool forward);
+
+    /// Refuses every transient that some pass reads and no pass writes. Independent of
+    /// execution order, so it runs whether or not `OrderPasses` succeeded.
+    [[nodiscard]] Status RefuseUnwrittenTransients();
+
+    /// Marks every pass nothing consumes, transitively. Needs `m_passOrder`.
+    void CullPasses();
+
+    /// Numbers the surviving passes `0..n-1` in execution order, and writes `kNoPass` for the
+    /// culled ones.
+    void NumberSurvivingPasses();
+
+    /// Computes every resource's lifetime over the surviving passes.
+    void ComputeLifetimes();
+
+    /// Groups transients whose lifetimes do not overlap and whose descriptions are compatible.
+    ///
+    /// **The grouping is a decision, not a saving** -- every transient still gets its own
+    /// allocation. The function's own comment says so where the decision is made.
+    void GroupAliases();
 
     // No allocator member. Every pool below holds its own reference (`Array` takes one at
     // construction), and this class allocates nowhere except in its constructor -- so a second
@@ -264,6 +349,65 @@ private:
     Array<DerivedBarrier>     m_barriers;
     Array<GraphDiagnostic>    m_diagnostics;
     Array<PassRecordSlot>     m_records;
+
+    // ---------------------------------------------------------------------------------
+    // Compilation's scratch state.
+    //
+    // **Every array below is filled to its capacity in the constructor and indexed from
+    // there on, exactly as `m_records` is, so that `Compile` appends to nothing and
+    // allocates nothing.** A frame compiles the graph, so compilation is a path a frame
+    // runs and is held to the same rule declaration is -- see the class comment.
+    //
+    // **No `Config` field was added for any of them, and that is the point of listing the
+    // sizes here.** Each is a function of a capacity the caller already chose: an entry per
+    // pass, an entry per resource, or an entry per access. A `Config` field for a scratch
+    // array would be asking a caller to size a buffer whose existence is an implementation
+    // detail of a stage they cannot see, which is the same objection `maxBarriers` and
+    // `maxDiagnostics` answer by being defaulted.
+    //
+    // They are *not* cleared by `Reset`, and do not need to be: every stage writes the slots
+    // it will read at the start of its own pass over them, so no compile can read a value the
+    // previous one left. The one array whose *valid range* depends on an earlier stage having
+    // succeeded says so at its own field. Tests/TestDependencyGraph.cpp compiles a graph,
+    // resets it and compiles a second, opposite build for exactly this reason.
+    // ---------------------------------------------------------------------------------
+
+    /// Access indices grouped by the resource they name: `maxAccesses` entries, with
+    /// `m_resourceBucketStart` holding the `maxResources + 1` bucket boundaries. Declaration
+    /// order is preserved inside each bucket, which is what makes every stage's answer
+    /// deterministic.
+    /// @{
+    Array<u32> m_accessesByResource;
+    Array<u32> m_resourceBucketStart;
+    /// @}
+
+    /// The same, grouped by the pass that declared them: `maxAccesses` entries and
+    /// `maxPasses + 1` boundaries.
+    /// @{
+    Array<u32> m_accessesByPass;
+    Array<u32> m_passBucketStart;
+    /// @}
+
+    /// Execution position to declaration index -- the topological order `OrderPasses`
+    /// produces, and the array every stage after it walks. `maxPasses` entries; only the
+    /// first `m_passes.Size()` are meaningful, and only after a successful `OrderPasses`.
+    Array<u32> m_passOrder;
+
+    /// Kahn's unsatisfied-predecessor count per pass, and afterwards the record of which
+    /// passes got ordered at all -- which is what `ReportDependencyCycles` reads it for.
+    /// `maxPasses` entries.
+    Array<u32> m_passIndegree;
+
+    /// Traversal flags per pass, used only by `ReportDependencyCycles`. `maxPasses` entries.
+    Array<u32> m_passMark;
+
+    /// The traversal work stack `ReportDependencyCycles` pushes onto. `maxPasses` entries,
+    /// which is enough because nothing is pushed twice.
+    Array<u32> m_passStack;
+
+    /// The first-fit bin `GroupAliases` put each resource in, before bins of one member are
+    /// discarded and the rest become alias groups. `maxResources` entries.
+    Array<u32> m_resourceBin;
 };
 
 }  // namespace Monarc::Render

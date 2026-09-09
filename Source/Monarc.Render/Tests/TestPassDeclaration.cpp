@@ -27,7 +27,6 @@ using Monarc::Render::DiagnosticKind;
 using Monarc::Render::GraphInspection;
 using Monarc::Render::GraphPhase;
 using Monarc::Render::GraphQueue;
-using Monarc::Render::kNoAliasGroup;
 using Monarc::Render::kNoPass;
 using Monarc::Render::PassBuilder;
 using Monarc::Render::PassCommandList;
@@ -925,16 +924,26 @@ TEST_CASE("Reset clears the dropped-diagnostic count, so the next build can comp
     CHECK(graph.Inspect().diagnosticsDropped == 0u);
 }
 
-TEST_CASE("Compile settles execution order and culls nothing") {
+TEST_CASE("nothing has an execution order until Compile settles one") {
+    // The half of ordering that belongs to this file -- that a graph inspected mid-declaration
+    // cannot be read as though its order were decided. **How** the order is derived, and that
+    // it is not declaration order, is TestDependencyGraph.cpp's.
+    //
+    // Each pass writes an imported image of its own, which is what keeps all three out of the
+    // culler: a pass writing nothing at all has no output for anything to consume, and
+    // TestCull.cpp is where that is asserted rather than worked around.
     SystemAllocator allocator;
     RenderGraph     graph(allocator, RenderGraph::Config{});
 
-    for (int i = 0; i < 3; ++i) {
-        REQUIRE(graph.AddPass("Pass").has_value());
+    for (Monarc::u32 i = 0; i < 3u; ++i) {
+        Result<PassBuilder> pass = graph.AddPass("Pass");
+        REQUIRE(pass.has_value());
+        const Result<TextureId> image =
+            pass->ImportTexture("Target", SwapchainImport(TextureHandle::ForTesting(i, 1)));
+        REQUIRE(image.has_value());
+        REQUIRE(pass->Write(*image, ResourceAccess::ColorAttachmentWrite));
     }
 
-    // No execution order before compilation, which is what stops a mid-declaration inspection
-    // from being read as though the order were decided.
     const GraphInspection declaring = graph.Inspect();
     for (const Monarc::Render::PassInspection& pass : declaring.passes) {
         CHECK(pass.executionOrder == kNoPass);
@@ -947,16 +956,21 @@ TEST_CASE("Compile settles execution order and culls nothing") {
     REQUIRE(compiled.passes.size() == 3u);
     for (Monarc::u32 i = 0; i < 3u; ++i) {
         CHECK(compiled.passes[i].index == i);
+        // Independent passes, so the tie-break decides and the tie-break is declaration order.
         CHECK(compiled.passes[i].executionOrder == i);
         CHECK_FALSE(compiled.passes[i].culled);
     }
 }
 
-TEST_CASE("Compile computes no lifetimes, no alias groups and no barriers in Task 1") {
-    // **Asserted so that a green suite cannot be read as evidence that any of them works.**
-    // The plan's Task 2 computes lifetimes and alias groups and Task 3 derives barriers; until
-    // then these are the honest answers, and each of these three lines is what will have to
-    // change when the task that owns it lands.
+TEST_CASE("Compile derives no barriers, which is Task 3's") {
+    // **Asserted so that a green suite cannot be read as evidence that the derivation works.**
+    // The frame below is the one Task 3's checklist calls "write-then-sampled-read across two
+    // passes is one barrier"; today it is zero barriers, and this is the line that will have to
+    // change when Task 3 lands.
+    //
+    // The lifetime is asserted beside it for one reason: it says the frame is a real one that
+    // survived culling, so "no barriers" is a statement about the derivation rather than about
+    // a frame with nothing in it. Lifetimes themselves are TestLifetimes.cpp's.
     SystemAllocator allocator;
     RenderGraph     graph(allocator, RenderGraph::Config{});
 
@@ -969,16 +983,16 @@ TEST_CASE("Compile computes no lifetimes, no alias groups and no barriers in Tas
     Result<PassBuilder> consumer = graph.AddPass("Consumer");
     REQUIRE(consumer.has_value());
     REQUIRE(consumer->Read(*target, ResourceAccess::SampledRead));
+    const Result<TextureId> image = consumer->ImportTexture("Swapchain", SwapchainImport());
+    REQUIRE(image.has_value());
+    REQUIRE(consumer->Write(*image, ResourceAccess::ColorAttachmentWrite));
 
     REQUIRE(graph.Compile());
 
     const GraphInspection inspection = graph.Inspect();
-    // Written and read by two different passes, so Task 2 will give this a lifetime of 0..1.
-    CHECK(inspection.resources[0].lifetime.IsEmpty());
-    CHECK(inspection.resources[0].lifetime.firstPass == kNoPass);
-    CHECK(inspection.resources[0].lifetime.lastPass == kNoPass);
-    CHECK(inspection.resources[0].aliasGroup == kNoAliasGroup);
-    // Write-then-sampled-read across two passes is one barrier, and Task 3 is what derives it.
+    REQUIRE(inspection.resources.size() == 2u);
+    CHECK(inspection.resources[0].lifetime.firstPass == 0u);
+    CHECK(inspection.resources[0].lifetime.lastPass == 1u);
     CHECK(inspection.barriers.empty());
 }
 
@@ -1192,15 +1206,20 @@ TEST_CASE("a resource nothing accesses is not an error") {
     CHECK(inspection.diagnostics.empty());
 }
 
-TEST_CASE("a pass with no declarations at all is not an error") {
-    // Whether such a pass survives culling is Task 2's question -- nothing consumes its
-    // outputs because it has none. Declaring it is not itself a refusal.
+TEST_CASE("a pass with no declarations at all is not an error, and is culled") {
+    // Declaring it is not a refusal, and it does not run: nothing consumes its outputs because
+    // it has none. TestCull.cpp is where that rule is exercised rather than merely observed.
     SystemAllocator allocator;
     RenderGraph     graph(allocator, RenderGraph::Config{});
 
     REQUIRE(graph.AddPass("Empty").has_value());
     CHECK(graph.Compile());
-    CHECK(graph.Inspect().diagnostics.empty());
+
+    const GraphInspection inspection = graph.Inspect();
+    CHECK(inspection.diagnostics.empty());
+    REQUIRE(inspection.passes.size() == 1u);
+    CHECK(inspection.passes[0].culled);
+    CHECK(inspection.passes[0].executionOrder == kNoPass);
 }
 
 // ---------------------------------------------------------------------------------------

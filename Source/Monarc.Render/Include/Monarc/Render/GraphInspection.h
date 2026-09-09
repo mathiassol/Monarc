@@ -31,12 +31,12 @@ namespace Monarc::Render {
 // branch deleted assertions of exactly that shape. The text exists because a debug view and a
 // diffable artifact need one, and it is tested as its own function.
 //
-// **Fields whose data arrives in a later task are present now, and empty.** `ResourceLifetime`
-// and `ResourceInspection::aliasGroup` are Task 2's; `DerivedBarrier` and its `BarrierCause`
-// are Task 3's. Each says so in its own comment, and each says what its value is until then.
-// A field with nothing computing it yet is a gap that is visible; a decision the type cannot
-// express is a decision no test can reach, which is the failure mode this whole header exists
-// to avoid.
+// **Fields whose data arrives in a later task are present now, and empty.** `DerivedBarrier`
+// and its `BarrierCause` are Task 3's, and say so in their own comments. `ResourceLifetime`,
+// `ResourceInspection::aliasGroup` and the culling and ordering `PassInspection` reports are
+// Task 2's and are computed. A field with nothing computing it yet is a gap that is visible; a
+// decision the type cannot express is a decision no test can reach, which is the failure mode
+// this whole header exists to avoid.
 // ---------------------------------------------------------------------------------------
 
 /// No pass. An execution-order position a culled pass does not have, and the end of the graph
@@ -92,20 +92,33 @@ enum class GraphQueue : u32 {
 
 /// The span of execution order over which a resource is live: first write to last read.
 ///
-/// **Task 2 computes this; until then every lifetime is empty.** A compiled graph in Phase A4
-/// Task 1 reports `kNoPass` for both ends of every resource, because nothing walks the access
-/// list yet. Tests/TestPassDeclaration.cpp asserts exactly that, and names Task 2 as what
-/// turns it into a real answer -- so a green suite here cannot be read as "lifetimes work".
+/// **Computed over the passes that survive culling, which is what makes it shrink.** A pass
+/// that does not run cannot extend a lifetime, so a transient whose last reader was culled is
+/// live for a shorter span than its declarations suggest -- and that is the point of computing
+/// the two in this order rather than the other. See `CullPasses` and `ComputeLifetimes` in
+/// Private/Compile.cpp.
+///
+/// **Both ends are positions in execution order, and every resource gets one, imported
+/// included.** The alias grouping is the only consumer that ignores the imported ones, because
+/// the graph does not own their memory.
 struct ResourceLifetime {
-    /// Execution-order position of the first pass that writes the resource, or `kNoPass`.
+    /// Execution-order position of the first surviving pass that **writes** the resource, or
+    /// `kNoPass`.
+    ///
+    /// A read is not a first use here. For a transient that is not a distinction that can bite
+    /// -- one read by a surviving pass and written by none is refused with
+    /// `DiagnosticKind::TransientNeverWritten` -- but an imported resource a surviving pass
+    /// only reads legitimately has `kNoPass` here and a real `lastPass`, because its first
+    /// contents came from outside the graph.
     u32 firstPass = kNoPass;
 
-    /// Execution-order position of the last pass that reads or writes it, or `kNoPass`.
+    /// Execution-order position of the last surviving pass that reads or writes it, or
+    /// `kNoPass`.
     u32 lastPass = kNoPass;
 
-    /// Whether this names no passes at all -- either because nothing uses the resource, or
-    /// because nothing has computed it yet. **Those two are not distinguished, and cannot be
-    /// from this struct alone**: see the note above.
+    /// Whether this names no *write* -- which for a transient means nothing that runs uses the
+    /// resource at all, and for an imported one may instead mean every surviving use is a read.
+    /// `lastPass` is what separates those two.
     [[nodiscard]] constexpr bool IsEmpty() const { return firstPass == kNoPass; }
 
     constexpr bool operator==(const ResourceLifetime&) const = default;
@@ -125,11 +138,19 @@ struct PassInspection {
     /// `culled` -- and `kNoPass` also while the graph is still declaring, because nothing has
     /// settled an order yet.
     ///
-    /// **Equal to `index` for every pass of a *compiled* graph in Phase A4 Task 1**, because
-    /// nothing reorders and nothing culls yet: execution order is declaration order. Task 2 is
-    /// what makes the two diverge. The qualification matters -- `AddPass` writes `kNoPass` on
-    /// purpose so that a graph inspected mid-declaration cannot be read as though its order
-    /// were decided, and Tests/TestPassDeclaration.cpp asserts exactly that before it compiles.
+    /// **Derived by a topological sort of the declared dependencies, not taken from declaration
+    /// order** -- so the two numbers genuinely differ, and a pass declared third can run first.
+    /// Declaration order is only the sort's tie-break, which is what keeps a frame's report
+    /// stable between builds. `OrderPasses` in Private/Compile.cpp carries the argument.
+    ///
+    /// **Dense over the passes that run**: the survivors are numbered `0..n-1` in execution
+    /// order with no gaps where a culled pass was, because this field is a position among the
+    /// passes that will actually run rather than a place in the sorted list.
+    ///
+    /// `AddPass` writes `kNoPass` on purpose so that a graph inspected mid-declaration cannot be
+    /// read as though its order were decided, and a graph whose `Compile` *failed* keeps
+    /// `kNoPass` here for the same reason -- there is no order to report.
+    /// Tests/TestPassDeclaration.cpp asserts both.
     ///
     /// **Defaulted to `kNoPass` and not to zero**, which is the sentinel convention every other
     /// "no pass here" field in this header follows. A default-constructed `PassInspection` that
@@ -138,7 +159,14 @@ struct PassInspection {
 
     /// Whether nothing consumes this pass's outputs, so it will not run.
     ///
-    /// **Always false in Task 1.** Culling is Task 2's.
+    /// **"Consumes" means a declared read by a pass that itself runs, or the world outside the
+    /// graph.** A pass writing an imported resource always survives; a pass writing only
+    /// transients survives exactly while some surviving pass reads one of them; a pass writing
+    /// nothing at all never survives. A recording callback is not an output and does not keep a
+    /// pass alive -- `CullPasses` in Private/Compile.cpp says why.
+    ///
+    /// False for every pass while the graph is declaring, and false after a failed `Compile`:
+    /// nothing was decided in either case.
     bool culled = false;
 
     /// The queue this pass is assigned to. See `GraphQueue`.
@@ -162,7 +190,7 @@ struct PassInspection {
 /// resource is not accessing it -- `PassBuilder::CreateTexture` states that rule, and
 /// `AccessInspection` is where every pass-to-resource edge lives -- so a `createdBy` field
 /// would be the one edge in the report that is not an access. It would also tie a resource to a
-/// pass that Task 2 may cull, leaving a live resource pointing at a pass that does not run, and
+/// pass the culling may drop, leaving a live resource pointing at a pass that does not run, and
 /// the derivation has no use for it: a barrier comes from two *accesses*. If a debug view ever
 /// wants the answer, the declaring pass is recoverable from nothing today, which is the honest
 /// cost of this and is why it is written down here.
@@ -193,18 +221,24 @@ struct ResourceInspection {
     /// `origin` is `Imported`.
     TextureState outgoing = {};
 
-    /// See `ResourceLifetime`: Task 2's, and empty until then.
+    /// The span of execution order over which the resource is live. See `ResourceLifetime`,
+    /// which is where the two ends' exact meanings are, and note that an empty one does not
+    /// always mean unused.
     ResourceLifetime lifetime = {};
 
     /// The group of resources this one shares memory with, or `kNoAliasGroup`.
     ///
-    /// **Task 2 computes this, and Phase A4 deliberately does not honour it.** The graph
-    /// groups transients whose lifetimes do not overlap and whose descriptions are
-    /// compatible, and emits the grouping here; the RHI still backs every transient with its
-    /// own allocation, because sharing one needs sub-allocation and Monarc's memory is one
-    /// allocation per resource. **So a populated alias group is a decision that was computed
-    /// and reported, not memory that was saved.** Until Task 2 this is `kNoAliasGroup` for
-    /// every resource.
+    /// **Computed, and deliberately not honoured.** The graph groups transients whose
+    /// lifetimes do not overlap and whose descriptions are compatible, and emits the grouping
+    /// here; the RHI still backs every transient with its own allocation, because sharing one
+    /// needs sub-allocation and Monarc's memory is one allocation per resource. **So a
+    /// populated alias group is a decision that was computed and reported, not memory that was
+    /// saved, and a green aliasing test says nothing about bytes.** `GroupAliases` in
+    /// Private/Compile.cpp repeats this where the decision is made.
+    ///
+    /// `kNoAliasGroup` means this resource shares memory with nothing -- an imported resource,
+    /// one no surviving pass writes, or one whose lifetime overlaps or whose description
+    /// disagrees with every other candidate's. A group always has at least two members.
     u32 aliasGroup = kNoAliasGroup;
 
     // **No `operator==`, unlike every other type in this header, and clang is what said so.**
@@ -217,10 +251,12 @@ struct ResourceInspection {
     // viable 'operator==' for member 'description'`. Found by the clang-debug preset with all
     // twenty msvc-debug tests green, which is the divergence ADR-0003 keeps that build for.
     //
-    // Absent rather than hand-written, because the first real caller is Task 2's alias
-    // grouping and what it needs is *compatibility* -- same format, same extent -- rather than
-    // equality. Guessing at that rule now and then finding it wrong is worse than comparing
-    // the two fields a test cares about, which is what Tests/TestPassDeclaration.cpp does.
+    // Absent rather than hand-written, and the first real caller settled it: the alias
+    // grouping wanted *compatibility* -- same format, same extent -- rather than equality, and
+    // `DescriptionsAreCompatible` in Private/Compile.cpp is where that lives. Guessing at the
+    // rule before it had a caller would have produced the wrong function; comparing the two
+    // fields a test cares about, which is what Tests/TestPassDeclaration.cpp does, cost
+    // nothing in the meantime.
 };
 
 /// One pass's declared access to one resource.
@@ -287,7 +323,7 @@ struct BarrierCause {
 
 /// One barrier the graph derived.
 ///
-/// **Task 3 fills this list; it is empty in Task 1, and the type is here now on purpose.** A
+/// **Task 3 fills this list; it is empty until then, and the type is here now on purpose.** A
 /// barrier the inspection could not express would be a barrier no test could assert on, which
 /// is the whole thing A4 exists to change.
 ///
@@ -321,8 +357,9 @@ struct DerivedBarrier {
 ///
 /// **One enumerator per refusal the graph can produce, and no placeholders for later tasks.**
 /// A diagnostic kind is what a test asserts on instead of matching a message, so an
-/// enumerator nothing emits would be an assertion nobody could write. Task 2's cycle report
-/// adds its own.
+/// enumerator nothing emits would be an assertion nobody could write. The first twelve are
+/// declaration refusals; the last two are Task 2's, and are the only two `Compile` itself
+/// records about the declarations it was given.
 enum class DiagnosticKind : u32 {
     /// `AddPass` was called with every pass slot occupied.
     PassPoolExhausted = 0,
@@ -366,6 +403,28 @@ enum class DiagnosticKind : u32 {
 
     /// `Compile` was called on a graph that was not accepting declarations.
     AlreadyCompiled,
+
+    /// This pass is one of a set among which no execution order exists: each of them depends,
+    /// directly or through the others, on a resource one of the others writes.
+    ///
+    /// **One row per pass in the set, all carrying the same `group`** -- see that field. The
+    /// set is the passes the cycle runs through, not every pass that cannot be ordered: a pass
+    /// that merely *reads* the output of a cycle has no order either, and gets no row, because
+    /// it is not what has to change.
+    DependencyCycle,
+
+    /// A transient resource that some pass reads and no pass writes.
+    ///
+    /// **Distinct from `DependencyCycle`, and the two must stay distinguishable**: a cycle is a
+    /// mutual dependency and this is an absent one. A transient has no contents until something
+    /// writes it, so a pass reading one that nothing wrote reads undefined memory. An *imported*
+    /// resource read first is not this case at all -- it arrives with a declared
+    /// `ResourceInspection::incoming` state, so reading it first is meaningful.
+    ///
+    /// One row per resource rather than per reading pass: what is wrong is that nothing writes
+    /// the resource, which is one mistake however many passes read it. `pass` names the pass
+    /// that declared the earliest of those reads.
+    TransientNeverWritten,
 };
 
 /// One refusal, with what it was about.
@@ -432,12 +491,18 @@ struct GraphDiagnostic {
     /// Which multi-row report this row is one of, or `kNoDiagnosticGroup` for a refusal that
     /// stands alone.
     ///
-    /// **`kNoDiagnosticGroup` on every diagnostic Task 1 records, and that is not a stub.**
-    /// Every refusal a declaration can produce is about one pass and one resource, so every one
-    /// of them stands alone; the field is here because the first refusal that is *not* -- Task
-    /// 2's cycle -- would otherwise need this type changed underneath the two suites that
-    /// already assert on it field by field. See the note above for why this shape and not the
-    /// two others.
+    /// **`kNoDiagnosticGroup` on every refusal a *declaration* produces**, because every one of
+    /// those is about one pass and one resource and stands alone. `DiagnosticKind::DependencyCycle`
+    /// is the one kind that sets it: one row per pass in the cycle, all carrying the same id,
+    /// and a second cycle in the same build gets the next id. See the note above for why this
+    /// shape and not the two others.
+    ///
+    /// **What one group is, exactly, is a set of passes among which no order exists** -- which
+    /// merges two cycles that share a pass into one group of three rather than reporting two
+    /// groups of two. That is a deliberate narrowing of what this field could express, and
+    /// Private/Compile.cpp argues it where the grouping happens: enumerating every elementary
+    /// cycle is exponential in the pass count, and the mutually-dependent set is both
+    /// computable in linear time and the minimal set of declarations that has to change.
     u32 group = kNoDiagnosticGroup;
 
     constexpr bool operator==(const GraphDiagnostic&) const = default;
@@ -522,16 +587,17 @@ struct InspectionText {
 ///
 /// **Two index spaces name passes, and every number that is in one of them says which.** A
 /// pass has a declaration index (`PassInspection::index`, and its position in `passes`) and an
-/// execution position (`PassInspection::executionOrder`), and they are different numbers the
-/// moment Task 2 reorders or culls anything. `decl-pass=` is always the first;
-/// `order=` -- on the pass line, on the barrier line's `before-order=`, and inside a barrier
-/// cause -- is always the second. Nothing renders a bare number for a pass, and the leading
-/// number on every line is a row in that line's own array rather than either space.
+/// execution position (`PassInspection::executionOrder`), and they are **different numbers in
+/// any frame whose passes were reordered or culled**, which is most of them. `decl-pass=` is
+/// always the first; `order=` -- on the pass line, on the barrier line's `before-order=`, and
+/// inside a barrier cause -- is always the second. Nothing renders a bare number for a pass,
+/// and the leading number on every line is a row in that line's own array rather than either
+/// space.
 ///
-/// The distinction is *invisible* in Task 1, because a compiled graph's two spaces coincide.
-/// Which is the reason to spell it now: the first report where the same printed number in two
-/// lines meant two different passes would be a report somebody had already learned to read
-/// the other way.
+/// The distinction was spelled out here before anything could produce it, while a compiled
+/// graph's two spaces still coincided -- so that the first report where the same printed
+/// number in two lines meant two different passes was not a report somebody had already
+/// learned to read the other way.
 ///
 /// Written through `std::format_to_n`, which is ADR-0003's condition on `<format>` in runtime
 /// code, and through `std::formatted_size` for the counting-only call -- see

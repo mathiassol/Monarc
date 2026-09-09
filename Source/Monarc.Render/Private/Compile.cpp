@@ -1,32 +1,616 @@
 #include <Monarc/Render/RenderGraph.h>
 
+#include <span>
+
 // Compilation: everything the graph decides between the last declaration and the first
 // recorded command.
 //
-// **This file is where the phase's value lives, and in Task 1 it is nearly empty.** The plan's
-// Task 2 fills in the dependency graph, cycle detection, culling, lifetimes and alias
-// grouping; Task 3 adds the derivation, in DeriveBarriers.cpp. What is here now is the
-// validation gate and the execution order, and the rest is stated as absent rather than
-// stubbed as present:
+// **Nothing in this file touches a device, and that is the design the phase turns on rather
+// than a property it happens to have.** Every stage below reads `m_passes`, `m_resources` and
+// `m_accesses` -- three arrays of plain aggregates filled by declaration -- and writes back
+// into fields of the same three. There is no `RHI::IDevice`, no `RHI::ICommandList` and no
+// `RHI::TextureHandle` on any path here: the only RHI type this file names at all is
+// `RHI::TextureDescription`, and it reads two of its fields to decide whether two transients
+// could share memory. So a machine with no GPU, no Vulkan driver and no display can check the
+// whole of a frame's ordering, culling, lifetimes and aliasing, which is where CI runs. See
+// `RenderGraph`'s class comment; Task 3's derivation joins this file's discipline in
+// DeriveBarriers.cpp, and Task 4's `Execute` is the first line of the module that needs a
+// device at all.
 //
-//   - no dependency graph, so no cycle can be detected;
-//   - no culling, so `PassInspection::culled` is false for every pass;
-//   - no lifetimes, so every `ResourceLifetime` is empty;
-//   - no alias grouping, so every `aliasGroup` is `kNoAliasGroup`;
-//   - no derivation, so `GraphInspection::barriers` is empty.
+// **What is still absent, stated rather than stubbed**: no barriers are derived, so
+// `GraphInspection::barriers` is empty and Task 3 of the phase plan is what fills it. A green
+// suite here is not evidence that any barrier is derived.
 //
-// Tests/TestPassDeclaration.cpp asserts the last four of those directly, naming the task that
-// changes each -- so a green suite here cannot be mistaken for evidence that any of them
-// works. The first is the one no test can assert: there is nothing to look at when no
-// dependency graph is built, and a case asserting that a cycle goes undetected would have to
-// be deleted by Task 2 rather than extended. It is stated here instead.
+// ---------------------------------------------------------------------------------------
+// The dependency edges, once, because four places below walk them.
 //
-// **Nothing in this file, or in the two that will join it, touches a device.** That is the
-// design the phase turns on: compilation is a pure function over declarations, so a machine
-// with no GPU can check the whole of a frame's synchronisation. See `RenderGraph`'s class
-// comment.
+// **An edge runs from a pass that writes a resource to a *different* pass that reads it, and
+// nothing else is an edge.** The two omissions are deliberate and each has a reason that is
+// not "it was not needed yet".
+//
+// **No write-after-write edge.** Two passes writing one resource with nothing reading it
+// between them are not ordered by anything real, and an edge in declaration order between
+// them would invent cycles that are not there: pass A writes T and reads S, pass B writes T
+// and writes S. The only true dependency is B before A, for S -- but a declaration-order WAW
+// edge on T says A before B, and the graph would refuse a frame that has a perfectly good
+// order. Their relative order is settled by the sort's declaration-order tie-break instead,
+// which is what a caller who wrote them in that order asked for.
+//
+// **No write-after-read edge either, and this one cannot be written down at all.** An
+// anti-dependency is "this read must happen before that overwrite", which presupposes knowing
+// which of the two comes first -- and that is the thing being computed. Adding the edge
+// naively is self-contradictory: any resource with a writer P and a reader Q gets a
+// write-then-read edge P->Q *and* a read-then-write edge Q->P, so every single
+// producer/consumer pair in the graph would be reported as a cycle. So a read of a resource
+// another pass overwrites is ordered by the tie-break, exactly as two writes are.
+//
+// **And no self-edge.** A pass that declares both a read and a write of one resource is the
+// read-modify-write attachment `PassBuilder::Write` states is legal -- a `LoadOp::Load` target
+// or a blend. Under an edge rule that did not exclude the reader being the writer it would be
+// a one-pass cycle, and the legal declaration would be refused.
+//
+// The edge *set* is what `ForEachSuccessor` and `ForEachPredecessor` walk, in the two
+// directions, and its multiplicity matters: one visit per (resource, write, read) triple, so a
+// pair of passes joined by two resources is joined by two edges. The topological sort counts
+// and decrements the same triples, and would leave a pass unorderable if the two disagreed.
+// ---------------------------------------------------------------------------------------
 
 namespace Monarc::Render {
+
+namespace {
+
+/// What `m_passIndegree` holds for a pass the topological sort has already placed.
+///
+/// Not a count, and never reachable by decrementing one: the sort only ever decrements a pass
+/// it has not placed -- argued at the decrement -- so a placed pass cannot come back down to
+/// zero and be placed twice.
+constexpr u32 kOrdered = static_cast<u32>(-1);
+
+/// `m_resourceBin`'s "in no bin" value. Distinct from `kNoAliasGroup` in what it means rather
+/// than in its bits: a bin is first-fit's own bookkeeping, and a group is what survives it.
+constexpr u32 kNoBin = static_cast<u32>(-1);
+
+/// `m_passMark`'s flags, used only while reporting a cycle.
+///
+/// `kSettled` means a pass has had its answer decided -- either its cycle was reported, or it
+/// was found to be downstream of one and to belong to no cycle itself. The other two are the
+/// two reachability sweeps, and are cleared before each sweep pair.
+/// @{
+constexpr u32 kReachedForward  = 1u << 0;
+constexpr u32 kReachedBackward = 1u << 1;
+constexpr u32 kSettled         = 1u << 2;
+/// @}
+
+/// `ComputeLifetimes`'s minimum leans on this, so it is stated rather than left implicit in
+/// `kNoPass`'s definition: an unset `firstPass` must lose a `<` against every real execution
+/// position, and it does because `kNoPass` is the largest `u32` there is and a position is
+/// bounded by the pass count.
+static_assert(kNoPass == static_cast<u32>(-1));
+
+/// Buckets `accesses` by `keyOf`, filling `starts` with `keyCount + 1` bucket boundaries and
+/// `items` with one access index per access.
+///
+/// **Declaration order survives inside each bucket**, which is what makes every stage's answer
+/// the same for the same declarations -- the property `WriteInspectionText` promises about its
+/// whole report.
+///
+/// A counting sort with no cursor array: count, turn the counts into bucket *ends*, then place
+/// from the back, decrementing each end as it goes. What is left in `starts` afterwards is the
+/// bucket *starts*, and bucket `k` is therefore `[starts[k], starts[k + 1])` -- the end
+/// sentinel at `keyCount` is the one entry that is never decremented.
+template <typename KeyOf>
+void BucketAccesses(std::span<const AccessInspection> accesses, u32 keyCount, Array<u32>& starts,
+                    Array<u32>& items, KeyOf keyOf) {
+    for (u32 key = 0; key < keyCount; ++key) {
+        starts[key] = 0;
+    }
+    for (const AccessInspection& access : accesses) {
+        ++starts[keyOf(access)];
+    }
+    u32 total = 0;
+    for (u32 key = 0; key < keyCount; ++key) {
+        total += starts[key];
+        starts[key] = total;
+    }
+    starts[keyCount] = total;
+
+    for (usize i = accesses.size(); i-- > 0;) {
+        items[--starts[keyOf(accesses[i])]] = static_cast<u32>(i);
+    }
+}
+
+/// Whether `resource` could share memory with another resource at all.
+///
+/// **Imported resources are never candidates**, because the graph does not own their memory:
+/// `ResourceOrigin::Imported` says so, and handing one an alias group would be claiming a
+/// decision about somebody else's allocation. Neither is a resource with an empty lifetime,
+/// which after culling means no pass that runs writes it -- there is no live range to place, so
+/// there is nothing to place it beside.
+[[nodiscard]] bool IsAliasCandidate(const ResourceInspection& resource) {
+    return resource.origin == ResourceOrigin::Transient && !resource.lifetime.IsEmpty();
+}
+
+/// Whether two lifetimes are both live at some execution position.
+///
+/// Only ever asked about two candidates, so both ends of both are real positions: a candidate
+/// has a first write, and a resource with a first write has a last use -- the write itself, at
+/// worst.
+[[nodiscard]] bool LifetimesOverlap(const ResourceLifetime& a, const ResourceLifetime& b) {
+    return a.firstPass <= b.lastPass && b.firstPass <= a.lastPass;
+}
+
+/// Whether two descriptions permit their resources to share memory.
+///
+/// **Same format and same extent, and nothing cleverer, which is a deliberately conservative
+/// rule rather than a complete one.** Two textures of different formats or extents cannot
+/// share an allocation whatever their lifetimes say, so this is a necessary condition; whether
+/// it is a *sufficient* one is a question for the allocator that would honour the grouping, and
+/// there is no such allocator -- see `GroupAliases`. `RHI::TextureUsage` is deliberately not
+/// compared: a real rule would be keyed on the size and alignment a device reports for an
+/// image, which is measured from a device and is exactly the work the phase plan defers until
+/// one exists. Nothing here claims usage is irrelevant to that rule; it claims only that
+/// guessing at the rule now would be worse than stating the two fields this compares.
+[[nodiscard]] bool DescriptionsAreCompatible(const RHI::TextureDescription& a,
+                                             const RHI::TextureDescription& b) {
+    return a.format == b.format && a.extent == b.extent;
+}
+
+}  // namespace
+
+std::span<const u32> RenderGraph::AccessesOfResource(u32 resource) const {
+    // `resource` is an index into `m_resources`, and every access holds one that resolved:
+    // `DeclareAccess` refuses an id that names no resource in this build, and the resource list
+    // only ever grows, so an index that was in range when the access was declared still is.
+    const u32 from = m_resourceBucketStart[resource];
+    const u32 to   = m_resourceBucketStart[resource + 1];
+    return std::span<const u32>(m_accessesByResource.Data() + from, to - from);
+}
+
+std::span<const u32> RenderGraph::AccessesOfPass(u32 pass) const {
+    const u32 from = m_passBucketStart[pass];
+    const u32 to   = m_passBucketStart[pass + 1];
+    return std::span<const u32>(m_accessesByPass.Data() + from, to - from);
+}
+
+template <typename Visit>
+void RenderGraph::ForEachSuccessor(u32 pass, Visit visit) const {
+    for (const u32 writeIndex : AccessesOfPass(pass)) {
+        const AccessInspection& write = m_accesses[writeIndex];
+        if (!IsWrite(write.access)) {
+            continue;
+        }
+        for (const u32 readIndex : AccessesOfResource(write.resource.index)) {
+            const AccessInspection& read = m_accesses[readIndex];
+            if (IsWrite(read.access) || read.pass == pass) {
+                continue;
+            }
+            visit(read.pass);
+        }
+    }
+}
+
+template <typename Visit>
+void RenderGraph::ForEachPredecessor(u32 pass, Visit visit) const {
+    // **The `write.pass == pass` exclusion below is not observable today, and is kept so that
+    // the two directions describe one edge set.** Its only caller marks a pass before pushing
+    // it, so a pass offered itself as its own predecessor is ignored -- mutating the exclusion
+    // away leaves the whole suite green, which was measured rather than assumed. It stays
+    // because the claim these two functions make about each other is that they walk the same
+    // edges, and a reader-modifier pass being its own predecessor and not its own successor
+    // would make that false for the next thing that walks them.
+    for (const u32 readIndex : AccessesOfPass(pass)) {
+        const AccessInspection& read = m_accesses[readIndex];
+        if (IsWrite(read.access)) {
+            continue;
+        }
+        for (const u32 writeIndex : AccessesOfResource(read.resource.index)) {
+            const AccessInspection& write = m_accesses[writeIndex];
+            if (!IsWrite(write.access) || write.pass == pass) {
+                continue;
+            }
+            visit(write.pass);
+        }
+    }
+}
+
+void RenderGraph::BuildAccessBuckets() {
+    const std::span<const AccessInspection> accesses(m_accesses.Data(), m_accesses.Size());
+    BucketAccesses(accesses, static_cast<u32>(m_resources.Size()), m_resourceBucketStart,
+                   m_accessesByResource,
+                   [](const AccessInspection& access) { return access.resource.index; });
+    BucketAccesses(accesses, static_cast<u32>(m_passes.Size()), m_passBucketStart,
+                   m_accessesByPass,
+                   [](const AccessInspection& access) { return access.pass; });
+}
+
+Status RenderGraph::OrderPasses() {
+    // **Execution order is derived, not taken from declaration order, and that is the decision
+    // the rest of compilation stands on.** Ids are handed out in declaration order, so a pass
+    // can only name a resource created at or before itself -- but *which* pass reads it is
+    // unconstrained, so a reader can be declared before its writer and a cycle is a shape a
+    // legal set of declarations can have. If order were declaration order, every dependency
+    // edge would point forwards by construction, a cycle would be unreachable, and the refusal
+    // below would be dead code.
+    //
+    // **Declaration order is the tie-break, and it is not optional.** Two passes with no
+    // dependency between them keep the order they were declared in, which is what makes a
+    // frame's report identical between builds of the same declarations -- the property
+    // `WriteInspectionText` is built on, and what `PassInspection::index` and
+    // `::executionOrder` being separate fields is for.
+    const u32 passCount = static_cast<u32>(m_passes.Size());
+
+    for (u32 pass = 0; pass < passCount; ++pass) {
+        m_passIndegree[pass] = 0;
+    }
+    for (u32 pass = 0; pass < passCount; ++pass) {
+        ForEachSuccessor(pass, [this](u32 reader) { ++m_passIndegree[reader]; });
+    }
+
+    for (u32 placed = 0; placed < passCount; ++placed) {
+        // The lowest-numbered pass with nothing left to wait for. **A linear scan rather than a
+        // heap, and the scan is what makes the tie-break declaration order** -- there is no
+        // comparator to get wrong and no container whose iteration order could decide it. It
+        // costs one sweep of the pass list per placed pass, over a list bounded by
+        // `Config::maxPasses`.
+        u32 next = passCount;
+        for (u32 pass = 0; pass < passCount; ++pass) {
+            if (m_passIndegree[pass] == 0) {
+                next = pass;
+                break;
+            }
+        }
+        if (next == passCount) {
+            // Every unplaced pass is waiting for another unplaced one, so following predecessors
+            // from any of them must come back round: there is at least one cycle.
+            return std::unexpected(ReportDependencyCycles());
+        }
+
+        m_passOrder[placed] = next;
+        m_passIndegree[next] = kOrdered;
+        // **No `kOrdered` check on `reader`, because a placed pass can never be one.** A pass is
+        // placed only when its counter reaches zero, which means every edge into it was already
+        // relaxed -- including this one, which would mean `next` was already placed. It is
+        // being placed now, so it was not.
+        ForEachSuccessor(next, [this](u32 reader) { --m_passIndegree[reader]; });
+    }
+
+    return {};
+}
+
+Error RenderGraph::ReportDependencyCycles() {
+    const u32 passCount = static_cast<u32>(m_passes.Size());
+    for (u32 pass = 0; pass < passCount; ++pass) {
+        m_passMark[pass] = 0;
+    }
+
+    // **One group per set of passes among which no order exists, which is a narrower promise
+    // than "one group per cycle" and the narrowing is on purpose.** Two cycles sharing a pass
+    // are one such set, and arrive as one group of three rather than two groups of two.
+    // Reporting every elementary cycle separately is exponential in the pass count -- a graph
+    // of n passes can have that many distinct cycles -- while the mutually-reachable set is two
+    // sweeps per group and is the minimal set of declarations that has to change: no subset of
+    // it can be ordered either. `GraphDiagnostic::group` records this where a reader of the
+    // report will meet it.
+    //
+    // **A pass that cannot be ordered is not necessarily in a cycle**, and gets no row when it
+    // is not. A pass reading what a cycle produces has no order and no way to acquire one, but
+    // it is not what is wrong; naming it would put a row on a declaration that is correct.
+    u32 group = 0;
+    for (u32 seed = 0; seed < passCount; ++seed) {
+        if (m_passIndegree[seed] == kOrdered || (m_passMark[seed] & kSettled) != 0) {
+            continue;
+        }
+
+        for (u32 pass = 0; pass < passCount; ++pass) {
+            m_passMark[pass] &= ~(kReachedForward | kReachedBackward);
+        }
+        MarkReachable(seed, true);
+        MarkReachable(seed, false);
+
+        // Both sweeps mark their own start, so `seed` is always in the intersection and counts
+        // itself: a member count of one means nothing else is mutually reachable with it, which
+        // is exactly "unordered but in no cycle".
+        u32 members = 0;
+        for (u32 pass = 0; pass < passCount; ++pass) {
+            const u32 marks = m_passMark[pass] & (kReachedForward | kReachedBackward);
+            members += marks == (kReachedForward | kReachedBackward) ? 1u : 0u;
+        }
+        if (members < 2) {
+            m_passMark[seed] |= kSettled;
+            continue;
+        }
+
+        for (u32 pass = 0; pass < passCount; ++pass) {
+            const u32 marks = m_passMark[pass] & (kReachedForward | kReachedBackward);
+            if (marks != (kReachedForward | kReachedBackward)) {
+                continue;
+            }
+            m_passMark[pass] |= kSettled;
+            // Rows in increasing declaration index, which is membership in a stable order.
+            // `GraphDiagnostic::group` is explicit that the field promises membership and not
+            // the order round the cycle, and this detector has no cycle order to offer: what it
+            // computed is a set.
+            //
+            // **The `Error` is discarded because it carries nothing this function does not
+            // already have** -- `Refuse` hands back the same {code, literal} pair for every row
+            // of every cycle, and the pass is in the row. What the caller is handed is composed
+            // below, from a literal about the graph rather than about one of its passes.
+            static_cast<void>(Refuse(DiagnosticKind::DependencyCycle, ErrorCode::InvalidArgument,
+                                     "RenderGraph::Compile: this pass is in a dependency cycle",
+                                     pass, TextureId{}, group));
+        }
+        ++group;
+    }
+
+    return Error{ErrorCode::InvalidArgument,
+                 "RenderGraph::Compile: the declared reads and writes have a dependency cycle"};
+}
+
+void RenderGraph::MarkReachable(u32 from, bool forward) {
+    const u32 flag = forward ? kReachedForward : kReachedBackward;
+
+    // Depth-first over the unplaced passes only. Bounded by the pass count because a pass is
+    // marked before it is pushed and never pushed again, which is what makes `m_passStack`'s
+    // `maxPasses` entries enough -- and that bound does not depend on the `kOrdered` test
+    // below.
+    //
+    // **That test prunes the sweep; it does not decide the answer, and the difference was
+    // measured rather than reasoned about.** Removing it changes no report: the forward sweep
+    // provably cannot leave the unplaced set -- a placed pass has every edge into it already
+    // relaxed, so its predecessors are all placed, and an unplaced seed can therefore never
+    // reach one -- and the extra passes the backward sweep would then reach are placed ones,
+    // which by the same argument are never in the forward set and so never in the intersection
+    // `ReportDependencyCycles` takes. Mutating it away leaves the whole suite green, which is
+    // recorded here rather than left for the next reader to rediscover as a hole in the tests.
+    u32 depth            = 0;
+    m_passStack[depth++] = from;
+    m_passMark[from] |= flag;
+
+    while (depth > 0) {
+        const u32  pass = m_passStack[--depth];
+        const auto step = [&](u32 other) {
+            if (m_passIndegree[other] == kOrdered || (m_passMark[other] & flag) != 0) {
+                return;
+            }
+            m_passMark[other] |= flag;
+            m_passStack[depth++] = other;
+        };
+        if (forward) {
+            ForEachSuccessor(pass, step);
+        } else {
+            ForEachPredecessor(pass, step);
+        }
+    }
+}
+
+Status RenderGraph::RefuseUnwrittenTransients() {
+    // **A transient nothing writes and something reads is a declaration error the graph can
+    // name precisely, and an imported resource read first is not the same thing at all.** An
+    // import states its `ResourceInspection::incoming` state, so its contents came from outside
+    // the graph and reading it first is meaningful. A transient has no contents until a pass
+    // writes it, so a pass reading one nothing wrote reads undefined memory -- the phase plan
+    // left this open for Task 2 to answer, and this is the answer.
+    //
+    // **It needs no execution order, which is why it runs whether or not the sort succeeded.**
+    // A write-then-read edge puts every writer of a resource before every reader of it, so the
+    // earliest pass to touch a written transient always writes it, in every topological order
+    // there is; the question therefore collapses to whether a write was declared at all. The
+    // read-modify-write case falls out for free: the pass writes the resource, so a pass that
+    // reads and writes one it is alone with is not this refusal.
+    bool refused = false;
+
+    for (u32 resource = 0; resource < static_cast<u32>(m_resources.Size()); ++resource) {
+        if (m_resources[resource].origin != ResourceOrigin::Transient) {
+            continue;
+        }
+
+        bool written    = false;
+        u32  firstRead  = kNoPass;
+        for (const u32 index : AccessesOfResource(resource)) {
+            const AccessInspection& access = m_accesses[index];
+            if (IsWrite(access.access)) {
+                written = true;
+            } else if (firstRead == kNoPass) {
+                firstRead = access.pass;
+            }
+        }
+        if (written || firstRead == kNoPass) {
+            continue;
+        }
+
+        // One row for the resource rather than one per reading pass: what is wrong is that
+        // nothing writes it, which is one mistake however many passes read it. The pass named
+        // is the one that declared the earliest of those reads.
+        static_cast<void>(Refuse(DiagnosticKind::TransientNeverWritten,
+                                 ErrorCode::InvalidArgument,
+                                 "RenderGraph::Compile: this transient is read and no pass "
+                                 "writes it",
+                                 firstRead, m_resources[resource].id));
+        refused = true;
+    }
+
+    if (!refused) {
+        return {};
+    }
+    return Err(ErrorCode::InvalidArgument,
+               "RenderGraph::Compile: a transient this build reads is written by no pass");
+}
+
+void RenderGraph::CullPasses() {
+    // **A pass survives because something consumes what it wrote, and a recording callback is
+    // not something it wrote.** ADR-0006's contract is that a pass declares its reads and
+    // writes and the graph decides the rest, so culling reads the declarations and nothing
+    // else. Letting `PassInspection::hasRecord` keep a pass alive would make culling almost
+    // inert -- every pass that records anything would survive -- and would mean a feature could
+    // opt out of the mechanism by capturing a lambda. The consequence is worth stating plainly:
+    // a pass whose callback has a side effect the graph cannot see will be culled, and in Phase
+    // A4 there is no such callback, because `PassCommandList` offers nothing to call.
+    //
+    // **A graph that imports nothing is therefore culled entirely**, which is not a degenerate
+    // case but the correct answer: if nothing outside the graph consumes anything the graph
+    // produced, the frame's whole output is unobserved.
+    for (PassInspection& pass : m_passes) {
+        pass.culled = true;
+    }
+
+    // **Backwards through execution order, which turns a transitive question into one sweep.**
+    // Every pass that reads what this one writes is *later* in this order -- the edge that makes
+    // it a reader is what put it there -- so its own answer is already final when this one is
+    // decided. No work list and no second iteration to a fixed point.
+    for (u32 position = static_cast<u32>(m_passes.Size()); position-- > 0;) {
+        const u32 pass = m_passOrder[position];
+
+        for (const u32 index : AccessesOfPass(pass)) {
+            const AccessInspection& access = m_accesses[index];
+            if (IsWrite(access.access) &&
+                m_resources[access.resource.index].origin == ResourceOrigin::Imported) {
+                // Never culled: something outside the graph consumes it.
+                m_passes[pass].culled = false;
+            }
+        }
+        ForEachSuccessor(pass, [this, pass](u32 reader) {
+            if (!m_passes[reader].culled) {
+                m_passes[pass].culled = false;
+            }
+        });
+    }
+}
+
+void RenderGraph::NumberSurvivingPasses() {
+    // `PassInspection::executionOrder` is a position among the passes that *run*, so the
+    // survivors are numbered densely and a culled pass leaves no gap. The sorted order is what
+    // this walks; what it produces is the order a frame is recorded in.
+    u32 next = 0;
+    for (u32 position = 0; position < static_cast<u32>(m_passes.Size()); ++position) {
+        PassInspection& pass = m_passes[m_passOrder[position]];
+        if (pass.culled) {
+            pass.executionOrder = kNoPass;
+            continue;
+        }
+        pass.executionOrder = next++;
+    }
+}
+
+void RenderGraph::ComputeLifetimes() {
+    // **Culled passes contribute nothing, which is the whole reason this runs after culling.**
+    // A transient whose last reader does not run is live for a shorter span than its
+    // declarations suggest, and computing the two the other way round would record a reader
+    // that never runs.
+    for (u32 resource = 0; resource < static_cast<u32>(m_resources.Size()); ++resource) {
+        ResourceLifetime lifetime{};
+
+        for (const u32 index : AccessesOfResource(resource)) {
+            const AccessInspection& access = m_accesses[index];
+            const PassInspection&   pass   = m_passes[access.pass];
+            if (pass.culled) {
+                continue;
+            }
+            // `firstPass` is the first *write*: a resource is not live before something puts
+            // contents in it. An unset `firstPass` is `kNoPass`, which loses this comparison to
+            // every real position -- see the `static_assert` at the head of this file. `lastPass`
+            // is the other way round and needs its emptiness tested, since `kNoPass` wins every
+            // `>`.
+            if (IsWrite(access.access) && pass.executionOrder < lifetime.firstPass) {
+                lifetime.firstPass = pass.executionOrder;
+            }
+            if (lifetime.lastPass == kNoPass || pass.executionOrder > lifetime.lastPass) {
+                lifetime.lastPass = pass.executionOrder;
+            }
+        }
+
+        m_resources[resource].lifetime = lifetime;
+    }
+}
+
+void RenderGraph::GroupAliases() {
+    // ---------------------------------------------------------------------------------
+    // **The decision below is real and tested. The memory saving is not, and this graph does
+    // not save a byte.**
+    //
+    // Nothing honours the grouping: `RenderGraph::Execute` refuses rather than recording, and
+    // the memory model it will be written against is one `VkDeviceMemory` per resource -- a
+    // placeholder `VulkanDevice.cpp` records as such, and Docs/Rendering/RHI.md with it. Two
+    // resources sharing one allocation needs sub-allocation from an allocator that does not
+    // exist. So an `aliasGroup` in the report says "these two were computed to be able to share
+    // memory", never "these two shared memory", and a green aliasing test must not be read as
+    // "aliasing works": what works is the grouping.
+    //
+    // This is written at the code that makes the decision rather than only in Docs/Status.md,
+    // because whoever reads a populated alias group is reading this function, and the phase
+    // plan asks for the honest half of the M0 principle to be the half that does not go
+    // unwritten.
+    // ---------------------------------------------------------------------------------
+    const u32 resourceCount = static_cast<u32>(m_resources.Size());
+    for (u32 resource = 0; resource < resourceCount; ++resource) {
+        m_resources[resource].aliasGroup = kNoAliasGroup;
+        m_resourceBin[resource]          = kNoBin;
+    }
+
+    // Greedy first fit: each candidate joins the lowest-numbered bin every one of whose members
+    // it could share memory with, or opens the next bin. Good enough by the phase plan's own
+    // measure, and the alternative -- an optimal packing -- would be tuning a decision nothing
+    // honours.
+    //
+    // Both conditions, together: two lifetimes that do not overlap still cannot share an
+    // allocation if the descriptions disagree, and two matching descriptions cannot if the
+    // lifetimes do. Membership of a bin is pairwise, so a candidate is checked against every
+    // member rather than against the bin's span -- the union of two disjoint lifetimes is not
+    // an interval, and treating it as one would let a third resource in that overlaps neither
+    // end but sits in the gap.
+    u32 binCount = 0;
+    for (u32 resource = 0; resource < resourceCount; ++resource) {
+        if (!IsAliasCandidate(m_resources[resource])) {
+            continue;
+        }
+
+        u32 chosen = binCount;
+        for (u32 bin = 0; bin < binCount; ++bin) {
+            bool fits = true;
+            for (u32 other = 0; other < resource; ++other) {
+                if (m_resourceBin[other] != bin) {
+                    continue;
+                }
+                if (!DescriptionsAreCompatible(m_resources[resource].description,
+                                               m_resources[other].description) ||
+                    LifetimesOverlap(m_resources[resource].lifetime,
+                                     m_resources[other].lifetime)) {
+                    fits = false;
+                    break;
+                }
+            }
+            if (fits) {
+                chosen = bin;
+                break;
+            }
+        }
+
+        m_resourceBin[resource] = chosen;
+        if (chosen == binCount) {
+            ++binCount;
+        }
+    }
+
+    // **A bin with one member is not a group**, because a resource that shares memory with
+    // nothing is exactly what `kNoAliasGroup` says. Numbering the survivors in bin order is
+    // what keeps the report stable: bins are opened in declaration order, so the group ids are
+    // a function of the declarations and of nothing else.
+    u32 group = 0;
+    for (u32 bin = 0; bin < binCount; ++bin) {
+        u32 members = 0;
+        for (u32 resource = 0; resource < resourceCount; ++resource) {
+            members += m_resourceBin[resource] == bin ? 1u : 0u;
+        }
+        if (members < 2) {
+            continue;
+        }
+        for (u32 resource = 0; resource < resourceCount; ++resource) {
+            if (m_resourceBin[resource] == bin) {
+                m_resources[resource].aliasGroup = group;
+            }
+        }
+        ++group;
+    }
+}
 
 Status RenderGraph::Compile() {
     if (m_phase != GraphPhase::Declaring) {
@@ -48,10 +632,8 @@ Status RenderGraph::Compile() {
     // **This is an addition, not a checkbox.** No line of the phase plan's Task 1 asks for it;
     // it follows from the diagnostics list existing at all, which is what makes "was anything
     // refused?" a question compilation can ask. It is recorded as an addition here so that a
-    // later reader does not take it for a requirement and preserve it for the wrong reason --
-    // if Task 2 finds a build worth compiling despite a refusal, this is a decision to revisit
-    // and not a spec to honour. It forecloses nothing either way: the phase becomes
-    // `CompileFailed`, and inspection stays readable, which is the case `GraphPhase` is for.
+    // later reader does not take it for a requirement and preserve it for the wrong reason.
+    // Task 2 found no build worth compiling despite a refusal and kept it.
     //
     // Deliberately no new diagnostic here: the ones already recorded say what happened, and
     // adding a summary entry would put a row in the list that names no pass and no resource.
@@ -70,20 +652,34 @@ Status RenderGraph::Compile() {
         return Err(code, "RenderGraph::Compile: a declaration in this build was refused");
     }
 
-    // Execution order is declaration order, and nothing is culled. Written as a loop over the
-    // pass list rather than left to `AddPass`'s defaults so that Task 2 replaces one thing
-    // instead of reconciling two: `AddPass` leaves `executionOrder` at `kNoPass`, and this is
-    // the only place an order is ever assigned.
-    //
-    // **The `culled` write is a placeholder and is provably a no-op today**, which is worth
-    // saying so that it does not read as load-bearing: `AddPass` already writes `false` and
-    // nothing anywhere writes `true`, so removing this line changes no value. It is kept
-    // because it is the line Task 2's culling replaces, and a loop that settled order without
-    // mentioning culling would make the two look like separate decisions.
-    for (usize i = 0; i < m_passes.Size(); ++i) {
-        m_passes[i].executionOrder = static_cast<u32>(i);
-        m_passes[i].culled         = false;
+    BuildAccessBuckets();
+
+    // **The two refusals both run, and neither short-circuits the other, because they are
+    // about different mistakes.** A cycle is a mutual dependency and an unwritten transient is
+    // an absent one; a build can have both, and reporting only whichever check happens to run
+    // first would hide half of what is wrong from the one report the caller gets to read. The
+    // cycle's rows come first because that is the order the stages run in, and the code the
+    // caller is handed is the cycle's for the same reason.
+    const Status ordered    = OrderPasses();
+    const Status allWritten = RefuseUnwrittenTransients();
+    if (!ordered || !allWritten) {
+        // Nothing downstream runs, so no execution order, culling decision, lifetime or alias
+        // group is reported: every pass keeps `executionOrder == kNoPass` and `culled == false`,
+        // and every resource an empty lifetime and no group. A graph that had reported half a
+        // frame would be a graph whose report disagreed with its refusal.
+        m_phase = GraphPhase::CompileFailed;
+        return ordered.has_value() ? allWritten : ordered;
     }
+
+    // **The remaining four stages are ordered by what they read, and two of the orderings are
+    // load-bearing.** Culling comes before lifetimes, because a transient whose last reader is
+    // culled has to be live for a shorter span and not a longer one. Numbering comes before
+    // lifetimes too, because a lifetime is a pair of execution positions and the positions are
+    // what numbering assigns. Grouping comes last because it compares lifetimes.
+    CullPasses();
+    NumberSurvivingPasses();
+    ComputeLifetimes();
+    GroupAliases();
 
     m_phase = GraphPhase::Compiled;
     return {};

@@ -97,6 +97,7 @@ constexpr DiagnosticKind kAllDiagnosticKinds[] = {
     DiagnosticKind::AccessNamesNoTexture,    DiagnosticKind::DuplicateAccess,
     DiagnosticKind::DuplicateImport,         DiagnosticKind::InvalidImport,
     DiagnosticKind::RecordAlreadySet,        DiagnosticKind::AlreadyCompiled,
+    DiagnosticKind::DependencyCycle,         DiagnosticKind::TransientNeverWritten,
 };
 
 // ---------------------------------------------------------------------------------------
@@ -162,6 +163,8 @@ constexpr DiagnosticKind kAllDiagnosticKinds[] = {
         case DiagnosticKind::InvalidImport:
         case DiagnosticKind::RecordAlreadySet:
         case DiagnosticKind::AlreadyCompiled:
+        case DiagnosticKind::DependencyCycle:
+        case DiagnosticKind::TransientNeverWritten:
             return true;
     }
     return false;
@@ -254,9 +257,10 @@ TEST_CASE("the FirstLight frame renders exactly this text") {
     // "stable" has to mean: a format change is a deliberate edit here, and a field that
     // silently stopped being emitted is a failure rather than a shorter report nobody noticed.
     //
-    // The lifetime and alias fields read `none` because Task 2 computes them and has not
-    // landed; there is no `barrier` line because Task 3 derives them and has not either. Both
-    // are asserted structurally in TestPassDeclaration.cpp too.
+    // The lifetime reads `0..0` because the one pass writes the image and is the only pass
+    // there is; the alias field reads `none` because an imported resource is never aliased --
+    // the graph does not own its memory. There is no `barrier` line because Task 3 derives
+    // them and has not landed. All three are asserted structurally elsewhere in the suite.
     SystemAllocator allocator;
     RenderGraph     graph(allocator, RenderGraph::Config{});
     DeclareFirstLightFrame(graph);
@@ -267,7 +271,7 @@ TEST_CASE("the FirstLight frame renders exactly this text") {
           "counts passes=1 resources=1 accesses=1 barriers=0 diagnostics=0 dropped=0\n"
           "pass 0 order=0 queue=Graphics culled=no record=no name=\"Present\"\n"
           "resource 0 id=0:0 origin=Imported format=B8G8R8A8_UNORM extent=1280x720 usage=0x1 "
-          "lifetime=none..none alias=none name=\"Swapchain\"\n"
+          "lifetime=0..0 alias=none name=\"Swapchain\"\n"
           "resource 0 import texture=4:1 "
           "incoming=Undefined/ColorAttachmentOutput(0x20)/None(0x0) "
           "outgoing=PresentSource/None(0x0)/None(0x0)\n"
@@ -289,9 +293,15 @@ TEST_CASE("the same declaration renders identically from two graphs") {
     CHECK(Render(first.Inspect(), firstBuffer) == Render(second.Inspect(), secondBuffer));
 }
 
-TEST_CASE("a transient renders no import line") {
+TEST_CASE("of two resources, only the imported one renders an import line") {
     // The second line belongs to an imported resource only. A graph full of transients would
     // otherwise carry a line of `none`s per resource, and a diff of one would be mostly noise.
+    //
+    // **Both origins in one report, which is what makes the rendering's own decision visible.**
+    // A single transient would show only that no import line appeared; with both, the line has
+    // to attach to row 1 and not to row 0, so a rendering that emitted it unconditionally and
+    // one that emitted it never both fail. The pass writes the imported image as well, which is
+    // also what keeps it out of the culler -- see TestCull.cpp.
     SystemAllocator allocator;
     RenderGraph     graph(allocator, RenderGraph::Config{});
 
@@ -300,16 +310,31 @@ TEST_CASE("a transient renders no import line") {
     const Result<TextureId> target = pass->CreateTexture("Target", kSwapchainDescription);
     REQUIRE(target.has_value());
     REQUIRE(pass->Write(*target, ResourceAccess::ColorAttachmentWrite));
+    const Result<TextureId> image = pass->ImportTexture(
+        "Swapchain",
+        TextureImport(TextureHandle::ForTesting(4, 1), kSwapchainDescription,
+                      TextureState{TextureLayout::Undefined,
+                                   PipelineStage::ColorAttachmentOutput, Access::None},
+                      TextureState{TextureLayout::PresentSource, PipelineStage::None,
+                                   Access::None}));
+    REQUIRE(image.has_value());
+    REQUIRE(pass->Write(*image, ResourceAccess::ColorAttachmentWrite));
     REQUIRE(graph.Compile());
 
-    char buffer[1024] = {};
+    char buffer[2048] = {};
     CHECK(Render(graph.Inspect(), buffer) ==
           "graph build=0 phase=Compiled\n"
-          "counts passes=1 resources=1 accesses=1 barriers=0 diagnostics=0 dropped=0\n"
+          "counts passes=1 resources=2 accesses=2 barriers=0 diagnostics=0 dropped=0\n"
           "pass 0 order=0 queue=Graphics culled=no record=no name=\"Offscreen\"\n"
           "resource 0 id=0:0 origin=Transient format=B8G8R8A8_UNORM extent=1280x720 usage=0x1 "
-          "lifetime=none..none alias=none name=\"Target\"\n"
-          "access 0 decl-pass=0 resource=0:0 access=ColorAttachmentWrite\n");
+          "lifetime=0..0 alias=none name=\"Target\"\n"
+          "resource 1 id=1:0 origin=Imported format=B8G8R8A8_UNORM extent=1280x720 usage=0x1 "
+          "lifetime=0..0 alias=none name=\"Swapchain\"\n"
+          "resource 1 import texture=4:1 "
+          "incoming=Undefined/ColorAttachmentOutput(0x20)/None(0x0) "
+          "outgoing=PresentSource/None(0x0)/None(0x0)\n"
+          "access 0 decl-pass=0 resource=0:0 access=ColorAttachmentWrite\n"
+          "access 1 decl-pass=0 resource=1:0 access=ColorAttachmentWrite\n");
 }
 
 TEST_CASE("an access line renders its pass, not its own row number") {
@@ -319,10 +344,13 @@ TEST_CASE("an access line renders its pass, not its own row number") {
     // replacing `access.pass` with the loop counter passed the whole suite. The data is covered
     // structurally in TestPassDeclaration.cpp; this is the projection.
     //
-    // Pass 0 creates the resource and declares no access to it, which is legal and is
-    // `PassBuilder::CreateTexture`'s stated rule: creating a resource is not accessing it. Pass
-    // 1 then writes and reads it -- the read-modify-write case -- so the first access row is 0
-    // and belongs to pass 1, and the two numbers cannot be confused for one another.
+    // A two-pass frame anchored on an imported image, so nothing is culled: pass 0 writes a
+    // transient, pass 1 samples it and writes the swapchain. That puts three accesses in the
+    // list of which the last two belong to pass 1, so row 2 and pass 1 are different numbers
+    // and a rendering that printed the loop counter would say `decl-pass=2`.
+    //
+    // The transient's `lifetime=0..1` is the same span TestLifetimes.cpp asserts structurally;
+    // here it is the projection of it.
     SystemAllocator allocator;
     RenderGraph     graph(allocator, RenderGraph::Config{});
 
@@ -330,23 +358,38 @@ TEST_CASE("an access line renders its pass, not its own row number") {
     REQUIRE(producer.has_value());
     const Result<TextureId> target = producer->CreateTexture("Target", kSwapchainDescription);
     REQUIRE(target.has_value());
+    REQUIRE(producer->Write(*target, ResourceAccess::ColorAttachmentWrite));
 
     Result<PassBuilder> consumer = graph.AddPass("Consumer");
     REQUIRE(consumer.has_value());
-    REQUIRE(consumer->Write(*target, ResourceAccess::ColorAttachmentWrite));
-    REQUIRE(consumer->Read(*target, ResourceAccess::ColorAttachmentRead));
+    REQUIRE(consumer->Read(*target, ResourceAccess::SampledRead));
+    const Result<TextureId> image = consumer->ImportTexture(
+        "Swapchain",
+        TextureImport(TextureHandle::ForTesting(4, 1), kSwapchainDescription,
+                      TextureState{TextureLayout::Undefined,
+                                   PipelineStage::ColorAttachmentOutput, Access::None},
+                      TextureState{TextureLayout::PresentSource, PipelineStage::None,
+                                   Access::None}));
+    REQUIRE(image.has_value());
+    REQUIRE(consumer->Write(*image, ResourceAccess::ColorAttachmentWrite));
     REQUIRE(graph.Compile());
 
-    char buffer[1024] = {};
+    char buffer[2048] = {};
     CHECK(Render(graph.Inspect(), buffer) ==
           "graph build=0 phase=Compiled\n"
-          "counts passes=2 resources=1 accesses=2 barriers=0 diagnostics=0 dropped=0\n"
+          "counts passes=2 resources=2 accesses=3 barriers=0 diagnostics=0 dropped=0\n"
           "pass 0 order=0 queue=Graphics culled=no record=no name=\"Producer\"\n"
           "pass 1 order=1 queue=Graphics culled=no record=no name=\"Consumer\"\n"
           "resource 0 id=0:0 origin=Transient format=B8G8R8A8_UNORM extent=1280x720 usage=0x1 "
-          "lifetime=none..none alias=none name=\"Target\"\n"
-          "access 0 decl-pass=1 resource=0:0 access=ColorAttachmentWrite\n"
-          "access 1 decl-pass=1 resource=0:0 access=ColorAttachmentRead\n");
+          "lifetime=0..1 alias=none name=\"Target\"\n"
+          "resource 1 id=1:0 origin=Imported format=B8G8R8A8_UNORM extent=1280x720 usage=0x1 "
+          "lifetime=1..1 alias=none name=\"Swapchain\"\n"
+          "resource 1 import texture=4:1 "
+          "incoming=Undefined/ColorAttachmentOutput(0x20)/None(0x0) "
+          "outgoing=PresentSource/None(0x0)/None(0x0)\n"
+          "access 0 decl-pass=0 resource=0:0 access=ColorAttachmentWrite\n"
+          "access 1 decl-pass=1 resource=0:0 access=SampledRead\n"
+          "access 2 decl-pass=1 resource=1:0 access=ColorAttachmentWrite\n");
 }
 
 TEST_CASE("the resource lines render their own row number, not the id's index") {
