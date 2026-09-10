@@ -263,6 +263,19 @@ confirming it:
   [Continuous integration](#continuous-integration) above. `Monarc.Jobs` is verified by
   invariant-shaped tests and repetition instead, which is corroboration and not proof.
 
+  **Scheduled for closure after Phase A4** by [the Linux port](Plans/2026-09-10-linux-port.md),
+  and it is the reason that port is worth doing rather than a side effect of it. TSan exists on
+  Linux, `Monarc.Jobs` has no platform coupling at all, and
+  [Threading.md](Runtime/Threading.md) currently argues three separate times that the
+  single-mutex scheduler was chosen partly because nothing mechanical would catch a mistake in
+  anything more elaborate. A clean TSan run weakens that argument and the file should say so; a
+  dirty one is the most valuable finding the port could produce.
+- **The platform boundary has never been checked by a second platform building.** Gate 10 keeps
+  platform conditionals inside `Private/Platform/<Platform>/` and reports clean, and A2c
+  verified that a `Platform/Mac/` file containing `#error` is excluded from the build — but no
+  second platform has ever compiled. The whole coupled surface is 1,668 lines across 9 files,
+  measured, so the claim is plausible; the Linux port is what turns it into a measurement.
+
 ## Toolchain quirks worth remembering
 
 - MSVC reports `__cplusplus == 199711` unless built with `/Zc:__cplusplus`. Set it globally.
