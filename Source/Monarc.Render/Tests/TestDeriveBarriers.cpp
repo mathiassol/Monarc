@@ -1572,6 +1572,78 @@ TEST_CASE("barriers come out in the order a frame records them") {
     CHECK(inspection.barriers.back().emittedBeforePass == kNoPass);
 }
 
+TEST_CASE("within a pass the barriers follow its accesses, and the end-of-frame ones follow the "
+          "resources") {
+    // **The two tie-breaks `GraphInspection::barriers` promises are different orders, and one
+    // frame is enough to show it.** The case above pins the first half of the promise -- barriers
+    // sorted by the execution position each is emitted in front of -- and both halves below sit
+    // *inside* one position, where that assertion says nothing at all: reversing either loop
+    // leaves `emittedBeforePass` non-decreasing throughout.
+    //
+    // The frame declares two imports in the order A, B and then writes them in the order B, A.
+    // That is the whole trick: resource declaration order and access declaration order now
+    // disagree, so each half of the report has to name which one it follows.
+    //
+    // - **In front of the pass**, the derivation walks that pass's access list, so B's opening
+    //   barrier comes before A's.
+    // - **After every pass**, there is no access list to walk -- an outgoing state belongs to no
+    //   pass -- so the resource list's own order is the only order there is, and A's closing
+    //   barrier comes before B's.
+    //
+    // So the four barriers come out B, A, A, B, and a derivation that reversed either loop --
+    // or that sorted both halves the same way, which is what the header used to claim -- fails
+    // here and nowhere else.
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    Result<PassBuilder> pass = graph.AddPass("Pass");
+    REQUIRE(pass.has_value());
+    const Result<TextureId> first = pass->ImportTexture("First", FramedImport(1));
+    REQUIRE(first.has_value());
+    const Result<TextureId> second = pass->ImportTexture("Second", FramedImport(2));
+    REQUIRE(second.has_value());
+    // Declared A then B above; written B then A here.
+    REQUIRE(pass->Write(*second, ResourceAccess::ColorAttachmentWrite));
+    REQUIRE(pass->Write(*first, ResourceAccess::ColorAttachmentWrite));
+
+    REQUIRE(graph.Compile());
+
+    const GraphInspection inspection = graph.Inspect();
+    // The resource list is in declaration order, which is what the second half follows and the
+    // first half does not.
+    REQUIRE(inspection.resources.size() == 2u);
+    CHECK(inspection.resources[0].id == *first);
+    CHECK(inspection.resources[1].id == *second);
+
+    // Four: an opening and a closing transition each, because `FramedImport`'s two declared
+    // states differ from `ColorAttachmentWrite`'s requirement on both sides.
+    REQUIRE(inspection.barriers.size() == 4u);
+
+    // In front of the pass, in the order the pass declared its accesses: B, then A.
+    CHECK(inspection.barriers[0].resource == *second);
+    CHECK(inspection.barriers[0].emittedBeforePass == 0u);
+    CHECK(inspection.barriers[0].cause ==
+          BarrierCause{ByEnd(BarrierCauseKind::ImportIncoming),
+                       ByPass(0, ResourceAccess::ColorAttachmentWrite)});
+    CHECK(inspection.barriers[1].resource == *first);
+    CHECK(inspection.barriers[1].emittedBeforePass == 0u);
+
+    // After every pass, in the order the resources were declared: A, then B.
+    CHECK(inspection.barriers[2].resource == *first);
+    CHECK(inspection.barriers[2].emittedBeforePass == kNoPass);
+    CHECK(inspection.barriers[2].cause ==
+          BarrierCause{ByPass(0, ResourceAccess::ColorAttachmentWrite),
+                       ByEnd(BarrierCauseKind::ImportOutgoing)});
+    CHECK(inspection.barriers[3].resource == *second);
+    CHECK(inspection.barriers[3].emittedBeforePass == kNoPass);
+
+    // And the two halves really are in opposite orders, which is the assertion a reader should
+    // take away: the same two resources, twice, the other way round.
+    CHECK(inspection.barriers[0].resource == inspection.barriers[3].resource);
+    CHECK(inspection.barriers[1].resource == inspection.barriers[2].resource);
+    CHECK_FALSE(inspection.barriers[0].resource == inspection.barriers[1].resource);
+}
+
 TEST_CASE("a full barrier pool is refused rather than grown") {
     // **The pool discipline every other pool in this class keeps**, and the derivation is the one
     // that fills a pool the *graph* sizes rather than the caller. The frame below needs four

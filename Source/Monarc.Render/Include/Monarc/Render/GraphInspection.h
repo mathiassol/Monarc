@@ -663,9 +663,27 @@ struct GraphInspection {
     std::span<const AccessInspection> accesses = {};
 
     /// Every barrier the derivation produced, **in the order a frame records them**: by the
-    /// execution position each is emitted in front of, then by the declaration order of the
-    /// resource each is about. The ones an imported resource's outgoing state produces carry
-    /// `emittedBeforePass == kNoPass` and come last, because they are recorded after every pass.
+    /// execution position each is emitted in front of, and within one position by the order that
+    /// pass declared the accesses they came from. The ones an imported resource's outgoing state
+    /// produces carry `emittedBeforePass == kNoPass` and come last, because they are recorded
+    /// after every pass; among themselves they are in the declaration order of the resource each
+    /// is about.
+    ///
+    /// **The two tie-breaks are different orders, and this field claimed the second one for
+    /// both.** In front of a pass the derivation walks that pass's access list, so a pass that
+    /// imports A then B and writes B then A produces B's barrier before A's -- resource order is
+    /// not what comes out. After every pass there is no access list to walk, because the outgoing
+    /// states belong to no pass, so the resource list's own order is the only order there is.
+    /// *"within a pass the barriers follow its accesses, and the end-of-frame ones follow the
+    /// resources"* in Tests/TestDeriveBarriers.cpp pins both, in one frame where they disagree.
+    ///
+    /// **The tie-breaks are a stability promise and not a correctness one, which is what a caller
+    /// may lean on them for.** Every barrier at one execution position is recorded together, in
+    /// front of a pass that has not run yet, so their order among themselves changes nothing a
+    /// frame can observe; what it buys is the property `WriteInspectionText` promises about the
+    /// whole report -- two identical declarations render identically. Sorting them by resource
+    /// instead would be a sort in a derivation that allocates nothing and may not, bought for a
+    /// property no caller needs.
     ///
     /// Empty in `GraphPhase::Declaring`, and a partial record in `GraphPhase::CompileFailed` --
     /// see `DiagnosticKind::BarrierPoolExhausted`.
