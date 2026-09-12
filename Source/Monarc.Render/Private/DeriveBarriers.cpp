@@ -34,6 +34,19 @@
 //      in. A transient has no last state -- the graph destroys it, and a transition into a
 //      layout nothing will read is work for nobody.
 //
+//      **That is correct today for two reasons, and one of them expires.** `vkDestroyImage`
+//      imposes no layout requirement, so nothing on the far side of the destruction has a state
+//      to be moved into; and `GroupAliases` computes alias groups without honouring them --
+//      every transient still gets its own allocation, which that function says where it says it
+//      -- so no second resource ever reuses the memory. **When aliasing is honoured, the second
+//      reason goes and a barrier between two aliased transients becomes necessary**: the later
+//      one's first write is a hazard against the earlier one's last access even though the two
+//      are different resources, and the later one's transition out of `Undefined` is what
+//      discards the contents it is inheriting. That barrier belongs to the gap *between* two
+//      transients in one group, which is not a gap this chain has -- so what sub-allocation
+//      needs is a new pairing in the walk below, not a closing state added to this list. Left
+//      here rather than for whoever implements it to rediscover.
+//
 // That is the phase plan's sentence -- "an imported resource's declared incoming and outgoing
 // states are the first and last transitions" -- with the transient's own two ends made explicit,
 // because a transient that got no opening transition would be rendered into while still in
@@ -223,6 +236,18 @@ RenderGraph::ResourceStep RenderGraph::CombinePassStep(u32 pass, u32 resource) c
                          "a pass's accesses to one resource must agree on a layout");
         }
 
+        // **The stage union has no case, and cannot be given one with today's `ResourceAccess`.**
+        // Two accesses reach this loop together only if they agree on a layout --
+        // `DiagnosticKind::AccessLayoutConflict` refuses the rest, and `IndirectRead` never names
+        // a texture at all -- and the only pairs that agree are `ColorAttachment`'s read and
+        // write and `General`'s. Each of those pairs shares a stage set as well, so `|=` and a
+        // plain `=` give the same answer for every frame that can be declared: a mutation
+        // dropping this union survives the suite, and a case written to catch it could not fail.
+        // That is expected rather than a gap, and is recorded here so the next reader does not
+        // spend the hunt. The access union below *is* observable, because those same two pairs
+        // differ in exactly the access. Both are written as unions because the combination is a
+        // union, and the day a second access maps onto an existing layout with a stage set of
+        // its own this line is already right.
         step.state.stage |= requirement.scope.stage;
         step.state.access |= requirement.scope.access;
 

@@ -1726,4 +1726,40 @@ TEST_CASE("compiling a frame with barriers allocates nothing") {
 
     // And the compile it measured is a real one, so "allocated nothing" is not "did nothing".
     CHECK(graph.Inspect().barriers.size() == 6u);
+
+    // **The refusal path too, which is the half that would allocate if either did.** A successful
+    // compile only appends to pools bought in the constructor; a refused one also pushes a
+    // `GraphDiagnostic` and returns an `Err`, and this file's claim is that neither of those
+    // reaches the allocator either. Measuring only the success path would leave the more
+    // suspicious half unmeasured, which is the shape of gap this project keeps finding.
+    //
+    // The same declarations, with the barrier pool sized to fill part-way through.
+    RenderGraph::Config config{};
+    config.maxBarriers = 1u;
+    RenderGraph refused(allocator, config);
+
+    PassBuilder             refusedProducer = AnchoredPass(refused, "Producer", 10);
+    const Result<TextureId> refusedTarget =
+        refusedProducer.CreateTexture("Target", kSwapchainDescription);
+    REQUIRE(refusedTarget.has_value());
+    REQUIRE(refusedProducer.Write(*refusedTarget, ResourceAccess::ColorAttachmentWrite));
+
+    PassBuilder refusedConsumer = AnchoredPass(refused, "Consumer", 11);
+    REQUIRE(refusedConsumer.Read(*refusedTarget, ResourceAccess::SampledRead));
+
+    const Monarc::usize beforeRefusal = allocator.BytesAllocated();
+    const Status        compiled      = refused.Compile();
+    CHECK(allocator.BytesAllocated() == beforeRefusal);
+
+    // And the refusal it measured is a real one, reached inside the derivation rather than
+    // before it: one barrier derived, the pool's whole capacity, and the diagnostic that says
+    // why.
+    REQUIRE_FALSE(compiled.has_value());
+    CHECK(compiled.error().code == ErrorCode::OutOfMemory);
+    const GraphInspection refusedInspection = refused.Inspect();
+    CHECK(refusedInspection.phase == GraphPhase::CompileFailed);
+    CHECK(refusedInspection.barriers.size() == 1u);
+    REQUIRE(refusedInspection.diagnostics.size() == 1u);
+    CHECK(refusedInspection.diagnostics[0].kind == DiagnosticKind::BarrierPoolExhausted);
+    CHECK(refusedInspection.diagnosticsDropped == 0u);
 }
