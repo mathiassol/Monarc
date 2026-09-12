@@ -133,22 +133,49 @@ Status RenderGraph::DeclareAccess(u32 pass, u32 generation, TextureId texture,
                                       pass, texture));
     }
 
-    // **Exact duplicates are refused, and the reason is Task 3's rather than tidiness.** With
-    // this rule, the accesses one pass declares to one resource are a set, so the derivation
-    // can walk consecutive accesses in execution order and emit one barrier per real
-    // transition without first deduplicating a list that might hold the same access twice. A
-    // duplicate is also nothing a caller can have meant.
+    // **One sweep, two refusals, and they are the two ways a second access to one resource from
+    // one pass can be wrong.**
     //
-    // Two *different* accesses to one resource in one pass are legal and are not this case:
-    // a read and a write is a read-modify-write attachment, which the plan states is legal.
-    // Two accesses whose layouts disagree is a third thing, and is deliberately still
-    // representable here -- see `ResourceAccess::DepthStencilAttachmentWrite`.
+    // **Exact duplicates, and the reason is the derivation's rather than tidiness.** With this
+    // rule the accesses one pass declares to one resource are a set, so the derivation can
+    // combine them into one required state without first deduplicating a list that might hold
+    // the same access twice. A duplicate is also nothing a caller can have meant.
+    //
+    // **Disagreeing layouts, which is the open question Task 1 raised and Task 3 answered.** A
+    // pass's accesses to one resource are combined into a single state -- one layout, the union
+    // of the stages, the union of the accesses -- because a texture is in exactly one layout at
+    // a time and a barrier cannot be recorded inside a rendering instance. Two accesses asking
+    // for two layouts have no such combination, so the derivation would have to pick one
+    // arbitrarily and emit a barrier into a layout the other access cannot use. That is refused
+    // here instead: `RequirementOf` is `constexpr` and the conflict is visible in the
+    // declarations alone, so no compilation state is needed to see it. See
+    // `DiagnosticKind::AccessLayoutConflict`, which carries the argument at length.
+    //
+    // A read and a write whose layouts *agree* are still legal and are neither of these: that is
+    // the read-modify-write attachment the plan names, and both `ColorAttachmentRead` and
+    // `ColorAttachmentWrite` ask for `TextureLayout::ColorAttachment`.
+    //
+    // **Checked in the order the mistakes are distinct in, and they cannot both fire for one
+    // pair**: an exact duplicate has the same access and therefore the same layout, so a pair
+    // that is a duplicate is never a conflict and a pair that is a conflict is never a
+    // duplicate.
     for (const AccessInspection& existing : m_accesses) {
-        if (existing.pass == pass && existing.resource == texture && existing.access == access) {
+        if (existing.pass != pass || existing.resource != texture) {
+            continue;
+        }
+        if (existing.access == access) {
             return std::unexpected(Refuse(DiagnosticKind::DuplicateAccess,
                                           ErrorCode::AlreadyExists,
                                           "PassBuilder::Read/Write: this pass already declared "
                                           "that access to that resource",
+                                          pass, texture));
+        }
+        if (RequirementOf(existing.access).layout != requirement.layout) {
+            return std::unexpected(Refuse(DiagnosticKind::AccessLayoutConflict,
+                                          ErrorCode::InvalidArgument,
+                                          "PassBuilder::Read/Write: this pass already declared "
+                                          "an access to that resource needing a different "
+                                          "layout",
                                           pass, texture));
         }
     }

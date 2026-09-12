@@ -25,7 +25,14 @@ namespace {
 /// `Array` has no `Resize`, which is why this is a loop rather than a call. It is the shape the
 /// constructor already used for `m_records`, lifted out once the compile scratch made it the
 /// seventh caller.
-void FillToCapacity(Array<u32>& array, u32 count) {
+///
+/// A template since the derivation's scratch arrived, because one of the ten holds a
+/// `ResourceStep` rather than a `u32`. Both element types are aggregates whose default member
+/// initialisers are the "nothing here" value, which is what makes `Emplace()` the right fill --
+/// and the derivation writes every step it reads before reading it, exactly as the `u32` stages
+/// do.
+template <typename T>
+void FillToCapacity(Array<T>& array, u32 count) {
     array.Reserve(count);
     for (u32 i = 0; i < count; ++i) {
         array.Emplace();
@@ -50,7 +57,8 @@ RenderGraph::RenderGraph(IAllocator& allocator, const Config& config)
       m_passIndegree(allocator),
       m_passMark(allocator),
       m_passStack(allocator),
-      m_resourceBin(allocator) {
+      m_resourceBin(allocator),
+      m_resourceStep(allocator) {
     // The only allocation this class ever makes, and it happens here. Every pool is reserved
     // to its configured capacity and never grows -- `Array::Reserve` is what buys the buffer,
     // and every append below refuses rather than reaching `Emplace`'s growth path. See the
@@ -82,6 +90,7 @@ RenderGraph::RenderGraph(IAllocator& allocator, const Config& config)
     FillToCapacity(m_passMark, m_config.maxPasses);
     FillToCapacity(m_passStack, m_config.maxPasses);
     FillToCapacity(m_resourceBin, m_config.maxResources);
+    FillToCapacity(m_resourceStep, m_config.maxResources);
 }
 
 RenderGraph::~RenderGraph() { DestroyRecords(); }

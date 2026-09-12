@@ -13,13 +13,13 @@
 // `RHI::TextureDescription`, and it reads two of its fields to decide whether two transients
 // could share memory. So a machine with no GPU, no Vulkan driver and no display can check the
 // whole of a frame's ordering, culling, lifetimes and aliasing, which is where CI runs. See
-// `RenderGraph`'s class comment; Task 3's derivation joins this file's discipline in
+// `RenderGraph`'s class comment; the barrier derivation keeps to the same discipline in
 // DeriveBarriers.cpp, and Task 4's `Execute` is the first line of the module that needs a
 // device at all.
 //
-// **What is still absent, stated rather than stubbed**: no barriers are derived, so
-// `GraphInspection::barriers` is empty and Task 3 of the phase plan is what fills it. A green
-// suite here is not evidence that any barrier is derived.
+// **What is still absent, stated rather than stubbed**: nothing here records anything. The last
+// stage below derives the barriers a frame needs and `GraphInspection::barriers` reports them;
+// turning one of those into an `RHI::TextureBarrier` on a real command list is Task 4's.
 //
 // ---------------------------------------------------------------------------------------
 // The dependency edges, once, because four places below walk them.
@@ -840,15 +840,29 @@ Status RenderGraph::Compile() {
         return allWritten.has_value() ? allOrdered : allWritten;
     }
 
-    // **The remaining four stages are ordered by what they read, and two of the orderings are
+    // **The remaining five stages are ordered by what they read, and three of the orderings are
     // load-bearing.** Culling comes before lifetimes, because a transient whose last reader is
     // culled has to be live for a shorter span and not a longer one. Numbering comes before
     // lifetimes too, because a lifetime is a pair of execution positions and the positions are
-    // what numbering assigns. Grouping comes last because it compares lifetimes.
+    // what numbering assigns. Grouping compares lifetimes. Derivation comes last because it
+    // walks the surviving passes in execution order and asks each resource's lifetime whether
+    // any surviving pass touched it -- so it needs culling, numbering and lifetimes all done.
     CullPasses();
     NumberSurvivingPasses();
     ComputeLifetimes();
     GroupAliases();
+
+    // **The one refusal that happens after a frame has been decided, and it leaves the decisions
+    // in the report.** Every refusal above is about the shape of the declarations and runs
+    // before anything is computed, so blanking the report costs nothing and keeps it from
+    // disagreeing with the refusal. A full barrier pool is not about the declarations at all --
+    // the order, the culling, the lifetimes and the groups are all correct and are all still
+    // worth reading, and so is the partial barrier list, which is the only thing that says how
+    // far the derivation got. See `DiagnosticKind::BarrierPoolExhausted`.
+    if (Status derived = DeriveBarriers(); !derived) {
+        m_phase = GraphPhase::CompileFailed;
+        return derived;
+    }
 
     m_phase = GraphPhase::Compiled;
     return {};

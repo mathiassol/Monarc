@@ -238,21 +238,25 @@ public:
 
     /// Declares that this pass reads `texture`, and how.
     ///
-    /// Fails with `ErrorCode::InvalidArgument` if `access` writes -- use `Write` -- or if it
-    /// can only name a buffer (see `AccessRequirement::namesTexture`); with
-    /// `ErrorCode::NotFound` if `texture` names no resource in this build, including an id
-    /// from a previous build; with `ErrorCode::AlreadyExists` if this pass already declared
-    /// exactly this access to this resource; and with `ErrorCode::OutOfMemory` if the access
-    /// pool is full.
+    /// Fails with `ErrorCode::InvalidArgument` if `access` writes -- use `Write` -- if it
+    /// can only name a buffer (see `AccessRequirement::namesTexture`), or if this pass already
+    /// declared an access to this resource needing a *different layout* (see
+    /// `DiagnosticKind::AccessLayoutConflict`); with `ErrorCode::NotFound` if `texture` names no
+    /// resource in this build, including an id from a previous build; with
+    /// `ErrorCode::AlreadyExists` if this pass already declared exactly this access to this
+    /// resource; and with `ErrorCode::OutOfMemory` if the access pool is full.
     [[nodiscard]] Status Read(TextureId texture, ResourceAccess access);
 
     /// Declares that this pass writes `texture`, and how. `Read`'s failures apply, with the
     /// direction check reversed.
     ///
-    /// **Declaring the same resource as both a read and a write is legal**, and is what a
-    /// read-modify-write colour attachment is -- a `LoadOp::Load` target, or a blend. Both
-    /// accesses are recorded and both are reported through inspection; see
-    /// `AccessInspection`.
+    /// **Declaring the same resource as both a read and a write is legal where the two ask for
+    /// the same layout**, and is what a read-modify-write colour attachment is -- a
+    /// `LoadOp::Load` target, or a blend. Both accesses are recorded and both are reported
+    /// through inspection (see `AccessInspection`), and the derivation combines them into one
+    /// required state carrying both access bits. A pair whose layouts *disagree* -- the depth
+    /// test-and-write pair -- is refused instead; see
+    /// `ResourceAccess::DepthStencilAttachmentWrite`.
     [[nodiscard]] Status Write(TextureId texture, ResourceAccess access);
 
     /// Sets the callback that records this pass's commands.

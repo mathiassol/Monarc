@@ -472,9 +472,87 @@ TEST_CASE("an access that can only name a buffer is refused on a texture") {
     CHECK(inspection.diagnostics[0].resource == *target);
 }
 
+TEST_CASE("one pass declaring two accesses to one resource with disagreeing layouts is refused") {
+    // **The open question Task 1 raised and the derivation answered.** A texture is in exactly
+    // one layout at a time and a barrier cannot be recorded inside a rendering instance, so a
+    // pass's accesses to one resource have to combine into one required state -- and two layouts
+    // have no combination. The derivation would have to pick one arbitrarily and transition into
+    // it, which is a wrong barrier rather than a refused frame. See
+    // `DiagnosticKind::AccessLayoutConflict`.
+    //
+    // **Two of them, and the second is the one that says the rule is about layouts rather than
+    // about depth.** The depth pair is the shape Access.h names -- `DepthStencilReadOnly` against
+    // `DepthStencilAttachment` -- and `SampledRead` beside `ColorAttachmentWrite` is a second
+    // pair that disagrees for the same reason, on a resource a Phase B pass could plausibly
+    // declare. A rule written as "refuse the two depth accesses together" would pass the first
+    // and fail the second.
+    //
+    // **Both orders**, because the refusal scans the accesses already declared: the conflict has
+    // to be found whichever of the pair was declared first.
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    Result<PassBuilder> pass = graph.AddPass("Pass");
+    REQUIRE(pass.has_value());
+    const Result<TextureId> depth = pass->CreateTexture("Depth", kSwapchainDescription);
+    REQUIRE(depth.has_value());
+    const Result<TextureId> colour = pass->CreateTexture("Colour", kSwapchainDescription);
+    REQUIRE(colour.has_value());
+
+    REQUIRE(pass->Read(*depth, ResourceAccess::DepthStencilAttachmentRead));
+    const Status alsoWrites = pass->Write(*depth, ResourceAccess::DepthStencilAttachmentWrite);
+    REQUIRE_FALSE(alsoWrites.has_value());
+    CHECK(alsoWrites.error().code == ErrorCode::InvalidArgument);
+
+    // The other order, and the other pair.
+    REQUIRE(pass->Write(*colour, ResourceAccess::ColorAttachmentWrite));
+    const Status alsoSamples = pass->Read(*colour, ResourceAccess::SampledRead);
+    REQUIRE_FALSE(alsoSamples.has_value());
+    CHECK(alsoSamples.error().code == ErrorCode::InvalidArgument);
+
+    const GraphInspection inspection = graph.Inspect();
+    // The two refused accesses are not recorded; the two that were declared first are.
+    CHECK(inspection.accesses.size() == 2u);
+    REQUIRE(inspection.diagnostics.size() == 2u);
+    CHECK(inspection.diagnostics[0].kind == DiagnosticKind::AccessLayoutConflict);
+    CHECK(inspection.diagnostics[0].pass == 0u);
+    CHECK(inspection.diagnostics[0].resource == *depth);
+    CHECK(inspection.diagnostics[1].kind == DiagnosticKind::AccessLayoutConflict);
+    CHECK(inspection.diagnostics[1].resource == *colour);
+}
+
+TEST_CASE("a read and a write that agree on a layout stay legal") {
+    // **The companion that keeps the refusal above narrow**, and the case that would fail if it
+    // were written on "this pass already declared an access to this resource" rather than on the
+    // layouts. A read-modify-write colour attachment -- a `LoadOp::Load` target, or a blend -- is
+    // the declaration the plan calls legal, and both its accesses ask for
+    // `TextureLayout::ColorAttachment`.
+    //
+    // **Two of them, one in each declaration order**, since the refusal scans what came before:
+    // read-then-write and write-then-read both have to be accepted.
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    Result<PassBuilder> pass = graph.AddPass("Pass");
+    REQUIRE(pass.has_value());
+    const Result<TextureId> loaded = pass->CreateTexture("Loaded", kSwapchainDescription);
+    REQUIRE(loaded.has_value());
+    const Result<TextureId> blended = pass->CreateTexture("Blended", kSwapchainDescription);
+    REQUIRE(blended.has_value());
+
+    CHECK(pass->Read(*loaded, ResourceAccess::ColorAttachmentRead));
+    CHECK(pass->Write(*loaded, ResourceAccess::ColorAttachmentWrite));
+    CHECK(pass->Write(*blended, ResourceAccess::ColorAttachmentWrite));
+    CHECK(pass->Read(*blended, ResourceAccess::ColorAttachmentRead));
+
+    const GraphInspection inspection = graph.Inspect();
+    CHECK(inspection.accesses.size() == 4u);
+    CHECK(inspection.diagnostics.empty());
+}
+
 TEST_CASE("declaring the same access to the same resource twice is refused") {
-    // The rule that makes one pass's accesses to one resource a set, which is what lets Task
-    // 3's derivation walk consecutive accesses without deduplicating first.
+    // The rule that makes one pass's accesses to one resource a set, which is what lets the
+    // derivation combine them into one required state without deduplicating first.
     SystemAllocator allocator;
     RenderGraph     graph(allocator, RenderGraph::Config{});
 
@@ -960,40 +1038,6 @@ TEST_CASE("nothing has an execution order until Compile settles one") {
         CHECK(compiled.passes[i].executionOrder == i);
         CHECK_FALSE(compiled.passes[i].culled);
     }
-}
-
-TEST_CASE("Compile derives no barriers, which is Task 3's") {
-    // **Asserted so that a green suite cannot be read as evidence that the derivation works.**
-    // The frame below is the one Task 3's checklist calls "write-then-sampled-read across two
-    // passes is one barrier"; today it is zero barriers, and this is the line that will have to
-    // change when Task 3 lands.
-    //
-    // The lifetime is asserted beside it for one reason: it says the frame is a real one that
-    // survived culling, so "no barriers" is a statement about the derivation rather than about
-    // a frame with nothing in it. Lifetimes themselves are TestLifetimes.cpp's.
-    SystemAllocator allocator;
-    RenderGraph     graph(allocator, RenderGraph::Config{});
-
-    Result<PassBuilder> producer = graph.AddPass("Producer");
-    REQUIRE(producer.has_value());
-    const Result<TextureId> target = producer->CreateTexture("Target", kSwapchainDescription);
-    REQUIRE(target.has_value());
-    REQUIRE(producer->Write(*target, ResourceAccess::ColorAttachmentWrite));
-
-    Result<PassBuilder> consumer = graph.AddPass("Consumer");
-    REQUIRE(consumer.has_value());
-    REQUIRE(consumer->Read(*target, ResourceAccess::SampledRead));
-    const Result<TextureId> image = consumer->ImportTexture("Swapchain", SwapchainImport());
-    REQUIRE(image.has_value());
-    REQUIRE(consumer->Write(*image, ResourceAccess::ColorAttachmentWrite));
-
-    REQUIRE(graph.Compile());
-
-    const GraphInspection inspection = graph.Inspect();
-    REQUIRE(inspection.resources.size() == 2u);
-    CHECK(inspection.resources[0].lifetime.firstPass == 0u);
-    CHECK(inspection.resources[0].lifetime.lastPass == 1u);
-    CHECK(inspection.barriers.empty());
 }
 
 TEST_CASE("Compile refuses a second time, and refuses further declarations") {

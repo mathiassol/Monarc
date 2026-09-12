@@ -86,19 +86,20 @@ constexpr ResourceOrigin kAllOrigins[] = {ResourceOrigin::Transient, ResourceOri
 
 constexpr GraphQueue kAllQueues[] = {GraphQueue::Graphics};
 
-constexpr BarrierCauseKind kAllCauseKinds[] = {BarrierCauseKind::ImportIncoming,
-                                               BarrierCauseKind::PassAccess,
-                                               BarrierCauseKind::ImportOutgoing};
+constexpr BarrierCauseKind kAllCauseKinds[] = {
+    BarrierCauseKind::ImportIncoming, BarrierCauseKind::TransientCreation,
+    BarrierCauseKind::PassAccess, BarrierCauseKind::ImportOutgoing};
 
 constexpr DiagnosticKind kAllDiagnosticKinds[] = {
-    DiagnosticKind::PassPoolExhausted,       DiagnosticKind::ResourcePoolExhausted,
-    DiagnosticKind::AccessPoolExhausted,     DiagnosticKind::UnknownResource,
-    DiagnosticKind::UnknownPass,             DiagnosticKind::AccessDirectionMismatch,
-    DiagnosticKind::AccessNamesNoTexture,    DiagnosticKind::DuplicateAccess,
-    DiagnosticKind::DuplicateImport,         DiagnosticKind::InvalidImport,
-    DiagnosticKind::RecordAlreadySet,        DiagnosticKind::AlreadyCompiled,
-    DiagnosticKind::DependencyCycle,         DiagnosticKind::TransientNeverWritten,
-    DiagnosticKind::UnorderedOverwrite,
+    DiagnosticKind::PassPoolExhausted,     DiagnosticKind::ResourcePoolExhausted,
+    DiagnosticKind::AccessPoolExhausted,   DiagnosticKind::UnknownResource,
+    DiagnosticKind::UnknownPass,           DiagnosticKind::AccessDirectionMismatch,
+    DiagnosticKind::AccessNamesNoTexture,  DiagnosticKind::DuplicateAccess,
+    DiagnosticKind::AccessLayoutConflict,  DiagnosticKind::DuplicateImport,
+    DiagnosticKind::InvalidImport,         DiagnosticKind::RecordAlreadySet,
+    DiagnosticKind::AlreadyCompiled,       DiagnosticKind::DependencyCycle,
+    DiagnosticKind::TransientNeverWritten, DiagnosticKind::UnorderedOverwrite,
+    DiagnosticKind::BarrierPoolExhausted,
 };
 
 // ---------------------------------------------------------------------------------------
@@ -143,6 +144,7 @@ constexpr DiagnosticKind kAllDiagnosticKinds[] = {
 [[nodiscard]] constexpr bool IsEnumerator(BarrierCauseKind kind) {
     switch (kind) {
         case BarrierCauseKind::ImportIncoming:
+        case BarrierCauseKind::TransientCreation:
         case BarrierCauseKind::PassAccess:
         case BarrierCauseKind::ImportOutgoing:
             return true;
@@ -160,6 +162,7 @@ constexpr DiagnosticKind kAllDiagnosticKinds[] = {
         case DiagnosticKind::AccessDirectionMismatch:
         case DiagnosticKind::AccessNamesNoTexture:
         case DiagnosticKind::DuplicateAccess:
+        case DiagnosticKind::AccessLayoutConflict:
         case DiagnosticKind::DuplicateImport:
         case DiagnosticKind::InvalidImport:
         case DiagnosticKind::RecordAlreadySet:
@@ -167,6 +170,7 @@ constexpr DiagnosticKind kAllDiagnosticKinds[] = {
         case DiagnosticKind::DependencyCycle:
         case DiagnosticKind::TransientNeverWritten:
         case DiagnosticKind::UnorderedOverwrite:
+        case DiagnosticKind::BarrierPoolExhausted:
             return true;
     }
     return false;
@@ -261,23 +265,37 @@ TEST_CASE("the FirstLight frame renders exactly this text") {
     //
     // The lifetime reads `0..0` because the one pass writes the image and is the only pass
     // there is; the alias field reads `none` because an imported resource is never aliased --
-    // the graph does not own its memory. There is no `barrier` line because Task 3 derives
-    // them and has not landed. All three are asserted structurally elsewhere in the suite.
+    // the graph does not own its memory. The two `barrier` lines are the two the derivation
+    // produces for this frame, asserted field by field against A3's captures in
+    // Tests/TestDeriveBarriers.cpp -- this is the only place their *rendering* is pinned.
+    //
+    // **`order=none:none` in a cause is two fields going silent together, and both mean it.**
+    // An import's declared state belongs to no pass and names no access, so `pass` is `kNoPass`
+    // and `access` is filler; printing the filler's enumerator would read as an import whose
+    // incoming state was a colour attachment read.
     SystemAllocator allocator;
     RenderGraph     graph(allocator, RenderGraph::Config{});
     DeclareFirstLightFrame(graph);
 
-    char buffer[1024] = {};
+    char buffer[2048] = {};
     CHECK(Render(graph.Inspect(), buffer) ==
           "graph build=0 phase=Compiled\n"
-          "counts passes=1 resources=1 accesses=1 barriers=0 diagnostics=0 dropped=0\n"
+          "counts passes=1 resources=1 accesses=1 barriers=2 diagnostics=0 dropped=0\n"
           "pass 0 order=0 queue=Graphics culled=no record=no name=\"Present\"\n"
           "resource 0 id=0:0 origin=Imported format=B8G8R8A8_UNORM extent=1280x720 usage=0x1 "
           "lifetime=0..0 alias=none name=\"Swapchain\"\n"
           "resource 0 import texture=4:1 "
           "incoming=Undefined/ColorAttachmentOutput(0x20)/None(0x0) "
           "outgoing=PresentSource/None(0x0)/None(0x0)\n"
-          "access 0 decl-pass=0 resource=0:0 access=ColorAttachmentWrite\n");
+          "access 0 decl-pass=0 resource=0:0 access=ColorAttachmentWrite\n"
+          "barrier 0 resource=0:0 before-order=0 layout=Undefined->ColorAttachment "
+          "sync=ColorAttachmentOutput(0x20)->ColorAttachmentOutput(0x20) "
+          "access=None(0x0)->ColorAttachmentWrite(0x100) "
+          "cause=ImportIncoming:order=none:none->PassAccess:order=0:ColorAttachmentWrite\n"
+          "barrier 1 resource=0:0 before-order=none layout=ColorAttachment->PresentSource "
+          "sync=ColorAttachmentOutput(0x20)->None(0x0) "
+          "access=ColorAttachmentWrite(0x100)->None(0x0) "
+          "cause=PassAccess:order=0:ColorAttachmentWrite->ImportOutgoing:order=none:none\n");
 }
 
 TEST_CASE("the same declaration renders identically from two graphs") {
@@ -326,7 +344,7 @@ TEST_CASE("of two resources, only the imported one renders an import line") {
     char buffer[2048] = {};
     CHECK(Render(graph.Inspect(), buffer) ==
           "graph build=0 phase=Compiled\n"
-          "counts passes=1 resources=2 accesses=2 barriers=0 diagnostics=0 dropped=0\n"
+          "counts passes=1 resources=2 accesses=2 barriers=3 diagnostics=0 dropped=0\n"
           "pass 0 order=0 queue=Graphics culled=no record=no name=\"Offscreen\"\n"
           "resource 0 id=0:0 origin=Transient format=B8G8R8A8_UNORM extent=1280x720 usage=0x1 "
           "lifetime=0..0 alias=none name=\"Target\"\n"
@@ -336,7 +354,19 @@ TEST_CASE("of two resources, only the imported one renders an import line") {
           "incoming=Undefined/ColorAttachmentOutput(0x20)/None(0x0) "
           "outgoing=PresentSource/None(0x0)/None(0x0)\n"
           "access 0 decl-pass=0 resource=0:0 access=ColorAttachmentWrite\n"
-          "access 1 decl-pass=0 resource=1:0 access=ColorAttachmentWrite\n");
+          "access 1 decl-pass=0 resource=1:0 access=ColorAttachmentWrite\n"
+          "barrier 0 resource=0:0 before-order=0 layout=Undefined->ColorAttachment "
+          "sync=None(0x0)->ColorAttachmentOutput(0x20) "
+          "access=None(0x0)->ColorAttachmentWrite(0x100) "
+          "cause=TransientCreation:order=none:none->PassAccess:order=0:ColorAttachmentWrite\n"
+          "barrier 1 resource=1:0 before-order=0 layout=Undefined->ColorAttachment "
+          "sync=ColorAttachmentOutput(0x20)->ColorAttachmentOutput(0x20) "
+          "access=None(0x0)->ColorAttachmentWrite(0x100) "
+          "cause=ImportIncoming:order=none:none->PassAccess:order=0:ColorAttachmentWrite\n"
+          "barrier 2 resource=1:0 before-order=none layout=ColorAttachment->PresentSource "
+          "sync=ColorAttachmentOutput(0x20)->None(0x0) "
+          "access=ColorAttachmentWrite(0x100)->None(0x0) "
+          "cause=PassAccess:order=0:ColorAttachmentWrite->ImportOutgoing:order=none:none\n");
 }
 
 TEST_CASE("an access line renders its pass, not its own row number") {
@@ -379,7 +409,7 @@ TEST_CASE("an access line renders its pass, not its own row number") {
     char buffer[2048] = {};
     CHECK(Render(graph.Inspect(), buffer) ==
           "graph build=0 phase=Compiled\n"
-          "counts passes=2 resources=2 accesses=3 barriers=0 diagnostics=0 dropped=0\n"
+          "counts passes=2 resources=2 accesses=3 barriers=4 diagnostics=0 dropped=0\n"
           "pass 0 order=0 queue=Graphics culled=no record=no name=\"Producer\"\n"
           "pass 1 order=1 queue=Graphics culled=no record=no name=\"Consumer\"\n"
           "resource 0 id=0:0 origin=Transient format=B8G8R8A8_UNORM extent=1280x720 usage=0x1 "
@@ -391,7 +421,28 @@ TEST_CASE("an access line renders its pass, not its own row number") {
           "outgoing=PresentSource/None(0x0)/None(0x0)\n"
           "access 0 decl-pass=0 resource=0:0 access=ColorAttachmentWrite\n"
           "access 1 decl-pass=1 resource=0:0 access=SampledRead\n"
-          "access 2 decl-pass=1 resource=1:0 access=ColorAttachmentWrite\n");
+          "access 2 decl-pass=1 resource=1:0 access=ColorAttachmentWrite\n"
+          "barrier 0 resource=0:0 before-order=0 layout=Undefined->ColorAttachment "
+          "sync=None(0x0)->ColorAttachmentOutput(0x20) "
+          "access=None(0x0)->ColorAttachmentWrite(0x100) "
+          "cause=TransientCreation:order=none:none->PassAccess:order=0:ColorAttachmentWrite\n"
+          // The one barrier in this file whose stage is a *mask* rather than an enumerator:
+          // `SampledRead`'s three shader stages. `ToString` reports a mask with the
+          // not-a-single-value name, which is why every stage field prints its hex beside the
+          // name -- see `ToString(PipelineStage)` in Monarc/RHI/Barrier.h. 0x46 is
+          // `VertexShader | FragmentShader | ComputeShader`.
+          "barrier 1 resource=0:0 before-order=1 layout=ColorAttachment->ShaderReadOnly "
+          "sync=ColorAttachmentOutput(0x20)-><not a single PipelineStage>(0x46) "
+          "access=ColorAttachmentWrite(0x100)->ShaderSampledRead(0x10) "
+          "cause=PassAccess:order=0:ColorAttachmentWrite->PassAccess:order=1:SampledRead\n"
+          "barrier 2 resource=1:0 before-order=1 layout=Undefined->ColorAttachment "
+          "sync=ColorAttachmentOutput(0x20)->ColorAttachmentOutput(0x20) "
+          "access=None(0x0)->ColorAttachmentWrite(0x100) "
+          "cause=ImportIncoming:order=none:none->PassAccess:order=1:ColorAttachmentWrite\n"
+          "barrier 3 resource=1:0 before-order=none layout=ColorAttachment->PresentSource "
+          "sync=ColorAttachmentOutput(0x20)->None(0x0) "
+          "access=ColorAttachmentWrite(0x100)->None(0x0) "
+          "cause=PassAccess:order=1:ColorAttachmentWrite->ImportOutgoing:order=none:none\n");
 }
 
 TEST_CASE("the resource lines render their own row number, not the id's index") {
@@ -588,15 +639,20 @@ TEST_CASE("diagnostics of one report carry their group, and overlapping reports 
           "group=none message=\"on its own\"\n");
 }
 
-TEST_CASE("a hand-built inspection renders its Task 2 and Task 3 fields") {
-    // **The one case that exercises the fields no task fills yet.** A lifetime, an alias group
-    // and a derived barrier with its cause are built by hand here, because Tasks 2 and 3 are
-    // what will produce them from a declaration and neither has landed. Without this, the
-    // rendering of a `barrier` line would ship untested and the first real barrier would be
-    // the first thing to run it.
+TEST_CASE("a hand-built inspection renders fields no compiled graph puts together") {
+    // **The case that renders a report no declaration produces**, which is what a hand-built
+    // inspection is for: a culled pass beside a surviving one, an alias group, a non-zero dropped
+    // count and a barrier, in one report. It was written when nothing computed a lifetime, an
+    // alias group or a barrier; it stays because the combination is still one no frame below
+    // emits, and because a `dropped=` count on a compiled graph is unreachable by declaration.
     //
     // Structured-first is why this is possible at all: the inspection types are plain
-    // aggregates, so a test can construct the report the graph will one day compute.
+    // aggregates, so a test can construct a report rather than have to provoke one.
+    //
+    // The barrier's `cause.after` is given `ResourceAccess::ColorAttachmentRead` deliberately and
+    // renders as `none`: `BarrierCauseSide::access` is filler on a side that is not a
+    // `PassAccess`, and this is where that suppression is pinned. A rendering that printed the
+    // field would say `ImportOutgoing:order=none:ColorAttachmentRead`.
     Monarc::Render::PassInspection passes[2] = {};
     passes[0].name           = "Depth";
     passes[0].index          = 0;
@@ -649,7 +705,7 @@ TEST_CASE("a hand-built inspection renders its Task 2 and Task 3 fields") {
           "sync=ColorAttachmentOutput(0x20)->None(0x0) "
           "access=ColorAttachmentWrite(0x100)->None(0x0) "
           "cause=PassAccess:order=0:ColorAttachmentWrite->"
-          "ImportOutgoing:order=none:ColorAttachmentRead\n");
+          "ImportOutgoing:order=none:none\n");
 }
 
 TEST_CASE("the widest ids and sentinels render without being clipped") {

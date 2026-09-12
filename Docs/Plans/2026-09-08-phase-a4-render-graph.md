@@ -210,34 +210,78 @@ up with rather than reading it.
 
 The most important task in the phase, and entirely a pure function.
 
-- [ ] Derive barriers from the transitions implied by consecutive accesses to each resource:
+- [x] Derive barriers from the transitions implied by consecutive accesses to each resource:
       stage and access scopes from the two accesses, layout from the two usages, in ADR-0005's
       model. An imported resource's declared incoming and outgoing states are the first and
       last transitions.
-- [ ] Emit each derived barrier through inspection **with the accesses that caused it**, so a
+- [x] Emit each derived barrier through inspection **with the accesses that caused it**, so a
       wrong barrier is debuggable as a derivation rather than as archaeology.
-- [ ] A transition that is not a transition — same stage, same access, same layout — must be
+- [x] A transition that is not a transition — same stage, same access, same layout — must be
       representable and must not be emitted. An unnecessary barrier is a performance bug, and a
       silently dropped necessary one is a correctness bug; the test suite must distinguish them.
 
 ### Device-free tests
 
-- [ ] **The A3 equivalence test, and it is the phase's headline.** Given the declaration
+- [x] **The A3 equivalence test, and it is the phase's headline.** Given the declaration
       `Monarc.FirstLight` will make — one pass writing an imported swapchain image, incoming
       layout `Undefined`, outgoing `Present`, cleared on load — the graph derives **exactly
       two** barriers: `Undefined → ColorAttachment` with the stage and access scopes A3 used,
       and `ColorAttachment → Present` with A3's. Assert against the values in
       `Build/Captures/*.xml`, and cite the capture in the test so the reference is traceable.
-- [ ] Write-after-write on the same resource yields one barrier; read-after-read yields none;
+- [x] Write-after-write on the same resource yields one barrier; read-after-read yields none;
       read-after-write and write-after-read each yield one with the right direction.
-- [ ] A resource with three consecutive accesses yields two barriers, not one merged or three.
-- [ ] Culled passes contribute no barriers.
-- [ ] A barrier is never derived for a resource a pass declared and no pass used.
+- [x] A resource with three consecutive accesses yields two barriers, not one merged or three.
+- [x] Culled passes contribute no barriers.
+- [x] A barrier is never derived for a resource a pass declared and no pass used.
 
 **Prove the derivation can fail.** Mutate the derivation — swap a layout pair, drop a stage,
 merge two barriers into one — and show which assertion catches each. A3's reviews found that
 six mutations went undetected in code whose comments claimed coverage; the derivation is where
 that would hurt most.
+
+### What Task 3 decided, and what it added
+
+**The model.** A resource's accesses in execution order are a *chain of states*: an import's
+declared incoming state or a transient's creation, one state per surviving pass, and for an
+import its declared outgoing state. A gap in the chain becomes a barrier **unless the two
+states are identical and the one after the gap is not a state a pass wrote**. The write term is
+what keeps write-after-write — identical layout, identical scopes, and mandatory — from being
+suppressed as a no-op. The one-sided reading is what leaves an already-satisfied outgoing state
+alone while still barriering a pass that writes into an import's declared incoming state.
+`Source/Monarc.Render/Private/DeriveBarriers.cpp` argues all of it where the decision is made.
+
+**Three additions, recorded as additions rather than checkboxes**, in the shape
+`RefuseUnorderedOverwrites` uses, so a later reader does not preserve them for the wrong reason:
+
+- **A transient gets an opening transition from `TextureLayout::Undefined`.** The checklist
+  above names only an import's two declared ends. A transient has neither, and
+  `IDevice::CreateTexture` asks for `VK_IMAGE_LAYOUT_UNDEFINED` — so a derivation that took the
+  line literally would render into an image still in `Undefined`.
+  `BarrierCauseKind::TransientCreation` is the cause that says so without claiming a declaration
+  the resource does not have.
+- **`DiagnosticKind::BarrierPoolExhausted`.** The derivation is the first thing to fill a pool
+  the *graph* sizes, and it refuses rather than growing, like every other pool here. It is the
+  one refusal `Compile` makes after a frame has been decided, so it leaves the order, the
+  culling, the lifetimes, the groups and a partial barrier list in the report.
+- **A barrier cause that is not a `PassAccess` renders its access as `none`.**
+  `BarrierCauseSide::access` is filler on those sides, and the text was printing the filler's
+  enumerator — an import's incoming state read as a colour attachment read.
+
+**An imported resource no surviving pass touches is left alone.** No incoming transition, no
+outgoing one. Emitting `incoming → outgoing` would be a barrier for an operation the frame did
+not perform, and its cause would name two import ends with no access between them — in the field
+that exists so a barrier is traceable to the accesses that asked for it. Culling never drops a
+pass that *writes* an import, so the only way to reach this is a read-only import whose readers
+were all culled; the report says exactly that, with the pass marked `culled` and the lifetime
+empty.
+
+**What a richer access set would want here and this one cannot use: merging a run of reads.**
+The chain is walked pairwise. A graph that folded consecutive readers into one state would emit
+one widened barrier in front of the first of them — but with `ResourceAccess` as it stands the
+two answers cannot differ, because every read a `TextureId` can carry names a layout of its own,
+so two consecutive reads are either the same access (one state, no barrier) or two layouts (a
+transition no merge removes). It becomes a real question when two reads share a layout, or when
+`BufferId` arrives and a read has no layout at all.
 
 ---
 
@@ -261,6 +305,31 @@ that would hurt most.
       directly.** It declares a pass that writes the imported swapchain image with a clear
       load-op, and the graph does the rest. Deleting that hand-written code is the point of the
       phase; leaving it beside the graph as a fallback would defeat it.
+- [ ] **Build the device-free stub `ICommandList`, which Task 3 decided and deferred to here.**
+      The decision is yes: it closes five uncalled things at once — `Execute`'s body,
+      `PassCommandList`'s private constructor and `Commands()`, and both `Invoke` bodies — and
+      turns *"the graph emitted exactly these barriers, in this order, around this rendering
+      pass"* into a device-free assertion, which is strictly stronger than inspecting a
+      derivation and hoping execution matches it. It is Task 4's rather than Task 3's because
+      Task 3 derives and does not record, so a stub built there would have had no caller, which
+      is the thing this codebase's "arrives with its first user" rule exists to prevent.
+      `PassCommandList`'s own comment already names the `ForTesting` factory that arrives with
+      it.
+
+      **What it should record, from Task 3's side:** each `Barrier` it was handed, in order,
+      with all six ADR-0005 fields and the texture; each `BeginRendering`/`EndRendering` pair;
+      and `Begin`/`End`. That is enough to assert the two things inspection cannot — that the
+      derived barriers reach the list *at all*, and that each lands on the side of
+      `BeginRendering` its `emittedBeforePass` says it does.
+
+- [ ] **The declaration `Monarc.FirstLight` makes is Task 3's to hand over, and it is this**, with
+      the reasoning at `SwapchainImport` in Tests/TestDeriveBarriers.cpp: incoming
+      `{Undefined, ColorAttachmentOutput, None}`, outgoing `{PresentSource, None, None}`. Five of
+      those six values are forced by the swapchain contract; the sixth, `incoming.stage`, is
+      `ColorAttachmentOutput` because `VulkanDeviceState::SubmitList` waits on the acquire
+      semaphore at that stage and a layout transition is a write that has to be ordered after
+      that wait. **Do not change it to make a capture match** — the derivation is a function of
+      it, which *"the derived barriers are a function of the declared import states"* pins.
 
 ### Device-required tests
 
@@ -323,14 +392,23 @@ say nothing about whether it is fast.
 
 ## Open questions this plan does not settle
 
-- **What a pass declaring two accesses with disagreeing layouts should mean.** Raised by Task
-  1, which found the state representable and refused by nothing. Colour attachment read plus
-  write on one resource is legal — both want the same layout — and is tested. But
-  `DepthStencilAttachmentRead` plus `DepthStencilAttachmentWrite` on one resource asks for two
-  layouts at once, and nothing rejects it. Task 1 deliberately did not guess the rule because
-  A4 has no depth pass; the derivation in Task 3 is where it becomes answerable, since that is
-  the code with an opinion about what layout a resource is in.
-- **A device-free stub `ICommandList`, which Tasks 3 and 4 want anyway.** Task 1 reports that
+- ~~**What a pass declaring two accesses with disagreeing layouts should mean.**~~ **Answered by
+  Task 3: refused at declaration, with `DiagnosticKind::AccessLayoutConflict`.** The derivation
+  combines a pass's accesses to one resource into a single required state — one layout, the union
+  of the stages, the union of the accesses — because a texture is in one layout at a time and a
+  barrier cannot be recorded inside a rendering instance, so there is nowhere to put one between a
+  pass's own two accesses. Two layouts have no combination, and the derivation would have had to
+  pick one arbitrarily and transition into it. The refusal is at declaration rather than at
+  compile because `RequirementOf` is `constexpr` and the conflict is visible in the declarations
+  alone, and it forecloses nothing: a combined read-and-write depth access is one more
+  `ResourceAccess` enumerator with one layout, and it stops being a conflicting pair on the day it
+  arrives. Colour read plus write is untouched — both ask for `ColorAttachment` — and stays
+  tested as legal.
+- ~~**A device-free stub `ICommandList`, which Tasks 3 and 4 want anyway.**~~ **Decided by Task 3:
+  yes, and built in Task 4**, where its first caller is. See the checkbox added to Task 4 for what
+  it should record and why it is not Task 3's to build. The original question follows.
+
+  Task 1 reports that
   `RenderGraph::Execute`'s stub is unreachable from any test, because it takes `RHI::IDevice&`
   and `RHI::ICommandList&` and a device-free test has neither. That is the right signature —
   weakening it to a nullable context struct to serve a test would be the tail wagging the dog
@@ -362,8 +440,16 @@ say nothing about whether it is fast.
   compatible descriptions is the conservative rule and the right starting point; a real
   allocator may want a looser one keyed on size and alignment. Revisit when the allocator
   exists rather than guessing its requirements now.
-- **Task 3 has no inter-pass write-after-read declaration to exercise, and its checklist line
-  assumes one.** *"Read-after-write and write-after-read each yield one with the right
+- ~~**Task 3 has no inter-pass write-after-read declaration to exercise, and its checklist line
+  assumes one.**~~ **Task 3 wrote against the two shapes it can be given, and found that the
+  intra-pass one is not a barrier at all.** A read-modify-write pass's two accesses combine into
+  one state, so there is no gap inside it and nothing to emit — the write-after-read shows up in
+  the *combined access mask* of the barrier that reaches the pass, which is what a derivation
+  that dropped the read half would get wrong. The import's outgoing transition after a read is a
+  genuine one and is asserted as such. Both have a case; neither is the inter-pass
+  anti-dependency, and the original analysis follows unchanged.
+
+  *"Read-after-write and write-after-read each yield one with the right
   direction"* is written as though a frame could declare a read that precedes an overwrite. It
   cannot. Task 2 found the reason: an edge runs from every writer of a resource to every
   different pass that reads it, so a writer is before a reader in **every** topological order

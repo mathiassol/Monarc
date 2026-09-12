@@ -31,12 +31,12 @@ namespace Monarc::Render {
 // branch deleted assertions of exactly that shape. The text exists because a debug view and a
 // diffable artifact need one, and it is tested as its own function.
 //
-// **Fields whose data arrives in a later task are present now, and empty.** `DerivedBarrier`
-// and its `BarrierCause` are Task 3's, and say so in their own comments. `ResourceLifetime`,
+// **Every field below is computed by something.** `ResourceLifetime`,
 // `ResourceInspection::aliasGroup` and the culling and ordering `PassInspection` reports are
-// Task 2's and are computed. A field with nothing computing it yet is a gap that is visible; a
-// decision the type cannot express is a decision no test can reach, which is the failure mode
-// this whole header exists to avoid.
+// Task 2's; `DerivedBarrier` and its `BarrierCause` are Task 3's and are filled by
+// `DeriveBarriers` in Private/DeriveBarriers.cpp. The types were written before the code that
+// fills them, on purpose: a decision the type cannot express is a decision no test can reach,
+// which is the failure mode this whole header exists to avoid.
 // ---------------------------------------------------------------------------------------
 
 /// No pass. An execution-order position a culled pass does not have, and the end of the graph
@@ -305,6 +305,19 @@ enum class BarrierCauseKind : u32 {
     /// transition.
     ImportIncoming = 0,
 
+    /// A transient resource's creation -- the before side of *its* first transition, and the
+    /// counterpart to `ImportIncoming` for a resource the graph owns.
+    ///
+    /// **A transient has no declared incoming state and must not be given one.** Nothing
+    /// outside the graph produced it: the graph creates it, and `IDevice::CreateTexture` asks
+    /// for `VK_IMAGE_LAYOUT_UNDEFINED` (see `CreateTexture` in
+    /// Monarc.RHI.Vulkan/Private/VulkanDevice.cpp), so the state the derivation starts it in is
+    /// `TextureLayout::Undefined` with no stage to wait for and no access to make available.
+    /// Reusing `ImportIncoming` for it would claim a declaration the resource does not have,
+    /// and reusing `PassAccess` would name a pass that did not access it -- creating a resource
+    /// is not accessing it, which is `PassBuilder::CreateTexture`'s own rule.
+    TransientCreation,
+
     /// A pass's declared access. `BarrierCauseSide::pass` and `::access` name which.
     PassAccess,
 
@@ -345,9 +358,12 @@ struct BarrierCause {
 
 /// One barrier the graph derived.
 ///
-/// **Task 3 fills this list; it is empty until then, and the type is here now on purpose.** A
-/// barrier the inspection could not express would be a barrier no test could assert on, which
-/// is the whole thing A4 exists to change.
+/// **Filled by `DeriveBarriers` in Private/DeriveBarriers.cpp, which is where the rule for when
+/// a barrier is emitted is argued.** The short version: a resource's accesses in execution
+/// order are a chain of states -- one per surviving pass, framed by an import's declared
+/// incoming and outgoing states or by a transient's creation -- and each gap in that chain
+/// becomes a barrier unless the two states are identical and the one after the gap is not a
+/// state a pass wrote.
 ///
 /// **ADR-0005's six fields plus a `TextureId`, and deliberately not an `RHI::TextureBarrier`.**
 /// A compiled graph has no `RHI::TextureHandle` for a transient -- execution is what creates
@@ -379,9 +395,9 @@ struct DerivedBarrier {
 ///
 /// **One enumerator per refusal the graph can produce, and no placeholders for later tasks.**
 /// A diagnostic kind is what a test asserts on instead of matching a message, so an
-/// enumerator nothing emits would be an assertion nobody could write. The first twelve are
-/// declaration refusals; the last three are Task 2's, and are the only three `Compile` itself
-/// records about the declarations it was given.
+/// enumerator nothing emits would be an assertion nobody could write. The first thirteen are
+/// declaration refusals; the last four are `Compile`'s own, and are the only four it records
+/// about the declarations it was given.
 enum class DiagnosticKind : u32 {
     /// `AddPass` was called with every pass slot occupied.
     PassPoolExhausted = 0,
@@ -409,6 +425,43 @@ enum class DiagnosticKind : u32 {
 
     /// The same pass declared the same access to the same resource twice.
     DuplicateAccess,
+
+    /// One pass declared two accesses to one resource whose required layouts disagree.
+    ///
+    /// **The open question the phase plan carried from Task 1, answered where it became
+    /// answerable.** `DepthStencilAttachmentRead` wants `TextureLayout::DepthStencilReadOnly`
+    /// and `DepthStencilAttachmentWrite` wants `TextureLayout::DepthStencilAttachment`, so a
+    /// pass declaring both on one resource asks for two layouts at once -- and a texture is in
+    /// exactly one layout at a time, which is the whole reason a transition needs naming (see
+    /// `RHI::TextureLayout`). Nothing refused it, and `ResourceAccess::DepthStencilAttachmentWrite`
+    /// in Access.h recorded that as a gap rather than guessing the rule.
+    ///
+    /// **Task 3 is what makes the guess unnecessary, because the derivation is the code with an
+    /// opinion about what layout a resource is in.** A barrier is derived between the state a
+    /// resource is left in and the state the next pass needs, so "the state this pass needs" has
+    /// to be one value -- one layout, the union of the stages, the union of the accesses. With
+    /// two disagreeing layouts in one pass the derivation would have to pick one arbitrarily, and
+    /// a barrier into the wrong one is a wrong barrier rather than a refused frame. So the
+    /// declaration is refused instead, and the combining rule in Private/DeriveBarriers.cpp is
+    /// total.
+    ///
+    /// **Colour attachment read plus write is not this case and stays legal**, which is the
+    /// distinction that makes the refusal narrow: both ask for `TextureLayout::ColorAttachment`,
+    /// so a read-modify-write attachment -- a `LoadOp::Load` target, or a blend -- combines into
+    /// one state with both access bits. Tests/TestAccess.cpp pins both halves of that as
+    /// `static_assert`s.
+    ///
+    /// **Refused at declaration and not at compile**, because `RequirementOf` is `constexpr` and
+    /// the conflict is a property of one pass's two declarations: nothing about execution order,
+    /// culling or lifetimes is needed to see it. That also keeps the refusal at the call that
+    /// caused it, which is what `PassBuilder`'s class comment argues every declaration refusal is
+    /// worth.
+    ///
+    /// **Nothing forecloses**: the day a pass genuinely needs to read and write depth, what
+    /// changes is `ResourceAccess` -- one enumerator for a combined depth access with one layout
+    /// -- and this refusal stops applying to it. No call site changes shape, which is the same
+    /// property `UnorderedOverwrite` claims for itself.
+    AccessLayoutConflict,
 
     /// Two declarations imported the same `RHI::TextureHandle`, which would give one physical
     /// resource two independent identities in one build.
@@ -483,6 +536,23 @@ enum class DiagnosticKind : u32 {
     /// in, which makes reading it first meaningful, and says nothing at all about which of two
     /// passes overwrote it first.
     UnorderedOverwrite,
+
+    /// The derivation produced more barriers than `RenderGraph::Config::maxBarriers` has room
+    /// for.
+    ///
+    /// **The one refusal in this list about a pool the graph fills rather than one a caller
+    /// fills**, which is why it happens in `Compile` where its three siblings --
+    /// `PassPoolExhausted`, `ResourcePoolExhausted` and `AccessPoolExhausted` -- happen at the
+    /// declaration that overflowed. There is no declaration to name: a barrier comes from two
+    /// accesses and which of them "caused" the overflow is the wrong question, so `pass` is the
+    /// pass the refused barrier would have been emitted in front of and `resource` is the
+    /// resource it was about.
+    ///
+    /// **The barriers derived before the overflow are kept, not discarded**, exactly as the
+    /// accesses declared before an `AccessPoolExhausted` are kept -- the phase is
+    /// `GraphPhase::CompileFailed`, so the list is a partial record of a frame that was refused
+    /// rather than a frame. `Private/DeriveBarriers.cpp` says so where it refuses.
+    BarrierPoolExhausted,
 };
 
 /// One refusal, with what it was about.
@@ -592,7 +662,13 @@ struct GraphInspection {
     /// Declaration order, flat across passes. See `AccessInspection`.
     std::span<const AccessInspection> accesses = {};
 
-    /// Empty until Task 3.
+    /// Every barrier the derivation produced, **in the order a frame records them**: by the
+    /// execution position each is emitted in front of, then by the declaration order of the
+    /// resource each is about. The ones an imported resource's outgoing state produces carry
+    /// `emittedBeforePass == kNoPass` and come last, because they are recorded after every pass.
+    ///
+    /// Empty in `GraphPhase::Declaring`, and a partial record in `GraphPhase::CompileFailed` --
+    /// see `DiagnosticKind::BarrierPoolExhausted`.
     std::span<const DerivedBarrier> barriers = {};
 
     std::span<const GraphDiagnostic> diagnostics = {};

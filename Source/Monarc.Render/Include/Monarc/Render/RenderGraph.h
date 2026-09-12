@@ -93,10 +93,14 @@ public:
         /// other.
         u32 maxAccesses = 512;
 
-        /// Capacity of the derived-barrier list. **Nothing fills it yet** -- derivation is
-        /// Task 3's -- so this sizes a pool that is currently always empty, and is here
-        /// because the pool has to be allocated at construction rather than when the first
-        /// barrier is derived.
+        /// Capacity of the derived-barrier list, filled by the derivation in
+        /// Private/DeriveBarriers.cpp. Allocated at construction rather than when the first
+        /// barrier is derived, because compilation is a path a frame runs.
+        ///
+        /// A build that overflows it is refused with `DiagnosticKind::BarrierPoolExhausted`
+        /// rather than growing the pool. Bounded above by the declarations: a resource
+        /// contributes at most one barrier per surviving pass that touches it, plus one at each
+        /// end, so `maxAccesses + 2 * maxResources` is a capacity no build can exceed.
         u32 maxBarriers = 256;
 
         /// Capacity of the diagnostics list. Small: a build with more than this many
@@ -148,23 +152,24 @@ public:
     /// see `DiagnosticKind::UnorderedOverwrite`, which is a stated limit of resources that
     /// have no versions; derives execution order by topological sort; culls the passes nothing
     /// consumes;
-    /// computes each resource's lifetime over the passes that survived; and groups transients
-    /// whose lifetimes do not overlap and whose descriptions agree. Culling comes before
-    /// lifetimes so that a culled reader shortens a lifetime rather than extending it, and
-    /// ordering comes before both because a lifetime is a pair of execution positions.
-    ///
-    /// **It derives no barriers.** Task 3 of the phase plan is that, and until it lands
-    /// `GraphInspection::barriers` is empty -- so a green suite here is not evidence that any
-    /// barrier is derived.
+    /// computes each resource's lifetime over the passes that survived; groups transients
+    /// whose lifetimes do not overlap and whose descriptions agree; and derives the barriers the
+    /// declared accesses imply. Culling comes before lifetimes so that a culled reader shortens a
+    /// lifetime rather than extending it, and ordering comes before both because a lifetime is a
+    /// pair of execution positions. Derivation comes last because it walks the surviving passes
+    /// in execution order.
     ///
     /// Fails with `ErrorCode::InvalidArgument` if the graph is not accepting declarations, with
     /// the code of the first recorded diagnostic if any declaration was refused -- a graph with
     /// a rejected declaration does not compile, whether or not the caller checked the `Status`
-    /// that refusal returned -- and with `ErrorCode::InvalidArgument` for a cycle, an
-    /// unwritten transient or an unordered overwrite. Either way the phase becomes
-    /// `GraphPhase::CompileFailed`,
-    /// inspection stays readable, and no execution order, culling decision, lifetime or alias
-    /// group is reported, because none was settled.
+    /// that refusal returned -- with `ErrorCode::InvalidArgument` for a cycle, an unwritten
+    /// transient or an unordered overwrite, and with `ErrorCode::OutOfMemory` if the derivation
+    /// produced more barriers than the barrier pool holds. Either way the phase becomes
+    /// `GraphPhase::CompileFailed` and inspection stays readable. For the first four, no
+    /// execution order, culling decision, lifetime or alias group is reported, because none was
+    /// settled; the barrier-pool refusal is the one that happens *after* those were settled, and
+    /// it leaves them and a partial barrier list in the report -- see
+    /// `DiagnosticKind::BarrierPoolExhausted`.
     [[nodiscard]] Status Compile();
 
     /// Records the compiled frame into `commands`, creating and destroying the transient
@@ -347,6 +352,57 @@ private:
     /// allocation. The function's own comment says so where the decision is made.
     void GroupAliases();
 
+    /// One point in a resource's chain of states: the state it is in, and what put it there.
+    ///
+    /// **The chain is what a barrier is derived between**, and its ends are not pass accesses:
+    /// an imported resource's declared incoming and outgoing states, or a transient's creation
+    /// and nothing. Private/DeriveBarriers.cpp is where the chain and the emission rule are
+    /// argued.
+    struct ResourceStep {
+        TextureState     state = {};
+        BarrierCauseSide cause = {};
+
+        /// Whether a **pass** wrote the resource at this step.
+        ///
+        /// Read by `IsTransition` of the step *after* a gap: that is what makes a
+        /// write-after-write between two identical states a barrier, and what leaves an import's
+        /// already-satisfied outgoing state alone.
+        ///
+        /// **False at both ends of every chain, and that is a decision rather than an
+        /// omission** -- see Private/DeriveBarriers.cpp on why an import's declared states and a
+        /// created texture's initial one are facts about a resource rather than operations to be
+        /// ordered against. Stored rather than recovered from `cause.access`, which would make
+        /// the emission rule depend on which access the cause happens to blame.
+        bool passWrites = false;
+    };
+
+    /// Fills `m_barriers` with the transitions the declared accesses imply, in the order a
+    /// frame records them. In Private/DeriveBarriers.cpp, which argues the rule.
+    ///
+    /// Refuses with `ErrorCode::OutOfMemory` if the barrier pool fills, and only then; every
+    /// other way a build can be wrong was refused by an earlier stage or by the declaration.
+    [[nodiscard]] Status DeriveBarriers();
+
+    /// Whether moving a resource from `from` to `to` is a transition that has to be recorded.
+    ///
+    /// **The rule the derivation turns on, as one function with one expression**, so that a
+    /// mutation to it is a mutation to the rule rather than to one case of it.
+    /// Private/DeriveBarriers.cpp argues all three of the cases it decides.
+    [[nodiscard]] static bool IsTransition(const ResourceStep& from, const ResourceStep& to);
+
+    /// Writes `resource`'s first step -- an import's declared incoming state, or a transient's
+    /// creation -- into `m_resourceStep`.
+    void StartResourceStep(u32 resource);
+
+    /// Combines every access `pass` declares to `resource` into the one step that pass is.
+    /// Valid only after `BuildAccessBuckets` and `NumberSurvivingPasses`.
+    [[nodiscard]] ResourceStep CombinePassStep(u32 pass, u32 resource) const;
+
+    /// Emits the barrier from `resource`'s current step to `next`, unless that is not a
+    /// transition, and advances the current step. `declaringPass` is the declaration index of
+    /// the pass `next` belongs to, for the refusal to name, or `kNoPass`.
+    [[nodiscard]] Status StepResource(u32 resource, u32 declaringPass, const ResourceStep& next);
+
     // No allocator member. Every pool below holds its own reference (`Array` takes one at
     // construction), and this class allocates nowhere except in its constructor -- so a second
     // copy of the reference would be a field with no reader.
@@ -421,6 +477,14 @@ private:
     /// The first-fit bin `GroupAliases` put each resource in, before bins of one member are
     /// discarded and the rest become alias groups. `maxResources` entries.
     Array<u32> m_resourceBin;
+
+    /// The step each resource's chain has reached. `maxResources` entries.
+    ///
+    /// **A running step per resource rather than a chain rebuilt per gap**, which is what makes
+    /// the derivation one sweep of the access list rather than one sweep per execution position.
+    /// Written by `StartResourceStep` before the walk and advanced by `StepResource`; meaningful
+    /// only for a resource some surviving pass touches, and only during `DeriveBarriers`.
+    Array<ResourceStep> m_resourceStep;
 };
 
 }  // namespace Monarc::Render

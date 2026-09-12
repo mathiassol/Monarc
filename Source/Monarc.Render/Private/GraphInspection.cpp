@@ -44,9 +44,10 @@ const char* ToString(GraphQueue queue) {
 
 const char* ToString(BarrierCauseKind kind) {
     switch (kind) {
-        case BarrierCauseKind::ImportIncoming: return "ImportIncoming";
-        case BarrierCauseKind::PassAccess:     return "PassAccess";
-        case BarrierCauseKind::ImportOutgoing: return "ImportOutgoing";
+        case BarrierCauseKind::ImportIncoming:    return "ImportIncoming";
+        case BarrierCauseKind::TransientCreation: return "TransientCreation";
+        case BarrierCauseKind::PassAccess:        return "PassAccess";
+        case BarrierCauseKind::ImportOutgoing:    return "ImportOutgoing";
     }
     return "<invalid BarrierCauseKind>";
 }
@@ -61,6 +62,7 @@ const char* ToString(DiagnosticKind kind) {
         case DiagnosticKind::AccessDirectionMismatch: return "AccessDirectionMismatch";
         case DiagnosticKind::AccessNamesNoTexture:    return "AccessNamesNoTexture";
         case DiagnosticKind::DuplicateAccess:         return "DuplicateAccess";
+        case DiagnosticKind::AccessLayoutConflict:    return "AccessLayoutConflict";
         case DiagnosticKind::DuplicateImport:         return "DuplicateImport";
         case DiagnosticKind::InvalidImport:           return "InvalidImport";
         case DiagnosticKind::RecordAlreadySet:        return "RecordAlreadySet";
@@ -68,6 +70,7 @@ const char* ToString(DiagnosticKind kind) {
         case DiagnosticKind::DependencyCycle:         return "DependencyCycle";
         case DiagnosticKind::TransientNeverWritten:   return "TransientNeverWritten";
         case DiagnosticKind::UnorderedOverwrite:      return "UnorderedOverwrite";
+        case DiagnosticKind::BarrierPoolExhausted:    return "BarrierPoolExhausted";
     }
     return "<invalid DiagnosticKind>";
 }
@@ -96,8 +99,8 @@ namespace {
 // measured at 1 allocation under `/MDd` and `/MTd`, 0 under `/MD` and `/MT`, 0 under `/MDd`
 // with `_ITERATOR_DEBUG_LEVEL=0`, and back to 1 under `/MD` with `_ITERATOR_DEBUG_LEVEL=1`.
 // Of the six presets, the two that compile `-MDd` -- msvc-debug and clang-debug -- are the ones
-// where the `usage=0x{:x}` on a resource line, and the four `0x{:x}` fields a barrier line will
-// have once Task 3 lands, cost one transient proxy each. msvc-release, clang-release and
+// where the `usage=0x{:x}` on a resource line, and the four `0x{:x}` fields on a barrier line,
+// cost one transient proxy each. msvc-release, clang-release and
 // clang-asan are `-MD` and clang-ubsan is `-MT`, so on those four the report allocates nothing
 // at all.
 //
@@ -108,8 +111,7 @@ namespace {
 ///
 /// The count continues past the end of the buffer, which is the whole point: a caller can pass
 /// a zero-length span to ask how much room the report needs, and a caller whose buffer was too
-/// small is told rather than left with a report clipped at the end -- where, once Task 3 lands,
-/// the barriers are.
+/// small is told rather than left with a report clipped at the end -- where the barriers are.
 class TextWriter {
 public:
     explicit TextWriter(std::span<char> out) : m_out(out) {}
@@ -302,6 +304,20 @@ void WriteResourceLines(TextWriter& writer, usize index, const ResourceInspectio
                 static_cast<u32>(resource.outgoing.access));
 }
 
+/// One cause side, as `kind:order:access`.
+///
+/// **`access` renders as `none` for a side that is not a `PassAccess`, and that is the whole
+/// reason this is a function rather than three arguments inline.** `ResourceAccess` has no
+/// not-an-access value, so `BarrierCauseSide::access` is filler on the other three kinds -- and a
+/// line that printed the filler would say `ImportIncoming:order=none:ColorAttachmentRead`, which
+/// reads as an import whose incoming state was a colour attachment read. `order=none` beside it
+/// is not enough of a signal: a reader has to know that the two fields go silent together.
+/// A `const char*` rather than a `FieldText`, because both halves already are one and
+/// `FieldText`'s 24-byte buffer would silently clip `DepthStencilAttachmentWrite`.
+[[nodiscard]] const char* DescribeCauseAccess(const BarrierCauseSide& side) {
+    return side.kind == BarrierCauseKind::PassAccess ? ToString(side.access) : "none";
+}
+
 void WriteBarrierLine(TextWriter& writer, usize index, const DerivedBarrier& barrier) {
     // `before-order=` and the `order=` inside each cause are execution positions, where the
     // `decl-pass=` on an access or diagnostic line is a declaration index. Every pass number
@@ -321,9 +337,10 @@ void WriteBarrierLine(TextWriter& writer, usize index, const DerivedBarrier& bar
                 RHI::ToString(barrier.accessAfter), static_cast<u32>(barrier.accessAfter),
                 ToString(barrier.cause.before.kind),
                 DescribeOptional(barrier.cause.before.pass, kNoPass).Get(),
-                ToString(barrier.cause.before.access), ToString(barrier.cause.after.kind),
+                DescribeCauseAccess(barrier.cause.before),
+                ToString(barrier.cause.after.kind),
                 DescribeOptional(barrier.cause.after.pass, kNoPass).Get(),
-                ToString(barrier.cause.after.access));
+                DescribeCauseAccess(barrier.cause.after));
 }
 
 }  // namespace

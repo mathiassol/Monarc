@@ -60,17 +60,20 @@ enum class ResourceAccess : u32 {
     /// Depth or stencil the pass writes.
     ///
     /// **This is one access and a pass that both tests and writes depth declares two, whose
-    /// layouts disagree -- and that is a stated gap rather than a resolved question.** A
-    /// depth attachment being written is in `DepthStencilAttachment`; one only being tested
-    /// is in `DepthStencilReadOnly`, which is what makes it simultaneously sampleable. A
-    /// single pass declaring both accesses on one resource therefore asks for two layouts at
-    /// once, which is not representable -- barriers are not permitted inside a rendering
-    /// instance at all (see `ICommandList::Barrier`). Nothing in Phase A4 has a depth pass,
-    /// because a depth pass needs a shader, so how the two combine is deliberately not
-    /// guessed at here: the first depth pass is what decides it. **The phase plan does not
-    /// raise this among its open questions, and it should**, which is why it is written down
-    /// at the enumerator rather than left to be rediscovered -- a declaration that asks for
-    /// two layouts at once is representable today and refused by nothing.
+    /// layouts disagree -- and that declaration is now refused.** A depth attachment being
+    /// written is in `DepthStencilAttachment`; one only being tested is in
+    /// `DepthStencilReadOnly`, which is what makes it simultaneously sampleable. A single pass
+    /// declaring both accesses on one resource therefore asks for two layouts at once, which is
+    /// not representable -- barriers are not permitted inside a rendering instance at all (see
+    /// `ICommandList::Barrier`).
+    ///
+    /// **Task 3's derivation is what decided it, because it is the code with an opinion about
+    /// what layout a resource is in**: it combines a pass's accesses to one resource into one
+    /// required state, and two layouts have no combination. So `PassBuilder::Read`/`Write`
+    /// refuse the pair with `DiagnosticKind::AccessLayoutConflict`, whose own comment carries
+    /// the argument. Phase A4 still has no depth pass -- one needs a shader -- and the refusal
+    /// forecloses nothing: a combined read-and-write depth access is one more enumerator here
+    /// with one layout, and it stops being a conflicting pair on the day it arrives.
     DepthStencilAttachmentWrite,
 
     /// Sampled in a shader.
