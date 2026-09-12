@@ -364,9 +364,12 @@ private:
 
         /// Whether a **pass** wrote the resource at this step.
         ///
-        /// Read by `IsTransition` of the step *after* a gap: that is what makes a
-        /// write-after-write between two identical states a barrier, and what leaves an import's
-        /// already-satisfied outgoing state alone.
+        /// Read by `IsTransition` on **both** sides of a gap: that is what makes a
+        /// write-after-write between two identical states a barrier, whether the second write is
+        /// another pass or the external work an import's outgoing state declares. Between two
+        /// passes and at a chain's incoming end the two sides cannot disagree, so the `to` side
+        /// alone would answer; at the outgoing end it would not, and the difference there is a
+        /// dropped write-after-write across the graph boundary.
         ///
         /// **False at both ends of every chain, and that is a decision rather than an
         /// omission** -- see Private/DeriveBarriers.cpp on why an import's declared states and a

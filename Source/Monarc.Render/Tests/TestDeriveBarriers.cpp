@@ -1031,17 +1031,29 @@ TEST_CASE("a pass writing into the state its import declared still gets its barr
                                                ByPass(0, ResourceAccess::StorageWrite)});
 }
 
-TEST_CASE("an outgoing state the last pass already satisfies is not a transition") {
-    // **The third position the rule decides, and the one that would be an unnecessary barrier if
-    // it read the side before the gap as well.** The import below declares an outgoing state
-    // identical to what its one writing pass leaves it in, so there is nothing for the graph to
-    // do at the end of the frame: an outgoing state is a *requirement*, and this one is already
-    // met.
+TEST_CASE("an outgoing state a writing pass already matches is still a write-after-write") {
+    // **The gap at the far end of the chain, and the one a rule that read only the side after it
+    // dropped in silence.** Each import below declares an outgoing state byte-identical to what
+    // its one *writing* pass leaves it in -- same layout, same stage, same access -- and the gap
+    // is a transition anyway, because the emission rule's write term reads both sides of it.
     //
-    // The opening transition is still emitted -- `Undefined` is not `ColorAttachment` -- so the
-    // count is one rather than zero, and a derivation that dropped everything fails here too.
+    // **What makes it a hazard is that an outgoing state is a dst scope and not a layout wish.**
+    // `StepResource` puts `outgoing.stage` and `outgoing.access` into `syncAfter` and
+    // `accessAfter` -- the half of a barrier that names the work it is made visible *to* -- and
+    // `SwapchainImport` above reads them the same way, giving `None` because "there is no
+    // *command* after the transition". So an outgoing state naming a **write** access is a
+    // statement that external commands will write this image, and this frame wrote it too.
+    // Nothing else orders the two: two submissions are not ordered by being submitted in order,
+    // and with no layout change there is nothing for a validation layer to object to either.
+    // Dropping this barrier is silent corruption, so every field of it is asserted rather than
+    // counted.
     //
-    // Two of them, with two different already-satisfied states.
+    // The opening transition is emitted as well -- `Undefined` is not `ColorAttachment` -- so
+    // the count is two, and the closing one is identified by its cause rather than by position.
+    //
+    // Two of them, on two different already-matched states, so neither answer is one resource's
+    // accident. The storage pair is the shape a compute frame produces: a graph that storage-
+    // writes an image the importer goes on to storage-write itself.
     SystemAllocator allocator;
     RenderGraph     graph(allocator, RenderGraph::Config{});
 
@@ -1070,17 +1082,101 @@ TEST_CASE("an outgoing state the last pass already satisfies is not a transition
     REQUIRE(graph.Compile());
 
     const GraphInspection inspection = graph.Inspect();
-    REQUIRE(CountFor(inspection, *attachment) == 1u);
-    REQUIRE(CountFor(inspection, *storage) == 1u);
-    // The one that is there is the opening transition, so nothing was emitted after the pass.
+    REQUIRE(CountFor(inspection, *attachment) == 2u);
+    REQUIRE(CountFor(inspection, *storage) == 2u);
+
+    // The opening one is still the opening one.
     CHECK(BarrierFor(inspection, *attachment, 0).emittedBeforePass == 0u);
     CHECK(BarrierFor(inspection, *attachment, 0).cause ==
           BarrierCause{ByEnd(BarrierCauseKind::ImportIncoming),
                        ByPass(0, ResourceAccess::ColorAttachmentWrite)});
+
+    // And the closing one is the write-after-write: identical on both sides, which is what makes
+    // it invisible to any rule written on equality alone, and recorded after every pass.
+    const DerivedBarrier& closing = BarrierFor(inspection, *attachment, 1);
+    CHECK(closing.layoutBefore == closing.layoutAfter);
+    CHECK(closing.syncBefore == closing.syncAfter);
+    CHECK(closing.accessBefore == closing.accessAfter);
+    CHECK(closing.layoutBefore == TextureLayout::ColorAttachment);
+    CHECK(closing.syncBefore == PipelineStage::ColorAttachmentOutput);
+    CHECK(closing.accessBefore == Access::ColorAttachmentWrite);
+    CHECK(closing.emittedBeforePass == kNoPass);
+    CHECK(closing.cause == BarrierCause{ByPass(0, ResourceAccess::ColorAttachmentWrite),
+                                        ByEnd(BarrierCauseKind::ImportOutgoing)});
+
     CHECK(BarrierFor(inspection, *storage, 0).emittedBeforePass == 0u);
     CHECK(BarrierFor(inspection, *storage, 0).cause ==
           BarrierCause{ByEnd(BarrierCauseKind::ImportIncoming),
                        ByPass(0, ResourceAccess::StorageWrite)});
+
+    const DerivedBarrier& storageClosing = BarrierFor(inspection, *storage, 1);
+    CHECK(storageClosing.layoutBefore == TextureLayout::General);
+    CHECK(storageClosing.layoutAfter == TextureLayout::General);
+    CHECK(storageClosing.syncBefore == kShaderStages);
+    CHECK(storageClosing.syncAfter == kShaderStages);
+    CHECK(storageClosing.accessBefore == Access::ShaderStorageWrite);
+    CHECK(storageClosing.accessAfter == Access::ShaderStorageWrite);
+    CHECK(storageClosing.emittedBeforePass == kNoPass);
+    CHECK(storageClosing.cause == BarrierCause{ByPass(0, ResourceAccess::StorageWrite),
+                                               ByEnd(BarrierCauseKind::ImportOutgoing)});
+}
+
+TEST_CASE("an outgoing state a reading pass already matches is not a transition") {
+    // **The half of the same gap that stays suppressed, and the pair is what pins the rule
+    // rather than one of its outcomes.** The case above and this one declare the same shape --
+    // an outgoing state byte-identical to what the last pass left the resource in -- and differ
+    // in one thing: whether that pass wrote. It did there and it does not here, so there is
+    // nothing to order and nothing is emitted.
+    //
+    // **This is the reading an outgoing state still has where it is a requirement already met.**
+    // Equal states with no write on either side mean the importer asked for the scope the
+    // resource is already visible in: read-after-read across the graph boundary, which is not a
+    // hazard in Vulkan or anywhere else. A rule that emitted here would put a barrier in every
+    // frame that hands a sampled texture back unchanged.
+    //
+    // The opening transition is still emitted -- the declared incoming state differs -- so the
+    // count is one rather than zero, and a derivation that dropped everything fails here too.
+    //
+    // Two of them, on two different already-matched read states.
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    PassBuilder             pass    = AnchoredPass(graph, "Pass", 10);
+    const Result<TextureId> sampled = pass.ImportTexture(
+        "Sampled",
+        TextureImport(TextureHandle::ForTesting(1, 1), kSwapchainDescription,
+                      TextureState{TextureLayout::TransferSource, PipelineStage::Copy,
+                                   Access::TransferRead},
+                      TextureState{TextureLayout::ShaderReadOnly, kShaderStages,
+                                   Access::ShaderSampledRead}));
+    REQUIRE(sampled.has_value());
+    const Result<TextureId> storage = pass.ImportTexture(
+        "Storage",
+        TextureImport(TextureHandle::ForTesting(2, 1), kSwapchainDescription,
+                      TextureState{TextureLayout::TransferSource, PipelineStage::Copy,
+                                   Access::TransferRead},
+                      TextureState{TextureLayout::General, kShaderStages,
+                                   Access::ShaderStorageRead}));
+    REQUIRE(storage.has_value());
+    REQUIRE(pass.Read(*sampled, ResourceAccess::SampledRead));
+    REQUIRE(pass.Read(*storage, ResourceAccess::StorageRead));
+
+    REQUIRE(graph.Compile());
+
+    const GraphInspection inspection = graph.Inspect();
+    REQUIRE(CountFor(inspection, *sampled) == 1u);
+    REQUIRE(CountFor(inspection, *storage) == 1u);
+    // The one that is there is the opening transition, so nothing was emitted after the pass.
+    CHECK(BarrierFor(inspection, *sampled, 0).emittedBeforePass == 0u);
+    CHECK(BarrierFor(inspection, *sampled, 0).cause ==
+          BarrierCause{ByEnd(BarrierCauseKind::ImportIncoming),
+                       ByPass(0, ResourceAccess::SampledRead)});
+    CHECK(BarrierFor(inspection, *sampled, 0).layoutAfter == TextureLayout::ShaderReadOnly);
+    CHECK(BarrierFor(inspection, *storage, 0).emittedBeforePass == 0u);
+    CHECK(BarrierFor(inspection, *storage, 0).cause ==
+          BarrierCause{ByEnd(BarrierCauseKind::ImportIncoming),
+                       ByPass(0, ResourceAccess::StorageRead)});
+    CHECK(BarrierFor(inspection, *storage, 0).layoutAfter == TextureLayout::General);
 }
 
 TEST_CASE("culled passes contribute no barriers") {

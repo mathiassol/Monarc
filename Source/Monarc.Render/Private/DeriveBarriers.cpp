@@ -58,15 +58,15 @@
 // ---------------------------------------------------------------------------------------
 // When a gap is a transition, which is the rule the whole file turns on.
 //
-//     A gap emits a barrier unless the two states are identical **and** the state after it is
-//     not one a pass wrote.
+//     A gap emits a barrier unless the two states are identical **and** neither side of it is
+//     a state a pass wrote.
 //
 // Three cases, and each of them is a checkbox:
 //
 // - **The states differ.** A layout change, a different stage to synchronise, or a different
 //   access to make available or visible: all of them need the barrier. Read-after-write and
 //   write-after-read are here, and so is every transition an import's two ends produce.
-// - **The states are identical and the pass after the gap writes.** Write-after-write: two
+// - **The states are identical and a pass wrote one of the two sides.** Write-after-write: two
 //   passes writing a colour attachment with the same access need the same layout and the same
 //   scopes, so their states are equal -- and the second write still has to be ordered after the
 //   first and see its result. **This is the one place where "same stage, same access, same
@@ -74,26 +74,53 @@
 //   between two writes with identical scopes is not a no-op, it is exactly what a
 //   write-after-write hazard needs. A rule written on equality alone would drop it and would
 //   still pass every read-after-read case there is.
-// - **The states are identical and no pass wrote the state after the gap.** Read-after-read, and
-//   the "transition that is not a transition" the plan requires be representable and not
-//   emitted. Two passes sampling one texture at the same stages have no hazard between them and
-//   no layout to change; a barrier here would be a performance bug.
+// - **The states are identical and no pass wrote either side.** Read-after-read, and the
+//   "transition that is not a transition" the plan requires be representable and not emitted.
+//   Two passes sampling one texture at the same stages have no hazard between them and no
+//   layout to change; a barrier here would be a performance bug.
 //
-// **Why the rule reads only the side after the gap, and why that is not an asymmetry that loses
-// anything.** Between two *passes* the two sides cannot disagree about writing while their states
-// are equal: a pass step's access mask is the union of `RequirementOf`'s access bits, the write
-// bits come only from accesses that write, so two pass steps with equal masks either both wrote
-// or neither did. What the one-sided rule therefore decides is only what happens at the two ends
-// of a chain, where it decides both correctly:
+// **Why the write term reads both sides, and what a rule that read only the side after the gap
+// got wrong.** Between two *passes* the two sides cannot disagree about writing while their
+// states are equal: a pass step's access mask is the union of `RequirementOf`'s access bits, the
+// write bits come only from accesses that write, so two pass steps with equal masks either both
+// wrote or neither did. Tests/TestDeriveBarriers.cpp pins that premise with a `static_assert`
+// over every `ResourceAccess`. At a chain's *incoming* end the two forms agree as well, because
+// the step before the gap is an import's declared state or a creation and `passWrites` is false
+// there by construction. So the `from` term changes the answer in exactly one place -- the gap
+// between the last pass and an import's declared **outgoing** state -- and that is the place a
+// one-sided rule got wrong:
 //
-// - **An import's outgoing state is a requirement, not an operation.** If the last pass left the
-//   resource in exactly the state the importer asked for, there is nothing to do, and a barrier
-//   would be an unnecessary one. The gap is suppressed, because the side after it is not a pass.
+// - **An import's outgoing state is a dst scope, not a layout wish.** `StepResource` puts
+//   `outgoing.stage` and `outgoing.access` into `syncAfter` and `accessAfter` -- the half of a
+//   barrier that names the work it is made visible *to* -- and `TextureImport`'s own
+//   documentation reads them the same way: a swapchain's `outgoing.stage` is `None` because
+//   there is no *command* after the transition. So an outgoing state that names a **write**
+//   access is a statement that external commands will write the resource, and if the last pass
+//   wrote it too, that gap is a write-after-write across the graph boundary. Nothing else in
+//   the frame orders it -- two submissions are not ordered by being submitted in order -- and
+//   with no layout change there is nothing for a validation layer to object to either, so
+//   dropping it is silent corruption rather than a reported error. The graph owes the barrier.
+// - **What stays suppressed at that end is a requirement a *read* already met.** If the last
+//   pass only read, `passWrites` is false on both sides, and equal states then say the importer
+//   asked for the scope the resource is already visible in: read-after-read across the
+//   boundary, with nothing to order and nothing to make available.
 // - **An import's incoming state is a fact about work the graph cannot see**, so a pass writing
 //   into a state identical to it *does* get its barrier -- the side after the gap is a writing
 //   pass. That is the conservative answer and the right one: the only way for the two to be
 //   identical is for the importer to have declared a write of its own, and the graph has no way
 //   to order against work it was only told about.
+//
+// **The two ends read alike now, and the reason the one-sided rule looked right is worth
+// keeping.** Its argument was that an outgoing state is "a requirement already met" -- which
+// conflates *"is in layout L"* with *"is available and visible to scope S"*. Those are different
+// claims, and the incoming end above refuses to conflate them four lines up. The rule used to
+// make that conflation at one end while refusing it at the other.
+//
+// **The phase plan's own two lines conflict here, and this is where the file deviates from one
+// of them twice.** "same stage, same access, same layout must not be emitted" and
+// "write-after-write yields one barrier" cannot both hold for a gap between two equal states
+// that a pass wrote. The second wins: once between two passes, which the plan expected, and
+// once at an import's outgoing end, which it did not.
 //
 // ---------------------------------------------------------------------------------------
 // What a graph with a richer access set would do here and this one does not: merge a run of
@@ -129,7 +156,7 @@
 namespace Monarc::Render {
 
 bool RenderGraph::IsTransition(const ResourceStep& from, const ResourceStep& to) {
-    return !(from.state == to.state) || to.passWrites;
+    return !(from.state == to.state) || from.passWrites || to.passWrites;
 }
 
 void RenderGraph::StartResourceStep(u32 resource) {
