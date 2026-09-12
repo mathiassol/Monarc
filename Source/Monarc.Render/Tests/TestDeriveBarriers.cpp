@@ -583,6 +583,209 @@ TEST_CASE("a gap that changes only the synchronisation scope is still a transiti
     CHECK(BarrierFor(inspection, *stored, 1).syncAfter == PipelineStage::ComputeShader);
 }
 
+TEST_CASE("a gap that changes only the access is still a transition") {
+    // **The access half of the transition test, which nothing else reaches.** `TextureState` has
+    // three halves and every case in this file that turns on one of them moves the layout too:
+    // both read-after-write cases below change `ShaderReadOnly` or `General` for
+    // `ColorAttachment`, so the layout term alone carries their assertions and a rule that
+    // compared layouts and stages and **ignored the access** passes every one of them.
+    //
+    // The gaps below move the access and nothing else. Each import declares an incoming state
+    // whose layout and stage are exactly what its one reading pass requires, and whose access is
+    // the *write* the external work performed: a colour attachment the importer rendered into
+    // and the graph reads back, and a storage image the importer's compute wrote and the graph
+    // reads. Both are read-after-write across the graph boundary, and both need the write made
+    // available and made visible to the read -- with no layout to change and no stage to widen.
+    //
+    // **Neither side of the gap is a writing pass**, which is what makes this the access half
+    // rather than the write term over again: `from` is an import's declared state, where
+    // `passWrites` is false by construction, and `to` is a pass that only reads. So the only
+    // thing that can emit these is the access comparison.
+    //
+    // Two of them, on two different layouts, so the answer is not one layout's accident.
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    PassBuilder             pass       = AnchoredPass(graph, "Pass", 10);
+    const Result<TextureId> attachment = pass.ImportTexture(
+        "Attachment",
+        TextureImport(TextureHandle::ForTesting(1, 1), kSwapchainDescription,
+                      TextureState{TextureLayout::ColorAttachment,
+                                   PipelineStage::ColorAttachmentOutput,
+                                   Access::ColorAttachmentWrite},
+                      TextureState{TextureLayout::PresentSource, PipelineStage::None,
+                                   Access::None}));
+    REQUIRE(attachment.has_value());
+    const Result<TextureId> storage = pass.ImportTexture(
+        "Storage",
+        TextureImport(TextureHandle::ForTesting(2, 1), kSwapchainDescription,
+                      TextureState{TextureLayout::General, kShaderStages,
+                                   Access::ShaderStorageWrite},
+                      TextureState{TextureLayout::PresentSource, PipelineStage::None,
+                                   Access::None}));
+    REQUIRE(storage.has_value());
+    REQUIRE(pass.Read(*attachment, ResourceAccess::ColorAttachmentRead));
+    REQUIRE(pass.Read(*storage, ResourceAccess::StorageRead));
+
+    REQUIRE(graph.Compile());
+
+    const GraphInspection inspection = graph.Inspect();
+    // Two each: the access-only opening gap, and the outgoing transition.
+    REQUIRE(CountFor(inspection, *attachment) == 2u);
+    REQUIRE(CountFor(inspection, *storage) == 2u);
+
+    const DerivedBarrier& attachmentGap = BarrierFor(inspection, *attachment, 0);
+    CHECK(attachmentGap.layoutBefore == attachmentGap.layoutAfter);
+    CHECK(attachmentGap.layoutBefore == TextureLayout::ColorAttachment);
+    CHECK(attachmentGap.syncBefore == attachmentGap.syncAfter);
+    CHECK(attachmentGap.syncBefore == PipelineStage::ColorAttachmentOutput);
+    // The one thing that moves.
+    CHECK(attachmentGap.accessBefore == Access::ColorAttachmentWrite);
+    CHECK(attachmentGap.accessAfter == Access::ColorAttachmentRead);
+    CHECK(attachmentGap.emittedBeforePass == 0u);
+    CHECK(attachmentGap.cause == BarrierCause{ByEnd(BarrierCauseKind::ImportIncoming),
+                                              ByPass(0, ResourceAccess::ColorAttachmentRead)});
+
+    const DerivedBarrier& storageGap = BarrierFor(inspection, *storage, 0);
+    CHECK(storageGap.layoutBefore == storageGap.layoutAfter);
+    CHECK(storageGap.layoutBefore == TextureLayout::General);
+    CHECK(storageGap.syncBefore == storageGap.syncAfter);
+    CHECK(storageGap.syncBefore == kShaderStages);
+    CHECK(storageGap.accessBefore == Access::ShaderStorageWrite);
+    CHECK(storageGap.accessAfter == Access::ShaderStorageRead);
+    CHECK(storageGap.emittedBeforePass == 0u);
+    CHECK(storageGap.cause == BarrierCause{ByEnd(BarrierCauseKind::ImportIncoming),
+                                           ByPass(0, ResourceAccess::StorageRead)});
+}
+
+TEST_CASE("a gap that changes only the layout is still a transition") {
+    // **The layout half, for the mirror reason: no pass-to-pass gap can reach it.** A pass step's
+    // layout comes from `RequirementOf`, so two pass steps with the same access mask have the
+    // same layout -- a gap that moves the layout and nothing else is constructible only through
+    // an import's declared states, and nothing in this file declared one. A rule that compared
+    // stages and accesses and **ignored the layout** therefore passes every other case here.
+    //
+    // Both gaps below are read-only on both sides, so the write term cannot emit them either.
+    // `TextureLayout::General` is what makes the declarations honest rather than contrived: it
+    // permits sampled reads, so an importer really can hand over an image it sampled in
+    // `General`, and really can ask for one back in it.
+    //
+    // Two of them, one at each end of the chain, so neither position's answer stands alone.
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    PassBuilder             pass     = AnchoredPass(graph, "Pass", 10);
+    const Result<TextureId> arriving = pass.ImportTexture(
+        "Arriving",
+        TextureImport(TextureHandle::ForTesting(1, 1), kSwapchainDescription,
+                      TextureState{TextureLayout::General, kShaderStages,
+                                   Access::ShaderSampledRead},
+                      TextureState{TextureLayout::PresentSource, PipelineStage::None,
+                                   Access::None}));
+    REQUIRE(arriving.has_value());
+    const Result<TextureId> departing = pass.ImportTexture(
+        "Departing",
+        TextureImport(TextureHandle::ForTesting(2, 1), kSwapchainDescription,
+                      TextureState{TextureLayout::TransferSource, PipelineStage::Copy,
+                                   Access::TransferRead},
+                      TextureState{TextureLayout::General, kShaderStages,
+                                   Access::ShaderSampledRead}));
+    REQUIRE(departing.has_value());
+    REQUIRE(pass.Read(*arriving, ResourceAccess::SampledRead));
+    REQUIRE(pass.Read(*departing, ResourceAccess::SampledRead));
+
+    REQUIRE(graph.Compile());
+
+    const GraphInspection inspection = graph.Inspect();
+    REQUIRE(CountFor(inspection, *arriving) == 2u);
+    REQUIRE(CountFor(inspection, *departing) == 2u);
+
+    // The opening gap of the first: `General` to `ShaderReadOnly`, with the stage and the access
+    // the same on both sides.
+    const DerivedBarrier& arrivingGap = BarrierFor(inspection, *arriving, 0);
+    CHECK(arrivingGap.layoutBefore == TextureLayout::General);
+    CHECK(arrivingGap.layoutAfter == TextureLayout::ShaderReadOnly);
+    CHECK(arrivingGap.syncBefore == arrivingGap.syncAfter);
+    CHECK(arrivingGap.syncBefore == kShaderStages);
+    CHECK(arrivingGap.accessBefore == arrivingGap.accessAfter);
+    CHECK(arrivingGap.accessBefore == Access::ShaderSampledRead);
+    CHECK(arrivingGap.emittedBeforePass == 0u);
+    CHECK(arrivingGap.cause == BarrierCause{ByEnd(BarrierCauseKind::ImportIncoming),
+                                            ByPass(0, ResourceAccess::SampledRead)});
+
+    // And the closing gap of the second, which is the same move in the other direction and at
+    // the other end of the chain.
+    const DerivedBarrier& departingGap = BarrierFor(inspection, *departing, 1);
+    CHECK(departingGap.layoutBefore == TextureLayout::ShaderReadOnly);
+    CHECK(departingGap.layoutAfter == TextureLayout::General);
+    CHECK(departingGap.syncBefore == departingGap.syncAfter);
+    CHECK(departingGap.syncBefore == kShaderStages);
+    CHECK(departingGap.accessBefore == departingGap.accessAfter);
+    CHECK(departingGap.accessBefore == Access::ShaderSampledRead);
+    CHECK(departingGap.emittedBeforePass == kNoPass);
+    CHECK(departingGap.cause == BarrierCause{ByPass(0, ResourceAccess::SampledRead),
+                                             ByEnd(BarrierCauseKind::ImportOutgoing)});
+}
+
+TEST_CASE("a same-layout read-after-write between two passes yields one barrier") {
+    // **The most ordinary frame shape the two read-after-write cases below do not cover**: a
+    // compute pass writes a storage image and the next pass reads it. Both sides want `General`
+    // at the same three shader stages, so the only thing that moves is the access -- unlike
+    // every other inter-pass read-after-write here, which changes the layout as well.
+    //
+    // **What emits it is the write term rather than the access comparison**, and that is worth
+    // recording rather than leaving for a reader to work out: the pass before the gap wrote, so
+    // `IsTransition` says yes at its second term without ever reaching the third. *"a gap that
+    // changes only the access is still a transition"* above is the case that isolates the
+    // comparison, by putting the writer outside the graph where `passWrites` is false. Two
+    // different mechanisms, one shape, and this is the half a frame actually runs.
+    //
+    // Two of them, on the two layouts a read and a write can share.
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    PassBuilder             producer = AnchoredPass(graph, "Producer", 10);
+    const Result<TextureId> stored   = producer.CreateTexture("Stored", kSwapchainDescription);
+    REQUIRE(stored.has_value());
+    const Result<TextureId> drawn = producer.CreateTexture("Drawn", kSwapchainDescription);
+    REQUIRE(drawn.has_value());
+    REQUIRE(producer.Write(*stored, ResourceAccess::StorageWrite));
+    REQUIRE(producer.Write(*drawn, ResourceAccess::ColorAttachmentWrite));
+
+    PassBuilder consumer = AnchoredPass(graph, "Consumer", 11);
+    REQUIRE(consumer.Read(*stored, ResourceAccess::StorageRead));
+    REQUIRE(consumer.Read(*drawn, ResourceAccess::ColorAttachmentRead));
+
+    REQUIRE(graph.Compile());
+
+    const GraphInspection inspection = graph.Inspect();
+    // Two each: the transient's creation transition, then the same-layout read-after-write.
+    REQUIRE(CountFor(inspection, *stored) == 2u);
+    REQUIRE(CountFor(inspection, *drawn) == 2u);
+
+    const DerivedBarrier& storedRaw = BarrierFor(inspection, *stored, 1);
+    CHECK(storedRaw.layoutBefore == TextureLayout::General);
+    CHECK(storedRaw.layoutAfter == TextureLayout::General);
+    CHECK(storedRaw.syncBefore == kShaderStages);
+    CHECK(storedRaw.syncAfter == kShaderStages);
+    CHECK(storedRaw.accessBefore == Access::ShaderStorageWrite);
+    CHECK(storedRaw.accessAfter == Access::ShaderStorageRead);
+    CHECK(storedRaw.emittedBeforePass == 1u);
+    CHECK(storedRaw.cause == BarrierCause{ByPass(0, ResourceAccess::StorageWrite),
+                                          ByPass(1, ResourceAccess::StorageRead)});
+
+    const DerivedBarrier& drawnRaw = BarrierFor(inspection, *drawn, 1);
+    CHECK(drawnRaw.layoutBefore == TextureLayout::ColorAttachment);
+    CHECK(drawnRaw.layoutAfter == TextureLayout::ColorAttachment);
+    CHECK(drawnRaw.syncBefore == PipelineStage::ColorAttachmentOutput);
+    CHECK(drawnRaw.syncAfter == PipelineStage::ColorAttachmentOutput);
+    CHECK(drawnRaw.accessBefore == Access::ColorAttachmentWrite);
+    CHECK(drawnRaw.accessAfter == Access::ColorAttachmentRead);
+    CHECK(drawnRaw.emittedBeforePass == 1u);
+    CHECK(drawnRaw.cause == BarrierCause{ByPass(0, ResourceAccess::ColorAttachmentWrite),
+                                         ByPass(1, ResourceAccess::ColorAttachmentRead)});
+}
+
 TEST_CASE("read-after-write yields one barrier in the write-then-read direction") {
     // **Direction is the whole assertion**, because a derivation that swapped the two sides
     // would emit the same number of barriers with the same six values in the wrong places, and a

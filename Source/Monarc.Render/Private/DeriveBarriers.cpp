@@ -151,6 +151,19 @@
 // *"a gap that changes only the synchronisation scope is still a transition"* in
 // Tests/TestDeriveBarriers.cpp is what pins it -- a rule that compared layouts instead of states
 // would drop it, which is how the case came to be written.
+//
+// **`TextureState` has three halves and each of them now has a case that moves it alone**, which
+// the paragraph above found the first of and stopped at. A gap that moves only the **access** is
+// a read-after-write in one layout -- a storage image written and then read -- and one that
+// moves only the **layout** is an image handed over in `General` for one a pass wants in
+// `ShaderReadOnly`. Both are reachable only across an import's declared state, for the same
+// reason the scope gap is: a pass step's three halves all come from `RequirementOf`, whose
+// access bits are one per row, so two pass steps with equal access masks have equal layouts and
+// equal stages -- no gap inside the graph moves the layout alone or the stage alone. Two of them
+// *can* move the access alone, at the two layouts a read and a write share (`General` and
+// `ColorAttachment`), and in every such pair at least one side writes -- so the write term emits
+// that gap before the comparison decides anything. Each half has its own case, because a rule
+// that dropped any one of the three passed every case in the file that did not.
 // ---------------------------------------------------------------------------------------
 
 namespace Monarc::Render {
