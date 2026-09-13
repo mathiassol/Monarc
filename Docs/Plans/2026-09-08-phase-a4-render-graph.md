@@ -295,12 +295,12 @@ transition no merge removes). It becomes a real question when two reads share a 
 
 ## Task 4: Execute, and light the window through the graph
 
-- [ ] `Execute.cpp` records the compiled graph into an `ICommandList` through `Monarc.RHI` —
+- [x] `Execute.cpp` records the compiled graph into an `ICommandList` through `Monarc.RHI` —
       the only file in the module that touches one. Barriers come from the derivation; passes
       contribute only their callbacks.
-- [ ] Transient resources are created and destroyed around the frame, each with its own
+- [x] Transient resources are created and destroyed around the frame, each with its own
       allocation, with the aliasing gap stated where the allocation happens.
-- [ ] **Re-run `PassCommandList`'s member enumeration, because this task is the edit that
+- [x] **Re-run `PassCommandList`'s member enumeration, because this task is the edit that
       invalidates it.** The `static_assert`s in Tests/TestPassDeclaration.cpp that keep
       ADR-0006's central promise are *name-based*: `kCanGetCommandList` and
       `kCanReachCommandListPointer` detect `Commands()` and `m_commands` being re-exposed, and
@@ -309,11 +309,11 @@ transition no merge removes). It becomes a real question when two reads share a 
       first constructs one of these and first has a reason to forward a recording call through
       it, so adding a forwarding method is the moment to enumerate the class again rather than
       to read a green suite as coverage. Add a guard per new member that can yield a list.
-- [ ] `Monarc.FirstLight` **stops writing barriers and stops calling `BeginRendering`
+- [x] `Monarc.FirstLight` **stops writing barriers and stops calling `BeginRendering`
       directly.** It declares a pass that writes the imported swapchain image with a clear
       load-op, and the graph does the rest. Deleting that hand-written code is the point of the
       phase; leaving it beside the graph as a fallback would defeat it.
-- [ ] **Build the device-free stub `ICommandList`, which Task 3 decided and deferred to here.**
+- [x] **Build the device-free stub `ICommandList`, which Task 3 decided and deferred to here.**
       The decision is yes: it closes five uncalled things at once — `Execute`'s body,
       `PassCommandList`'s private constructor and `Commands()`, and both `Invoke` bodies — and
       turns *"the graph emitted exactly these barriers, in this order, around this rendering
@@ -330,7 +330,7 @@ transition no merge removes). It becomes a real question when two reads share a 
       derived barriers reach the list *at all*, and that each lands on the side of
       `BeginRendering` its `emittedBeforePass` says it does.
 
-- [ ] **The declaration `Monarc.FirstLight` makes is Task 3's to hand over, and it is this**, with
+- [x] **The declaration `Monarc.FirstLight` makes is Task 3's to hand over, and it is this**, with
       the reasoning at `SwapchainImport` in Tests/TestDeriveBarriers.cpp: incoming
       `{Undefined, ColorAttachmentOutput, None}`, outgoing `{PresentSource, None, None}`. Five of
       those six values are forced by the swapchain contract; the sixth, `incoming.stage`, is
@@ -341,12 +341,12 @@ transition no merge removes). It becomes a real question when two reads share a 
 
 ### Device-required tests
 
-- [ ] The graph records and submits a frame on every deduplicated adapter, and the swapchain
+- [x] The graph records and submits a frame on every deduplicated adapter, and the swapchain
       readback is still **exactly** `(192, 128, 64, 255)` BGRA on both — the same assertion A3
       passed, now through derived barriers.
-- [ ] Zero validation output across the suite, and assert the messenger was installed so a
+- [x] Zero validation output across the suite, and assert the messenger was installed so a
       build that failed to load the layer cannot pass as clean.
-- [ ] A graph with a transient written by one pass and read by another runs clean on a device —
+- [x] A graph with a transient written by one pass and read by another runs clean on a device —
       the read-after-write barrier the derivation produced is the one the driver wanted.
 
 **Verification.** Run `Monarc.FirstLight`: a window opens and clears, resize and minimise still
@@ -355,23 +355,71 @@ A3's captures** — the same one `vkCmdBeginRendering`, the same clear value, th
 `vkCmdPipelineBarrier2` with the same layouts. A3's capture is the reference; a difference is a
 finding, not a variation.
 
+### Where Task 4's delivery differs from the boxes above
+
+Recorded here rather than ticked silently, in the shape the emission rule's correction above
+uses. The boxes are ticked because the *task* is done; two of them asked for the wrong thing and
+one asked for something that turned out to buy nothing.
+
+**"Created and destroyed around the frame" was wrong, and following it would have been a
+use-after-free.** Transients are created in `Execute` and destroyed in `Reset` and the
+destructor. `Execute` returns *before* the command list is submitted and `IDevice::DestroyTexture`
+bumps the slot generation immediately and by design, so destroying at the end of `Execute` frees
+a texture a recorded command buffer still references; destroying at the *next* `Execute` does not
+work either, because `BeginFrame` waits on its own frame slot and with two frames in flight frame
+N+1 has waited on frame N-1. `RenderGraph::Reset` states the precondition that buys — the caller
+must have ensured the GPU is finished — and the second half of it, which is easy to miss: the
+graph keeps the `IDevice&` of its last `Execute`, so a graph holding transients must be reset or
+destroyed before that device is.
+
+**`PassCommandList::ForTesting` was promised by this plan and by the class's own comment, and was
+deliberately not built.** `Execute` constructs a `PassCommandList` and invokes through it, so the
+private constructor, `Commands()` and both `Invoke` bodies are *run* rather than merely asserted
+about — which is what the factory was for. A standalone instance would be unobservable, because
+the class offers no operation at all: a callback handed one cannot do anything a test could see,
+including telling which list it wraps. The factory would be a public way to build the thing the
+private constructor exists to withhold, in exchange for no assertion. The comment records the
+broken promise and the reason rather than quietly dropping it, and the factory arrives if a test
+ever needs one.
+
+**The member-enumeration box had nothing new to guard.** It anticipated `Execute` forwarding a
+recording call through `PassCommandList` and asked for a `static_assert` per new member that can
+yield a list. No such member was added — A4 has no draws to forward — so the enumeration was
+re-run and the existing guards are still the complete set. The box stands for the next task that
+does add one.
+
+**The declared import states are no longer written at the call site.** Task 5 found that the six
+values were transcribed in four places and that nothing compared any copy with any other, so they
+are now `RHI::kSwapchainImageIncoming` and `kSwapchainImageOutgoing` in `Monarc/RHI/Swapchain.h`,
+named once with the argument for each value beside it. The values are exactly the ones this box
+specifies; what changed is that there is one of each. See Task 5.
+
 ---
 
 ## Task 5: Close-out
 
-- [ ] Confirm gate 3 has a third tier-2 module to police, and make it fail on purpose once.
-- [ ] Update [Render-Graph.md](../Rendering/Render-Graph.md) where A4 turned an intention into
+- [x] Confirm gate 3 has a third tier-2 module to police, and make it fail on purpose once.
+- [x] Update [Render-Graph.md](../Rendering/Render-Graph.md) where A4 turned an intention into
       a fact, and state plainly which of its seven steps exist and which do not — parallel
       recording, queue assignment and sub-pass optimisation are all still deferred, and the
       aliasing decision is computed but not honoured.
-- [ ] Update [Status.md](../Status.md) with an "A4 delivered" section: what runs, what CI
+- [x] Update [Status.md](../Status.md) with an "A4 delivered" section: what runs, what CI
       covers (which should be most of it, unlike A3), the captures compared, and **what A4 does
       not prove** — nothing about performance, nothing about a second backend, nothing about
       transient memory actually being saved.
-- [ ] Update [M0](../Milestones/M0-First-Light.md) to mark A4 complete.
+- [x] Update [M0](../Milestones/M0-First-Light.md) to mark A4 complete.
 - [ ] Read CI's output on the merge and confirm the device-free half genuinely covers the
       graph. If the ratio of CI-covered to device-gated coverage is not much better than A3's,
       that is a finding about the design, not about the tests.
+
+**The last box stays unticked until the merge actually runs, and the measurement it asks for is
+already done.** The ratio was computed locally from the same suites and the same `gpu` label CTest
+uses to decide what skips, because CI's own run does not exist before the merge: **A4 covers 97.4%
+of its cases and 93.5% of its assertions with no GPU, against A3's 73.7% and 34.1%** — see
+[A4 delivered](../Status.md#a4-delivered) for the table. That is much better, so it is
+confirmation rather than the finding-about-the-design this box warns of. What remains is to read
+the merge's run and check that the 6 `gpu` entries report `***Skipped` and the other 15 pass,
+which is what turns a local measurement into the observation this box asks for.
 
 ---
 
