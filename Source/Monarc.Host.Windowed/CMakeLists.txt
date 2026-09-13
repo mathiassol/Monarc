@@ -47,6 +47,13 @@ endif()
 # is also where the thing that makes them hard to write lives: driving resize, minimise,
 # maximise and a monitor drag from code needs Win32, and `Detail::WindowTestHooks` is in this
 # module.
+#
+# **Monarc.Render is linked for the same reason and in the same direction.** Phase A4's headline
+# device assertion is that the swapchain readback is unchanged when the frame's barriers are
+# derived rather than hand-written, which needs the graph and the window in one binary.
+# Monarc.Render is tier 2, so a tier-3 test reaching it is again the allowed direction; the
+# graph's own headless device cases live in Monarc.Render/TestsDevice/, which cannot reach up
+# here.
 if(TARGET Monarc.Host.Windowed.DeviceTests)
-    target_link_libraries(Monarc.Host.Windowed.DeviceTests PRIVATE Monarc.RHI.Vulkan)
+    target_link_libraries(Monarc.Host.Windowed.DeviceTests PRIVATE Monarc.RHI.Vulkan Monarc.Render)
 endif()
