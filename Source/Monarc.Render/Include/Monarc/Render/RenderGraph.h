@@ -98,9 +98,20 @@ public:
         /// barrier is derived, because compilation is a path a frame runs.
         ///
         /// A build that overflows it is refused with `DiagnosticKind::BarrierPoolExhausted`
-        /// rather than growing the pool. Bounded above by the declarations: a resource
-        /// contributes at most one barrier per surviving pass that touches it, plus one at each
-        /// end, so `maxAccesses + 2 * maxResources` is a capacity no build can exceed.
+        /// rather than growing the pool.
+        ///
+        /// **Bounded above by the declarations, and the tight bound is `maxAccesses +
+        /// maxResources`.** A resource's chain is one state per surviving pass that touches it,
+        /// framed by its first state and -- for an import -- its declared outgoing one; the gaps
+        /// number the pass states plus that closing one. The *opening* end contributes no gap of
+        /// its own, because the gap in front of the first pass is already the first pass's. So a
+        /// resource contributes at most one barrier per (pass, resource) pair plus one, the pairs
+        /// across the whole build are at most `maxAccesses`, and the plus-ones are at most
+        /// `maxResources`. The bound is reached rather than merely respected --
+        /// Tests/TestDeriveBarriers.cpp declares a frame that sits on it.
+        ///
+        /// This comment read `maxAccesses + 2 * maxResources` until Task 3's review recomputed
+        /// it; that number is conservative rather than wrong, and counted the opening end twice.
         u32 maxBarriers = 256;
 
         /// Capacity of the diagnostics list. Small: a build with more than this many

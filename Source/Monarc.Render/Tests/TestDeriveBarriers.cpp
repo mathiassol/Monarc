@@ -1763,8 +1763,10 @@ TEST_CASE("a full barrier pool is refused rather than grown") {
         REQUIRE(inspection.diagnostics.size() == 1u);
         CHECK(inspection.diagnostics[0].kind == DiagnosticKind::BarrierPoolExhausted);
         CHECK(inspection.diagnostics[0].code == ErrorCode::OutOfMemory);
-        // The refusal names the pass that the refused barrier would have been recorded in front
-        // of, in **declaration** order, and the resource it was about.
+        // The refusal names the pass whose access asked for the refused barrier, in
+        // **declaration** order, and the resource it was about. This frame has one pass, so the
+        // declaration index and the execution position are both `0` and this assertion cannot
+        // tell them apart -- the case below is the one that can.
         CHECK(inspection.diagnostics[0].pass == 0u);
         CHECK(inspection.diagnostics[0].resource == *second);
         // The order, culling, lifetimes and alias groups the earlier stages settled are still
@@ -1773,6 +1775,155 @@ TEST_CASE("a full barrier pool is refused rather than grown") {
         CHECK(inspection.passes[0].executionOrder == 0u);
         CHECK_FALSE(inspection.passes[0].culled);
     }
+}
+
+TEST_CASE("the barrier pool refusal names a declaration index, and none at the end of a frame") {
+    // **The one field in the derivation written to be read during a failure, pinned in both of
+    // the two dimensions it can be wrong in.** `GraphDiagnostic::pass` is a declaration index;
+    // `DerivedBarrier::emittedBeforePass` is an execution position; and the derivation has both
+    // numbers in scope at the refusal. The case above cannot separate them -- its frame has one
+    // pass, where they are both `0` -- so a refusal reporting the wrong one passes it.
+    //
+    // **This is the index-space confusion this codebase has a history of**, and the report is
+    // exactly where it costs the most: a reader given an execution position labelled `decl-pass=`
+    // looks up the wrong pass in a frame that was reordered, which is every frame the sort moved.
+    //
+    // The frame is the reordering one: the consumer is declared first and runs second, so the two
+    // numbers differ for every pass in it. Three capacities, each stopping the derivation at a
+    // different barrier:
+    //
+    //   room  refused barrier                              decl index  execution position
+    //   ----  --------------------------------------       ----------  ------------------
+    //   2     Consumer's anchor, opening                    0           1
+    //   3     Target, the producer's write to the read      0           1
+    //   4     Consumer's anchor, outgoing                   kNoPass     kNoPass
+    //
+    // The first two are the same disagreement; the third is the other dimension, where there is
+    // no declaring pass at all because an end-of-frame transition belongs to no pass. A refusal
+    // that passed `0` there would name the first pass declared, which is a real pass that had
+    // nothing to do with it.
+    SystemAllocator allocator;
+
+    for (Monarc::u32 room : {2u, 3u, 4u}) {
+        CAPTURE(room);
+        RenderGraph::Config config{};
+        config.maxBarriers = room;
+        RenderGraph graph(allocator, config);
+
+        PassBuilder             consumer = AnchoredPass(graph, "Consumer", 10);
+        const Result<TextureId> target = consumer.CreateTexture("Target", kSwapchainDescription);
+        REQUIRE(target.has_value());
+        REQUIRE(consumer.Read(*target, ResourceAccess::SampledRead));
+
+        PassBuilder producer = AnchoredPass(graph, "Producer", 11);
+        REQUIRE(producer.Write(*target, ResourceAccess::ColorAttachmentWrite));
+
+        const Status          compiled   = graph.Compile();
+        const GraphInspection inspection = graph.Inspect();
+
+        REQUIRE_FALSE(compiled.has_value());
+        REQUIRE(inspection.diagnostics.size() == 1u);
+        REQUIRE(inspection.diagnostics[0].kind == DiagnosticKind::BarrierPoolExhausted);
+        // Every capacity kept what it could hold, so the refusal really is at the barrier the
+        // table names rather than earlier.
+        REQUIRE(inspection.barriers.size() == room);
+
+        // The frame really is reordered: declared first, runs second.
+        REQUIRE(inspection.passes.size() == 2u);
+        REQUIRE(inspection.passes[0].executionOrder == 1u);
+        REQUIRE(inspection.passes[1].executionOrder == 0u);
+
+        if (room == 4u) {
+            // The end-of-frame transition of the first-declared pass's anchor. No pass declares
+            // it, and `kNoPass` is what `GraphDiagnostic::pass` documents for that.
+            CHECK(inspection.diagnostics[0].pass == kNoPass);
+            CHECK(inspection.diagnostics[0].resource == inspection.resources[0].id);
+            continue;
+        }
+
+        // The consumer: declaration index 0, execution position 1. The two numbers differ, and
+        // the field is the declaration index.
+        CHECK(inspection.diagnostics[0].pass == 0u);
+        CHECK(inspection.diagnostics[0].pass != inspection.passes[0].executionOrder);
+        // Which resource depends on the capacity, and saying so is what keeps the assertion above
+        // from being about a barrier other than the one intended.
+        CHECK(inspection.diagnostics[0].resource ==
+              (room == 2u ? inspection.resources[0].id : *target));
+    }
+
+    // And with room for all six the same declarations compile -- so the refusals above are about
+    // the capacity rather than about a frame that cannot be derived at all.
+    RenderGraph::Config roomy{};
+    roomy.maxBarriers = 6u;
+    RenderGraph graph(allocator, roomy);
+
+    PassBuilder             consumer = AnchoredPass(graph, "Consumer", 10);
+    const Result<TextureId> target   = consumer.CreateTexture("Target", kSwapchainDescription);
+    REQUIRE(target.has_value());
+    REQUIRE(consumer.Read(*target, ResourceAccess::SampledRead));
+
+    PassBuilder producer = AnchoredPass(graph, "Producer", 11);
+    REQUIRE(producer.Write(*target, ResourceAccess::ColorAttachmentWrite));
+
+    REQUIRE(graph.Compile());
+
+    const GraphInspection inspection = graph.Inspect();
+    REQUIRE(inspection.barriers.size() == 6u);
+    // The three barriers the capacities above refused, now derived -- and each one's execution
+    // position is the number the refusal did *not* report.
+    CHECK(inspection.barriers[2].emittedBeforePass == 1u);
+    CHECK(inspection.barriers[3].emittedBeforePass == 1u);
+    CHECK(inspection.barriers[4].emittedBeforePass == kNoPass);
+}
+
+TEST_CASE("a frame can reach the barrier count the pool's stated bound allows") {
+    // **`Config::maxBarriers` claims `maxAccesses + maxResources` is a capacity no build can
+    // exceed, and a bound nothing reaches is a bound nobody has checked.** The frame below sits
+    // exactly on it: every access is to a different (pass, resource) pair, every resource is an
+    // import the frame used, and every gap in both chains is a real transition.
+    //
+    // Three accesses -- the producer writes `Produced`, the consumer reads it and writes
+    // `Consumed` -- and two resources. `Produced` gets its opening transition, the write-to-read
+    // gap, and its outgoing one; `Consumed` gets an opening and an outgoing. Five, which is
+    // `3 + 2`.
+    //
+    // **What this rules out is the bound being loose in the term that matters.** The opening end
+    // of a chain contributes no gap of its own -- it is the first pass's gap -- so a bound with
+    // `2 * maxResources` in it counts that end twice. A frame on the tight bound is what says the
+    // remaining `+ maxResources` is the closing end and nothing else.
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    Result<PassBuilder> producer = graph.AddPass("Producer");
+    REQUIRE(producer.has_value());
+    const Result<TextureId> produced = producer->ImportTexture("Produced", FramedImport(1));
+    REQUIRE(produced.has_value());
+    REQUIRE(producer->Write(*produced, ResourceAccess::ColorAttachmentWrite));
+
+    Result<PassBuilder> consumer = graph.AddPass("Consumer");
+    REQUIRE(consumer.has_value());
+    const Result<TextureId> consumed = consumer->ImportTexture("Consumed", FramedImport(2));
+    REQUIRE(consumed.has_value());
+    REQUIRE(consumer->Read(*produced, ResourceAccess::SampledRead));
+    REQUIRE(consumer->Write(*consumed, ResourceAccess::ColorAttachmentWrite));
+
+    REQUIRE(graph.Compile());
+
+    const GraphInspection inspection = graph.Inspect();
+    // Neither pass is culled -- each writes an import -- so every access contributes a step.
+    REQUIRE(inspection.passes.size() == 2u);
+    CHECK_FALSE(inspection.passes[0].culled);
+    CHECK_FALSE(inspection.passes[1].culled);
+    REQUIRE(inspection.accesses.size() == 3u);
+    REQUIRE(inspection.resources.size() == 2u);
+    // The bound, written as the bound rather than as the number, so that a change to the frame
+    // has to keep the relation rather than the constant.
+    CHECK(inspection.barriers.size() ==
+          inspection.accesses.size() + inspection.resources.size());
+    CHECK(inspection.barriers.size() == 5u);
+    // Three for the resource two passes touch, two for the one only the consumer does.
+    CHECK(CountFor(inspection, *produced) == 3u);
+    CHECK(CountFor(inspection, *consumed) == 2u);
 }
 
 TEST_CASE("compiling a frame with barriers allocates nothing") {

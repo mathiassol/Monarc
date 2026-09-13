@@ -311,7 +311,11 @@ Status RenderGraph::StepResource(u32 resource, u32 declaringPass, const Resource
         //
         // `declaringPass` and not `barrier.emittedBeforePass`: `GraphDiagnostic::pass` is a
         // declaration index and `emittedBeforePass` is an execution position, and the two are
-        // different numbers in any frame whose passes were reordered or culled.
+        // different numbers in any frame whose passes were reordered or culled. `declaringPass`
+        // is also `kNoPass` for an import's outgoing transition, which belongs to no pass at all
+        // -- reporting `0` there would name the first pass declared, which had nothing to do with
+        // it. Both halves are pinned: Tests/TestDeriveBarriers.cpp overflows the pool in a
+        // reordered frame, where the two numbers differ, and again at an end-of-frame barrier.
         return std::unexpected(Refuse(DiagnosticKind::BarrierPoolExhausted, ErrorCode::OutOfMemory,
                                       "RenderGraph::Compile: barrier pool exhausted",
                                       declaringPass, barrier.resource));
