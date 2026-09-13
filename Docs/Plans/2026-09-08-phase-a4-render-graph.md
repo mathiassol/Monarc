@@ -408,18 +408,23 @@ specifies; what changed is that there is one of each. See Task 5.
       not prove** — nothing about performance, nothing about a second backend, nothing about
       transient memory actually being saved.
 - [x] Update [M0](../Milestones/M0-First-Light.md) to mark A4 complete.
-- [ ] Read CI's output on the merge and confirm the device-free half genuinely covers the
+- [x] Read CI's output on the merge and confirm the device-free half genuinely covers the
       graph. If the ratio of CI-covered to device-gated coverage is not much better than A3's,
       that is a finding about the design, not about the tests.
 
-**The last box stays unticked until the merge actually runs, and the measurement it asks for is
-already done.** The ratio was computed locally from the same suites and the same `gpu` label CTest
-uses to decide what skips, because CI's own run does not exist before the merge: **A4 covers 97.4%
-of its cases and 93.5% of its assertions with no GPU, against A3's 73.7% and 34.1%** — see
-[A4 delivered](../Status.md#a4-delivered) for the table. That is much better, so it is
-confirmation rather than the finding-about-the-design this box warns of. What remains is to read
-the merge's run and check that the 6 `gpu` entries report `***Skipped` and the other 15 pass,
-which is what turns a local measurement into the observation this box asks for.
+**Read, and it is confirmation rather than the finding-about-the-design this box warns of.** The
+ratio was computed locally first, from the same suites and the same `gpu` label CTest uses to
+decide what skips: **A4 covers 97.4% of its cases and 93.5% of its assertions with no GPU,
+against A3's 73.7% and 34.1%** — see [A4 delivered](../Status.md#a4-delivered) for the table.
+
+The merge's run is [34754549730](https://github.com/mathiassol/Monarc/actions/runs/34754549730),
+and it reports what the local measurement predicted: all seven jobs green, `100% tests passed
+out of 21` on each of the six presets, with exactly **6** entries `Skipped` — `13`, `14`, `15`,
+`16`, `18` and `20`, which are the three device suites and A3's three barrier death tests — and
+the other 15 passing. **`Monarc.Render.Tests` is among the 15**, so the 179 cases and 3374
+assertions that hold the declaration API, the compiler, the derivation and recording all ran on
+a runner with no GPU. That is the inversion the phase was for: A3's most important code sat
+behind a skip, and A4's does not.
 
 ---
 
