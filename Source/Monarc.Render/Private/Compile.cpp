@@ -682,10 +682,12 @@ void RenderGraph::GroupAliases() {
     // **The decision below is real and tested. The memory saving is not, and this graph does
     // not save a byte.**
     //
-    // Nothing honours the grouping: `RenderGraph::Execute` refuses rather than recording, and
-    // the memory model it will be written against is one `VkDeviceMemory` per resource -- a
-    // placeholder `VulkanDevice.cpp` records as such, and Docs/Rendering/RHI.md with it. Two
-    // resources sharing one allocation needs sub-allocation from an allocator that does not
+    // Nothing honours the grouping. `RenderGraph::Execute` records the frame and creates the
+    // transients, and it gives every one of them its own `CreateTexture` and therefore its own
+    // allocation -- the gap is one call wide and is stated at that call, in Private/Execute.cpp.
+    // The memory model it would have to be written against is one `VkDeviceMemory` per resource
+    // -- a placeholder `VulkanDevice.cpp` records as such, and Docs/Rendering/RHI.md with it.
+    // Two resources sharing one allocation needs sub-allocation from an allocator that does not
     // exist. So an `aliasGroup` in the report says "these two were computed to be able to share
     // memory", never "these two shared memory", and a green aliasing test must not be read as
     // "aliasing works": what works is the grouping.

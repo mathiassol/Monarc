@@ -133,19 +133,19 @@ keeps is worth more than one a comment makes.
 
 ## Task 1: The module, the declaration API, and inspection
 
-- [ ] `Monarc.Render` (Runtime, tier 2, deps `Monarc.Core`, `Monarc.RHI`). Confirm
+- [x] `Monarc.Render` (Runtime, tier 2, deps `Monarc.Core`, `Monarc.RHI`). Confirm
       `module-graph.json` records the edges and every gate still passes.
-- [ ] `ResourceId.h`: tagged graph-resource identities, distinct from `RHI` handles.
-- [ ] `Access.h`: how a pass touches a resource, expressed in ADR-0005's stage/access
+- [x] `ResourceId.h`: tagged graph-resource identities, distinct from `RHI` handles.
+- [x] `Access.h`: how a pass touches a resource, expressed in ADR-0005's stage/access
       vocabulary so derivation has something to derive *from*. Attachment, sampled, storage
       and indirect reads and writes; the membership rule is `Barrier.h`'s — the model arrives
       whole where a value costs one switch row, and an access whose backend behaviour nothing
       implements waits.
-- [ ] `PassBuilder.h`: what a pass declares — reads, writes, transient creation, resource
+- [x] `PassBuilder.h`: what a pass declares — reads, writes, transient creation, resource
       import, and a recording callback.
-- [ ] `RenderGraph.h`: the three-phase shape (declare, compile, execute) with compile and
+- [x] `RenderGraph.h`: the three-phase shape (declare, compile, execute) with compile and
       execute separable, because everything worth testing happens in compile.
-- [ ] `GraphInspection.h` + `GraphInspection.cpp`: the emitted data — pass list in execution
+- [x] `GraphInspection.h` + `GraphInspection.cpp`: the emitted data — pass list in execution
       order with culled passes marked, every resource with its lifetime and alias group, every
       derived barrier **with the accesses that caused it**, and queue assignments when those
       exist. Stable, diffable text, and structured enough to assert on field by field rather
@@ -168,7 +168,7 @@ made it fail on purpose, and gate 3 had nothing real to forbid until A3.
 
 All of this is pure computation over declarations. If any of it needs a device, stop and say so.
 
-- [ ] Build the dependency graph from declared reads and writes. Detect a cycle and report it
+- [x] Build the dependency graph from declared reads and writes. Detect a cycle and report it
       naming the passes, rather than looping or asserting. **The vehicle exists**: one
       `GraphDiagnostic` per pass in the cycle, all carrying the same `group`, plus a new
       `DiagnosticKind`. `GraphDiagnostic::group` argues why a group id and not a second `pass`
@@ -176,24 +176,24 @@ All of this is pure computation over declarations. If any of it needs a device, 
       overlapping reports stay apart"* in Tests/TestGraphInspection.cpp already renders the
       shape by hand — including two cycles that share a pass, which is the case one `pass` field
       per row cannot express.
-- [ ] Cull passes whose outputs nothing consumes, transitively. A pass writing only to a
+- [x] Cull passes whose outputs nothing consumes, transitively. A pass writing only to a
       culled pass's input is itself culled; a pass writing an *imported* resource is never
       culled, because something outside the graph consumes it.
-- [ ] Compute each transient's lifetime — first write to last read — in execution order.
-- [ ] Group transients whose lifetimes do not overlap **and whose descriptions are
+- [x] Compute each transient's lifetime — first write to last read — in execution order.
+- [x] Group transients whose lifetimes do not overlap **and whose descriptions are
       compatible**. Two textures of different formats or extents cannot share memory whatever
       their lifetimes say; the grouping must consider both.
 
 ### Device-free tests
 
-- [ ] Culling: a diamond, a chain, a pass whose only consumer is culled, a pass writing an
+- [x] Culling: a diamond, a chain, a pass whose only consumer is culled, a pass writing an
       imported resource (never culled), and a graph where everything is culled.
-- [ ] Lifetimes: a transient written and read in the same pass; one read several passes later;
+- [x] Lifetimes: a transient written and read in the same pass; one read several passes later;
       one written twice; and one whose last reader is culled — its lifetime must shrink.
-- [ ] Aliasing: two non-overlapping lifetimes group; two overlapping do not; two
+- [x] Aliasing: two non-overlapping lifetimes group; two overlapping do not; two
       non-overlapping with incompatible descriptions do not; and a resource never read groups
       with nothing.
-- [ ] Cycles: a two-pass cycle and a three-pass cycle each report the passes involved, one
+- [x] Cycles: a two-pass cycle and a three-pass cycle each report the passes involved, one
       diagnostic per member sharing a `group`; and two cycles in one graph stay apart. A cycle
       longer than the diagnostics pool has room for must still leave every surviving row
       grouped, with `diagnosticsDropped` non-zero — the accounting the group id was chosen to
