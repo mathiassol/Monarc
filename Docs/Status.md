@@ -3,11 +3,11 @@
 **What is actually true right now.** Intent lives in the other documents; this file is the
 honest account. Update it when reality changes, not when a plan is written.
 
-_Last updated: 2026-09-08_
+_Last updated: 2026-09-13_
 
 ## Summary
 
-The architecture is designed and recorded, and **phases A1 through A3 are complete**:
+The architecture is designed and recorded, and **phases A1 through A4 are complete**:
 the build mechanically enforces the module graph, `Monarc.Core` has its memory,
 diagnostics, container, math and platform foundations under test on two compilers and two
 sanitizers, and `Monarc.Jobs` — the first module beyond `Monarc.Core` — adds a thread
@@ -23,6 +23,15 @@ test-hooks move, and the two decisions that needed CI's probe output first — s
 [A3 Task 5](#a3-task-5-the-gate-corrections-the-death-tests-and-the-test-hooks-move) and
 [A3 delivered](#a3-delivered), which also states what A3 does *not* prove. See
 [M0 — First Light](Milestones/M0-First-Light.md) for how the phases fit together.
+
+**A4 is complete, all five tasks.** `Monarc.Render` is the seventh module and the first tier-2
+module gate 3 had a third of: it declares passes, culls them, computes lifetimes, groups aliases
+and **derives the barriers** the declarations imply, with every stage above `Execute` a pure
+function that runs on a machine with no GPU. `Monarc.FirstLight` no longer writes a barrier at
+all — its frame is one declared pass, and the two `vkCmdPipelineBarrier2` calls a RenderDoc capture
+shows are the graph's, byte-identical to A3's hand-written pair on both adapters. See
+[A4 delivered](#a4-delivered), which also states what A4 does *not* prove — the shortest version
+being that every derived barrier is proven **legal** and none is proven **necessary**.
 
 **First light is lit, and it is proved rather than looked at — twice.** A `R8G8B8A8_UNORM`
 texture cleared through dynamic rendering reads back as `(64, 128, 192, 255)` on both the RTX
@@ -423,7 +432,7 @@ confirming it:
 | A2c | Platform — files, paths, time, threads, dynamic libs, GUID | **Complete** |
 | A2d | Monarc.Jobs — thread pool, dependency graph, priorities | **Complete** |
 | A3 | RHI, Vulkan backend, Host.Windowed | **Complete** — all five tasks; device half verified locally on two adapters, device-free and runtime halves in CI (this row said "1–2 complete; 3–5 not started" until A3 Task 5 corrected it) |
-| A4 | Minimal render graph | Not started |
+| A4 | Minimal render graph | **Complete** — all five tasks; the two barriers A3 hand-wrote are derived, asserted device-free against A3's captures and confirmed by fresh captures on both adapters (this row said "Not started" until A4 Task 5 corrected it) |
 | B | ShaderCompiler, Shaders, Render | Not started |
 | C | Reflect, Serialize, Assets, Cook | Not started |
 | D | World, Engine | Not started |
@@ -2506,6 +2515,302 @@ own version is narrower and worth having beside the evidence above.
   question of whether a clear value is encoded or written through unchanged. The phase plan
   lists it as an open question and Phase B settles it with a shader and a reason to care.
 
+### A4 Task 4 delivered
+
+**The task the phase exists for, and its two halves are verified in different ways.** The first
+records a frame with no device anywhere in the process; the second runs that same frame on two
+GPUs and compares the result against A3's measurements.
+
+#### The device-free half (`3bc4b29`..`f512823`)
+
+**`PassBuilder::ColorAttachment(TextureId, RHI::LoadOp, RHI::StoreOp, RHI::ClearColor)`, and the
+load-op *is* the access declaration.** Nothing carried a load-op before this, and
+`ICommandList::BeginRendering` needs one, so `RHI::LoadOp` and `RHI::StoreOp` arrived in
+`Monarc/RHI/Device.h` and the graph got a call that declares an attachment. There is deliberately
+no `Write` to make beside it: `LoadOp::Clear` and `LoadOp::DontCare` overwrite every pixel and are
+`ResourceAccess::ColorAttachmentWrite` alone, while `LoadOp::Load` keeps what is there, which is
+the read-modify-write pair. **An attachment declaring an access that contradicts its load-op is
+therefore unrepresentable rather than diagnosable** — asking for both would create a pair that can
+disagree. Six new `DiagnosticKind` enumerators cover what the call can refuse:
+`AttachmentPoolExhausted`, `TooManyAttachments`, `DuplicateAttachment`, `AttachmentNotRenderable`,
+`AttachmentExtentEmpty`, `AttachmentExtentConflict`.
+
+**A stub `RHI::ICommandList` and `RHI::IDevice` in `Private/TestSupport/`, which is what makes
+recording assertable with no GPU.** `RecordingCommandList` records `Begin`/`End`, every barrier
+with all six ADR-0005 fields and the texture, and every `BeginRendering` with its extent and each
+attachment's texture, load-op, store-op and clear value; `RecordingDevice` creates and destroys
+handles with ADR-0002's generation discipline. Both honour their interfaces' stated *contracts*
+rather than their signatures — a stub that accepted anything would let `Execute` record an illegal
+sequence and pass — and `Tests/TestRecordingRhi.cpp` drives every refusal wrongly on purpose: the
+instrument is tested before anything is measured with it. This is the inversion A4 exists for.
+*"The graph emitted exactly these barriers, in this order, around this rendering pass"* is now an
+assertion rather than a screenshot.
+
+**Two real defects in the stub were found by mutation and fixed in the code rather than in the
+test.** `BeginRendering` had two attachment checks that no test could tell apart — a handle the
+device does not have has no usage either, and **both refused with `ErrorCode::InvalidArgument`**,
+so removing the first left the suite green. They are one question now — `IsRenderable` on the stub
+device — with one answer and two mutations that kill it. And the texture pool's generation
+bump is individually redundant on each side, because `Resolves` reads the occupancy flag as well
+as the generation; both bumps are kept to match `VulkanDevice`'s measured behaviour, and the
+comment that claimed one of them closed a window the occupancy flag already closed now says what
+is true.
+
+**`PassCommandList::ForTesting` was promised by the plan and by the class's own comment, and was
+deliberately not built.** What closes the invocation path is `RenderGraph::Execute` itself: it
+constructs a `PassCommandList` and calls `Detail::IPassRecord::Invoke` through it, so the private
+constructor, `Commands()` and both `Invoke` bodies are now *run* rather than merely asserted about.
+A standalone instance would buy nothing, because the class offers no operation — a callback handed
+one cannot do anything a test could observe, including telling which list it wraps. So the factory
+would be a public way to build the thing the private constructor exists to withhold, in exchange
+for no assertion at all. The comment records the broken promise and the reason, rather than being
+quietly deleted.
+
+**Transient textures are created in `Execute` and destroyed in `Reset` and the destructor — not
+"around the frame", which is what the plan's checkbox said and which would have been a
+use-after-free.** `Execute` returns *before* the list is submitted and `IDevice::DestroyTexture`
+bumps the slot generation immediately and by design, so destroying at the end of `Execute` frees a
+texture a recorded command buffer still references. Destroying at the *next* `Execute` does not fix
+it either: `BeginFrame` waits on its own frame slot, so with two frames in flight frame N+1 has
+waited on frame N-1. Two preconditions ship, and **the second is easy to miss**: the caller must
+have ensured the GPU is finished before `Reset`, and — because the graph keeps the `RHI::IDevice&`
+its last `Execute` was given for as long as it holds a texture that device made — **a graph holding
+transients must be reset or destroyed before that device is.** The residual gap is stated where it
+is: a per-frame reset with frames in flight needs deferred destruction or one graph per frame slot,
+and A4 builds neither. Nothing A4 ships reaches it, because A4's frame declares no transients.
+
+#### The device half (`113bea0`..`1f24e36`)
+
+**`Monarc.FirstLight` contains no barrier code, confirmed by grep rather than by reading.** Before
+`113bea0` the file held four `Barrier(` / `BeginRendering(` / `EndRendering(` call sites; it now
+holds zero — the single textual hit is a comment naming the header it no longer includes — and
+`<Monarc/RHI/Barrier.h>` is gone from its include list. It declares **one** pass, one imported
+resource and one attachment with `LoadOp::Clear`, and the graph derives the rest.
+
+**`Monarc.Render.DeviceTests` is new: headless, no window, no swapchain.** It links
+`Monarc.RHI.Vulkan` directly, which is tier 2 to tier 2 and the allowed direction — the
+swapchain-through-the-graph cases live in `Monarc.Host.Windowed`'s device suite instead, because
+gate 14 polices exactly that link line. 3 cases and 111 assertions: a 4×4 `R8G8B8A8_UNORM` texture
+cleared through the graph reads back as `(64, 128, 192, 255)`, **16 of 16 pixels exact on both
+deduplicated adapters**; a two-pass frame with a graph-owned transient written by one pass and read
+by another runs clean and its output pass's clear lands exactly; and the fatal validation messenger
+is asserted to have been installed, so a build that failed to load the layer cannot pass as clean.
+
+**The RenderDoc comparison, which is the acceptance test of the phase.** Fresh captures on both
+adapters, in `Build/Captures/` with `a4-capture.ps1` and `a4-decode.py` beside them:
+
+| File | Frame | Adapter |
+|---|---|---|
+| `monarc-a4-firstlight-nvidia-rtx3070ti_frame132.rdc` / `.xml` | 132 | RTX 3070 Ti |
+| `monarc-a4-firstlight-intel-uhd730_frame164.rdc` / `.xml` | 164 | Intel UHD 730 |
+
+Both were produced by a 4000-frame run under `renderdoccmd capture` with empty stderr, decoded out
+of the XML chunk structure rather than eyeballed, and compared field by field against A3's two
+dumps. **All twelve barrier values are identical to A3's on both adapters**, as are the chunk
+counts — one `vkCmdBeginRendering` with `loadOp = 1` (`LOAD_OP_CLEAR`) and
+`clearValue.color.float32 = [0.25098040699958801, 0.50196081399917603, 0.75294119119644165, 1]`,
+one `vkCmdEndRendering`, exactly two `vkCmdPipelineBarrier2`, one `vkQueueSubmit2`, one
+`vkQueuePresentKHR`, and **zero** `vkCreateRenderPass`, `vkCmdBeginRenderPass` or
+`vkCreateFramebuffer` chunks:
+
+| | oldLayout | newLayout | srcStage | dstStage | srcAccess | dstAccess |
+|---|---|---|---|---|---|---|
+| barrier 0 | `0` (`UNDEFINED`) | `2` (`COLOR_ATTACHMENT_OPTIMAL`) | `1024` | `1024` | `0` | `256` |
+| barrier 1 | `2` (`COLOR_ATTACHMENT_OPTIMAL`) | `1000001002` (`PRESENT_SRC_KHR`) | `1024` | `0` | `256` | `0` |
+
+That is the phase's claim in one line: **the two barriers A3 wrote by hand are now derived from a
+declaration that mentions no barrier, and the driver was handed the same twelve numbers.**
+
+**`Build/` is git-ignored, so the captures are not under version control and this section is the
+durable evidence.** The four `.rdc`/`.xml` pairs exist on one machine; the numbers above are what
+survives, and `Monarc.Render`'s `Private/TestSupport/CapturedFrame.h` is where the same twelve are
+transcribed into an assertion that runs on every push.
+
+**The swapchain readback still uses hand-written barriers, and that is a finding about the graph
+rather than a shortcut.** `Monarc.Host.Windowed`'s device suite gained two cases — the same
+`(192, 128, 64, 255)` BGRA readback as A3's, **230400 of 230400 pixels exact on both adapters**, now
+through derived barriers, and a ten-frame present loop through the graph. But the *readback* runs in
+a second command list with two hand-written texture barriers (plus a buffer barrier for host
+visibility), because three separate things would each have to change before the copy could be a
+pass: `Render::ResourceAccess` has no transfer access, so no pass can ask for `TransferSource`;
+`Render::PassCommandList` forwards no recording call, so a callback has nothing to issue a copy
+with; and `CullPasses` drops a pass that only reads an import, so even with the first two it would
+be culled before it ran. **The presented frame is fully derived; the readback around it is not**,
+and the two barriers are documented at `ReadBackPresentedImage` with that list.
+
+### A4 Task 5: the mutation nothing caught, and what actually closes it
+
+**The most interesting thing the phase found, and it deserves its own section because the first
+explanation of it was wrong.**
+
+**The finding.** A mutation setting the swapchain import's `incoming.stage` to
+`PipelineStage::None` — the one value of six the plan calls a *choice* rather than a consequence of
+the swapchain contract — passed everything. Re-run from scratch on a worktree at `1f24e36`, the
+last commit before the fix, with only `Monarc.FirstLight`'s own copy of the declaration changed:
+the app compiled, ran 200 frames on each adapter, **exited zero with zero bytes on stderr both
+times, and `ctest` stayed at 21 of 21 with nothing skipped**. That is **a silent synchronisation
+hole of exactly the class the render graph exists to prevent**: presentation hands an image over
+through a semaphore, a submission that renders into it waits on that semaphore at a stated stage,
+and the transition out of `Undefined` is a write that is ordered after the wait only if the
+transition's first scope includes that stage. `PipelineStage::None` is the empty scope. Nothing
+objects, because a missing dependency is not an illegal call — it is a race.
+
+**Why it was invisible: the fact lived in two comments that must agree, and nothing compared
+them.** The declaration on one side, and `VulkanDevice.cpp`'s hardcoded
+`VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT` in the acquire semaphore's wait on the other.
+And the declaration itself was written out in **four** places, not three: `Monarc.FirstLight`'s
+frame, the swapchain readback in `Monarc.Host.Windowed`'s device suite,
+`TestSupport::SwapchainImport` in `Monarc.Render`, and that module's own
+`Tests/TestPassDeclaration.cpp`, which had a copy of its own. Six values, four times, and three of
+the four carried a comment claiming they were A3's measured pair — true right up until someone
+changed one copy. **That is exactly why the mutation above was invisible**: changing the app's copy
+left the three test copies saying the old thing, so every suite went on asserting about a
+declaration the shipping frame no longer made.
+
+**Fixed in three moves.** `TextureState` moved from `Monarc.Render` to `Monarc/RHI/Barrier.h`,
+beside the `TextureBarrier` it is two thirds of, so that `Monarc.RHI` can state a fact about a
+texture's state at all. `kSwapchainImageIncoming` and `kSwapchainImageOutgoing` are named once in
+`Monarc/RHI/Swapchain.h`, with the argument for each of the six values moved to them rather than
+copied, and the four sites now name the constants. And `VulkanDevice.cpp`'s `waitInfo.stageMask` is
+`Detail::ToVulkan(kSwapchainImageIncoming.stage)` — **derived** from the constant instead of
+restating it.
+
+**The mechanism, stated accurately because the first version of it was wrong.** The claim that
+sharing a constant cannot close the hole "because a mutation would move all four sites together" is
+false, and the reason is `Private/TestSupport/CapturedFrame.h`: it keeps the twelve captured barrier
+values as an **independent transcription belonging to no declaration**, read out of A3's RenderDoc
+dumps. So the two equivalence cases compare a derivation against a *measurement*, not a constant
+against itself, and sharing the constant is precisely what puts the declared stage under test.
+Re-measured on this tree: mutating `kSwapchainImageIncoming.stage` to `PipelineStage::None` now
+turns `Monarc.Render.Tests` red at **`Tests/TestDeriveBarriers.cpp:330` and
+`Tests/TestExecute.cpp:161`, both `CHECK( 0 == 32 )`**, 177 of 179 cases passing. The backend
+wiring is a separate strengthening and does a different job: it makes declaration-versus-backend
+*disagreement* unrepresentable — an identity rather than a check, which is why no check was added
+beside it.
+
+**The honest residual.** Nothing stops a future edit from replacing
+`ToVulkan(kSwapchainImageIncoming.stage)` with a literal again. A grep gate over
+`VulkanDevice.cpp` was considered and rejected as too brittle to survive the first legitimate
+second use of that stage — a gate that must be edited the first time the code is legitimately
+extended is a gate that gets deleted. What holds the value itself is the argument written at the
+constant plus A3's captures.
+
+**The outgoing side is not the same defect, and the asymmetry is the point.** The incoming pairing
+is an **equality** — the wait stage has to *be* the stage the transition's first scope names, so
+there is one value to share. The outgoing pairing is a **containment**: the render-finished
+semaphore is signalled at `VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT`, which is the widest scope there
+is and covers the transition into `PresentSource` whatever the outgoing stage held. There is no
+equation to collapse, and deriving one value from the other would be inventing a constraint rather
+than encoding one. It is pinned against the captures the same way, and re-measured here: setting
+`kSwapchainImageOutgoing.stage` to `AllCommands` fails the same two suites at
+`TestDeriveBarriers.cpp:348` and `TestExecute.cpp:181`, both `CHECK( 8192 == 0 )`.
+
+### A4 delivered
+
+**Phase A4 is complete, all five tasks.** `Monarc.FirstLight` opens the same window and clears it
+to the same colour as A3 — and the two barriers that do it are now *derived* by `Monarc.Render`
+from a declaration that mentions no barrier, on both of this machine's GPUs, byte-identical to A3's
+captured frame. Nothing outside `Monarc.Render` writes a barrier in the presented frame.
+
+**What exists.** A seventh node in `module-graph.json`: `Monarc.Render`, tier 2, Runtime,
+depending on `Monarc.Core` and `Monarc.RHI` and on nothing else — no `Monarc.Jobs` edge, because
+its only use here would be the parallel recording ADR-0006 defers. Inside it: graph-resource
+identities distinct from RHI handles, an access vocabulary in ADR-0005's terms, a pass declaration
+API, and a `Compile` that builds the dependency graph, orders it, refuses three classes of
+ill-formed frame, culls, numbers, computes lifetimes, groups aliases and derives barriers — **all
+of it a pure function of the declarations, with no device in the signature.** `Execute` is the only
+file that touches an `RHI::ICommandList`. `GraphInspection` reports every one of those decisions as
+structured data with a text rendering beside it.
+
+**What runs, and where.** 21 CTest entries on six presets locally, all green with zero compiler
+warnings. The CI column below is what the mechanism produces rather than a run that has happened:
+`monarc_device_test_module()` sets `SKIP_RETURN_CODE 77` and each device suite's `main` returns 77
+before doctest starts a case when there is no Vulkan runtime, no instance or no adapter — so the 6
+`gpu`-labelled entries report `***Skipped` on the runners measured in
+[What the runners actually have](#what-the-runners-actually-have) and the other 15 pass. **Reading
+the merge's own run is what turns that into an observation**, and it is the one Task 5 checkbox
+left open.
+
+| Entry | Label | Local | CI |
+|---|---|---|---|
+| `Architecture.Gates`, `Architecture.GateTests` | `architecture` | Pass | Pass |
+| `Monarc.Core.Tests`, `Monarc.Jobs.Tests`, `Monarc.RHI.Tests`, `Monarc.RHI.Vulkan.Tests`, `Monarc.Render.Tests`, `Monarc.Host.Windowed.Tests` | `unit` | Pass | Pass |
+| 5 death tests over `Monarc.Core` and `Monarc.Jobs` guards | `unit` | Pass | Pass |
+| `Monarc.RHI.Vulkan.RuntimeTests` | `runtime` | Pass | Pass |
+| `Monarc.RHI.Vulkan.DeviceTests`, **`Monarc.Render.DeviceTests`**, `Monarc.Host.Windowed.DeviceTests`, 3 barrier death tests | `gpu` | Pass | Skipped |
+| `Monarc.RHI.Vulkan.Probe` | `probe` | Pass | Pass, and prints |
+
+Measured on `msvc-debug` at this commit:
+
+| Suite | Cases | Assertions | Needs a GPU |
+|---|---|---|---|
+| `Monarc.Render.Tests` | 179 | 3374 | No |
+| `Monarc.RHI.Tests` | 60 | 216 | No |
+| `Monarc.Render.DeviceTests` | 3 | 111 | **Yes** |
+| `Monarc.Host.Windowed.DeviceTests` | 19 | 1077 | **Yes** |
+
+`Tools/test_check_architecture.py` is at 59 cases, and gate 3 was made to fail on purpose against
+`Monarc.Render` — see [Verification gates](#verification-gates).
+
+**What CI actually covers, which is the question the plan asked A4 to answer.** CI has a Vulkan
+loader that opens and resolves its four global entry points, and **no ICD behind it** — bring-up
+stops before `vkCreateInstance`, because `VK_KHR_surface` is not offered — so every `gpu` entry
+returns 77 there. Counting only the test surface each phase *added*, and measuring it rather than
+estimating:
+
+| | Device-free (runs in CI) | Device-gated | Share CI covers |
+|---|---|---|---|
+| **A4** — `Monarc.Render.Tests`, plus 5 cases / 27 assertions added to `Monarc.RHI.Tests`, against `Monarc.Render.DeviceTests` and the 2 graph cases (125 assertions) in `Monarc.Host.Windowed.DeviceTests` | 184 cases, 3401 assertions | 5 cases, 236 assertions | **97.4% of cases, 93.5% of assertions** |
+| **A3** — `Monarc.RHI.Tests`, `Monarc.RHI.Vulkan.Tests`, `Monarc.RHI.Vulkan.RuntimeTests` and `Monarc.Host.Windowed.Tests`, against `Monarc.RHI.Vulkan.DeviceTests` and the other 17 cases of `Monarc.Host.Windowed.DeviceTests` | 143 cases, 680 assertions | 51 cases, 1315 assertions | 73.7% of cases, 34.1% of assertions |
+
+**So it is much better, and that is confirmation rather than a finding.** The plan said that if the
+ratio were not much better than A3's, the fault would lie in the design and not in the tests.
+A4 covers **93.5%** of its own assertions on a machine with no GPU where A3 covered **34.1%** —
+nearly three times the share — and the reason is structural rather than diligent: the graph's entire
+value is a pure function of declarations, and the stub `ICommandList` pushed even *recording* across
+the line. The device-gated remainder is five cases, and every one of them asks a question a stub
+genuinely cannot answer: does a real driver accept this, and do the pixels land.
+
+### What A4 does not prove
+
+[M0](Milestones/M0-First-Light.md#what-m0-does-not-prove) states this for the milestone and
+[A3's version](#what-a3-does-not-prove) still stands unchanged; A4's own is narrower.
+
+- **Nothing about whether a derived barrier was *necessary*.** Monarc does not enable Vulkan's
+  synchronization validation — a separate feature from the validation layer the Debug builds do
+  install — so the layer checks a barrier's **legality** and never its **sufficiency**. A layout
+  the image's usage permits, masks that pair, an old layout matching what the image is in: all
+  checked. A frame missing a barrier it needed is not a validation error, it is a race. **Every
+  derived barrier in A4 is proven legal and none is proven necessary**, and the E4 mutation above
+  is what that gap looks like when it bites. This is the one on this list that is worth acting on.
+- **Nothing about transient memory being saved, because aliasing is computed and not honoured.**
+  `GroupAliases` decides which transients could share an allocation and reports it; `Execute` then
+  calls `CreateTexture` once per transient. A green aliasing test says the *grouping* is right. It
+  says nothing about bytes, and it will go on saying nothing until the sub-allocator A3 deferred
+  exists.
+- **Nothing about a transient's contents.** Nothing outside the graph can name a transient's
+  texture — inspection reports its description and lifetime, not its handle — and A4 has no shaders,
+  so the second pass of the transient device case cannot consume what the first wrote. What that
+  case asserts is that the frame *including the read-after-write barrier* is accepted by a real
+  driver and that the output pass's pixels land exactly. It does not assert that the second pass
+  read what the first wrote.
+- **Nothing about a second backend.** One backend, as in A3, and the same consequence: an
+  abstraction validated against a single implementation is a description of that implementation.
+  `Monarc.Render` is now a second consumer of `Monarc.RHI`, which is a little more pressure on the
+  interface than A3 applied, and it is not the pressure a second backend applies.
+- **Nothing about performance, and deliberately so.** One pass, one clear, one queue, no draws, no
+  parallel recording. `Monarc.FirstLight` presented 4000 frames in a row on each adapter under a
+  graphics debugger with empty stderr, and exits zero; that is a liveness observation. The plan and
+  [Render-Graph.md](Rendering/Render-Graph.md#scope-in-m0) both say no performance claim may be made
+  from a frame this thin, and none is.
+- **Nothing about the frame shape M0 actually wants.** A4 ships **one** pass where
+  Render-Graph.md's M0 scope says two or three — a depth pass and a forward opaque pass both need
+  shaders, and `Monarc.Shaders` is Phase B. Multi-pass frames, culling and cross-pass barriers are
+  exercised by tests rather than by the app.
+- **Nothing about extraction.** There is no `RenderScene` and no immutable render frame;
+  `Monarc.FirstLight` declares its pass itself. ADR-0007's boundary is respected by the graph
+  reading nothing but its own declarations, not by an extraction step that does not exist.
+
 ## Verification gates
 
 Six of M0's fourteen gates are implemented and running under CTest as `Architecture.Gates`:
@@ -2518,6 +2823,23 @@ every include prefix in its list named a module Monarc had not written. `Monarc.
 `Monarc.RHI.Vulkan` are now tier 2, `Monarc.Host.Windowed` is the project's first tier 3
 module, and `Monarc/Host/` is in the list — so the gate polices a boundary that two existing
 modules sit either side of, and it was made to fail on purpose before being trusted.
+
+**A4 gave it a third tier-2 module, and it was made to fail against that one too.** `Monarc.RHI`,
+`Monarc.RHI.Vulkan` and `Monarc.Render` are all `TIER 2` in their `CMakeLists.txt` and in
+`module-graph.json`. Gate 3 keys off the tier and matches `#include` lines against
+`FORBIDDEN_INCLUDES`, walking `Include/` and `Private/`, so nothing about the prefixes excluded the
+new module. Adding `#include <Monarc/Host/Window.h>` to `Source/Monarc.Render/Private/Execute.cpp`
+and running the gates produced, verbatim:
+
+```
+[FAIL] Gate 3: renderer package boundary (tier 2 sees no tier 1 or 3)
+         Source/Monarc.Render/Private/Execute.cpp:2 includes Monarc/Host/ (module Monarc.Render)
+```
+
+The include was removed again and `Architecture.Gates` returned to `all gates passed`;
+`Tools/test_check_architecture.py` is unchanged at 59 cases. Gate 14, the link-line companion, is
+what covers the test directories the source-reading gates do not walk, and it is the reason
+`Monarc.Render.DeviceTests` links `Monarc.RHI.Vulkan` rather than `Monarc.Host.Windowed`.
 
 The layout gate was numbered 7 from A1 until A3 Task 1, which collided with M0's own gate 7
 (world-kind parity), so `ctest` printed one rule's name under another's number. M0's table is
