@@ -1602,6 +1602,13 @@ TEST_CASE("an imported resource no surviving pass touches is left alone") {
     // that it was declared and that the frame did not use the resource.
     CHECK(inspection.resources[1].incoming.layout == TextureLayout::TransferSource);
     CHECK(inspection.resources[1].outgoing.layout == TextureLayout::PresentSource);
+    // **And the two differ, which is what makes this an exception to what the outgoing state
+    // means rather than a case where the answer happens to coincide.** The importer asked to be
+    // handed the image back in `PresentSource`; it is handed back in `TransferSource`, and the
+    // compile returned success. `TextureImport` and `ResourceInspection::outgoing` both carry
+    // that exception, and this assertion is what they are carrying it about.
+    CHECK_FALSE(inspection.resources[1].incoming.layout ==
+                inspection.resources[1].outgoing.layout);
     // And the anchor still gets its two, so zero is about these resources.
     CHECK(CountFor(inspection, inspection.resources[0].id) == 2u);
 }

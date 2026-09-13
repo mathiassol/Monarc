@@ -240,6 +240,17 @@ struct ResourceInspection {
 
     /// The state the resource must be in when the graph is done with it. Meaningful only when
     /// `origin` is `Imported`.
+    ///
+    /// **One exception, and it is a decision the derivation makes rather than an accident: an
+    /// import no surviving pass touches is left in its `incoming` state.** The graph derives no
+    /// transition at all for a resource it did not use -- Private/DeriveBarriers.cpp argues why,
+    /// and the compile succeeds rather than refusing -- so an importer whose two ends differ can
+    /// be handed back a resource in the state it supplied. Only a *read-only* import can reach
+    /// that, because culling keeps every pass that writes an import.
+    ///
+    /// `lifetime.IsUnused()` is the signal, and it is the only one: a barrier list does not say
+    /// what it does not contain, so an importer that must know reads the lifetime rather than
+    /// counting barriers.
     TextureState outgoing = {};
 
     /// The span of execution order over which the resource is live. See `ResourceLifetime`,

@@ -37,6 +37,17 @@ class RenderGraph;
 /// one -- see `RHI::RenderingDescription`. For a swapchain image those come from
 /// `ISwapchain::Extent()` and `ISwapchain::ImageFormat()`, which is the caller's to read and
 /// not the graph's to discover.
+///
+/// **The outgoing state binds the graph for a resource the graph used, and for no other.** If
+/// culling drops every pass that named this import, the derivation emits no transition for it at
+/// all and the resource is left in the incoming state it was handed -- and the build *succeeds*,
+/// because a barrier for an operation the frame did not perform would claim something the frame
+/// did not do. Private/DeriveBarriers.cpp argues that decision where it is made.
+///
+/// Only a read-only import can reach it: culling keeps every pass that writes an import, so an
+/// import the frame produced into always gets both its transitions. An importer that must know
+/// which happened reads `ResourceInspection::lifetime.IsUnused()` in the report -- there is no
+/// other signal, and counting barriers is not one, because a list does not say what it omits.
 class TextureImport {
 public:
     constexpr TextureImport(RHI::TextureHandle texture, RHI::TextureDescription description,
