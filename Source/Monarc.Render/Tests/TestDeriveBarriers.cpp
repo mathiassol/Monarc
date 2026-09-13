@@ -1024,6 +1024,58 @@ TEST_CASE("a read-modify-write pass combines its two accesses and emits nothing 
                                          ByPass(1, ResourceAccess::ColorAttachmentWrite)});
 }
 
+TEST_CASE("a read-modify-write pass still emits nothing between accesses another resource splits") {
+    // **The same rule, in the spelling the case above cannot reach.** That one declares each
+    // pass's read and write of one resource *adjacently*, so "is this the first arrival at this
+    // resource" is answerable by looking one access back. This one interleaves them -- read
+    // `Blend`, read `Other`, write `Other`, write `Blend` -- which is legal and is what a pass
+    // that groups its declarations by role rather than by resource produces.
+    //
+    // **`DeriveBarriers` scans every earlier access of the pass and not just the preceding one,
+    // and this is the frame that says so.** Narrowed to the preceding access, the write of
+    // `Blend` at the end reads `Other`'s write behind it, concludes it is `Blend`'s first
+    // arrival, and steps the chain a second time -- emitting a barrier between one pass's own
+    // read and its own write, in the place `ICommandList::Barrier` has no room for one. The
+    // count below is three instead of two when that happens.
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    PassBuilder             producer = AnchoredPass(graph, "Producer", 10);
+    const Result<TextureId> blend    = producer.CreateTexture("Blend", kSwapchainDescription);
+    REQUIRE(blend.has_value());
+    REQUIRE(producer.Write(*blend, ResourceAccess::ColorAttachmentWrite));
+
+    PassBuilder             modifier = AnchoredPass(graph, "Modifier", 11);
+    const Result<TextureId> other    = modifier.CreateTexture("Other", kSwapchainDescription);
+    REQUIRE(other.has_value());
+    // Interleaved on purpose: the two accesses to `Blend` are the first and the last of the four,
+    // with both of `Other`'s between them.
+    REQUIRE(modifier.Read(*blend, ResourceAccess::ColorAttachmentRead));
+    REQUIRE(modifier.Read(*other, ResourceAccess::ColorAttachmentRead));
+    REQUIRE(modifier.Write(*other, ResourceAccess::ColorAttachmentWrite));
+    REQUIRE(modifier.Write(*blend, ResourceAccess::ColorAttachmentWrite));
+
+    REQUIRE(graph.Compile());
+
+    const GraphInspection inspection = graph.Inspect();
+    // Two for `Blend`: its creation transition, and the one into the modifying pass. **Not
+    // three** -- the third would sit between the modifier's own read and its own write.
+    REQUIRE(CountFor(inspection, *blend) == 2u);
+    // One for `Other`, whose two accesses are adjacent: the case above already covers that
+    // spelling, and it is here as the control that the interleaving is what differs.
+    REQUIRE(CountFor(inspection, *other) == 1u);
+
+    // And the one step the pass produced for `Blend` carries both halves, so "two barriers" is
+    // not a combination that dropped the read.
+    const DerivedBarrier& intoModifier = BarrierFor(inspection, *blend, 1);
+    CHECK(intoModifier.accessBefore == Access::ColorAttachmentWrite);
+    CHECK(intoModifier.accessAfter ==
+          (Access::ColorAttachmentRead | Access::ColorAttachmentWrite));
+    CHECK(intoModifier.emittedBeforePass == 1u);
+    CHECK(intoModifier.cause == BarrierCause{ByPass(0, ResourceAccess::ColorAttachmentWrite),
+                                             ByPass(1, ResourceAccess::ColorAttachmentWrite)});
+}
+
 TEST_CASE("an imported resource's outgoing transition follows a last access that is a read") {
     // **The second write-after-read shape**, and the one that is a genuine
     // write-after-read in ADR-0005's terms: the last thing the frame did to the resource was read
