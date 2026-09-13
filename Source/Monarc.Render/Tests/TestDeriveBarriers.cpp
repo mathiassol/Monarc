@@ -1457,6 +1457,81 @@ TEST_CASE("an outgoing state a reading pass already matches is not a transition"
     CHECK(BarrierFor(inspection, *storage, 0).layoutAfter == TextureLayout::General);
 }
 
+TEST_CASE("an outgoing state that only narrows a read's scope is emitted, and orders nothing") {
+    // **The shape the case above does not cover, asserted because a reader will assume it does.**
+    // "Read-after-read across the boundary stays suppressed" is true of *equal* states, which is
+    // what the suppression clause compares. An importer whose outgoing state is the same read at
+    // a **narrower** scope declares a state that is not equal, so the gap is a transition and a
+    // barrier comes out -- `VertexShader|FragmentShader|ComputeShader` to `FragmentShader`, with
+    // the same layout and the same access on both sides.
+    //
+    // **That barrier orders nothing, and this file's own opening calls an unnecessary barrier a
+    // performance bug.** Nothing is made available that was not already available to a superset
+    // of the same stages, nothing is made visible, and no layout moves. It is asserted rather
+    // than fixed: the suppression clause is honestly written as equality, a scope comparison that
+    // knew which direction was safe would be a different rule with its own cases, and nothing in
+    // A4 declares this -- `Monarc.FirstLight`'s swapchain import names no shader stage at all.
+    // What is not acceptable is for it to be undiscovered, which is what this case prevents.
+    //
+    // Two of them, at two layouts, so the answer is not one access's accident.
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    PassBuilder             pass    = AnchoredPass(graph, "Pass", 10);
+    const Result<TextureId> sampled = pass.ImportTexture(
+        "Sampled",
+        TextureImport(TextureHandle::ForTesting(1, 1), kSwapchainDescription,
+                      TextureState{TextureLayout::ShaderReadOnly, PipelineStage::FragmentShader,
+                                   Access::ShaderSampledRead},
+                      TextureState{TextureLayout::ShaderReadOnly, PipelineStage::FragmentShader,
+                                   Access::ShaderSampledRead}));
+    REQUIRE(sampled.has_value());
+    const Result<TextureId> storage = pass.ImportTexture(
+        "Storage",
+        TextureImport(TextureHandle::ForTesting(2, 1), kSwapchainDescription,
+                      TextureState{TextureLayout::General, PipelineStage::ComputeShader,
+                                   Access::ShaderStorageRead},
+                      TextureState{TextureLayout::General, PipelineStage::ComputeShader,
+                                   Access::ShaderStorageRead}));
+    REQUIRE(storage.has_value());
+    REQUIRE(pass.Read(*sampled, ResourceAccess::SampledRead));
+    REQUIRE(pass.Read(*storage, ResourceAccess::StorageRead));
+
+    // Two each: the opening widening, which is a real barrier, and the closing narrowing, which
+    // is not. The incoming and outgoing states are identical, so a derivation that emitted only
+    // one of the two would have to have treated the two ends differently.
+    REQUIRE(graph.Compile());
+
+    const GraphInspection inspection = graph.Inspect();
+    REQUIRE(CountFor(inspection, *sampled) == 2u);
+    REQUIRE(CountFor(inspection, *storage) == 2u);
+
+    // The opening one widens, and is owed: the pass samples in three stages and the importer made
+    // the image visible to one.
+    const DerivedBarrier& intoSampler = BarrierFor(inspection, *sampled, 0);
+    CHECK(intoSampler.syncBefore == PipelineStage::FragmentShader);
+    CHECK(intoSampler.syncAfter == kShaderStages);
+
+    // The closing one narrows, and is the no-op: every other field is equal across it.
+    const DerivedBarrier& outSampler = BarrierFor(inspection, *sampled, 1);
+    CHECK(outSampler.emittedBeforePass == kNoPass);
+    CHECK(outSampler.syncBefore == kShaderStages);
+    CHECK(outSampler.syncAfter == PipelineStage::FragmentShader);
+    CHECK(outSampler.layoutBefore == outSampler.layoutAfter);
+    CHECK(outSampler.accessBefore == outSampler.accessAfter);
+    CHECK(outSampler.accessBefore == Access::ShaderSampledRead);
+    // A read on both sides: the narrowing is the only thing this barrier expresses.
+    CHECK(outSampler.cause == BarrierCause{ByPass(0, ResourceAccess::SampledRead),
+                                           ByEnd(BarrierCauseKind::ImportOutgoing)});
+
+    const DerivedBarrier& outStorage = BarrierFor(inspection, *storage, 1);
+    CHECK(outStorage.emittedBeforePass == kNoPass);
+    CHECK(outStorage.syncBefore == kShaderStages);
+    CHECK(outStorage.syncAfter == PipelineStage::ComputeShader);
+    CHECK(outStorage.layoutBefore == outStorage.layoutAfter);
+    CHECK(outStorage.accessBefore == outStorage.accessAfter);
+}
+
 TEST_CASE("culled passes contribute no barriers") {
     // **A pass that does not run cannot need a barrier**, and the two graphs below are the same
     // declarations with one difference: whether anything consumes what the middle pass wrote.

@@ -92,6 +92,22 @@
 //   Two passes sampling one texture at the same stages have no hazard between them and no
 //   layout to change; a barrier here would be a performance bug.
 //
+// **One shape gets a barrier that orders nothing, and the suppression clause above is why: it
+// compares states, and a narrower scope is a different state.** An import whose declared
+// outgoing state is the same read at a *narrower* scope than the last pass's -- `ShaderReadOnly`
+// with `FragmentShader` after a pass that sampled in all three shader stages -- ends the chain
+// with a gap that changes only the stage, downwards, with a read on both sides and no layout
+// move. That is emitted, and it orders nothing: everything is already available to a superset of
+// the scope being asked for.
+//
+// **Recorded rather than fixed, and the reader this is for is the one who takes "read-after-read
+// across the boundary stays suppressed" as covering it.** It does not -- that sentence is about
+// *equal* states. Nothing in A4 declares this shape (`Monarc.FirstLight`'s swapchain import names
+// no shader stage at all), and a rule that compared scopes for containment instead of equality
+// would be a different rule with cases of its own -- including the question of whether narrowing
+// an *access* is safe, which it is not in general. Tests/TestDeriveBarriers.cpp declares the
+// frame and asserts the barrier, so the cost is measured rather than latent.
+//
 // **Why the write term reads both sides, and what a rule that read only the side after the gap
 // got wrong.** Between two *passes* the two sides cannot disagree about writing while their
 // states are equal: a pass step's access mask is the union of `RequirementOf`'s access bits, the
