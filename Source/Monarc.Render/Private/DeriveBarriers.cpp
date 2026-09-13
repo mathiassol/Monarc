@@ -251,14 +251,24 @@ RenderGraph::ResourceStep RenderGraph::CombinePassStep(u32 pass, u32 resource) c
         step.state.stage |= requirement.scope.stage;
         step.state.access |= requirement.scope.access;
 
-        if (requirement.writes && !step.passWrites) {
+        if (requirement.writes) {
             step.passWrites = true;
-            // **The first write is what the report blames when the pass writes**, in preference
-            // to the first access. A read-modify-write pass's read and its write are both true
-            // of the pass, and the write is the half a barrier beside it is about: it is what
-            // has to be made available on the before side and what has to be ordered on the
-            // after side. The pass is named too, so a reader who wants the other access finds
-            // it in `GraphInspection::accesses`.
+            // **The write is what the report blames when the pass writes**, in preference to the
+            // first access. A read-modify-write pass's read and its write are both true of the
+            // pass, and the write is the half a barrier beside it is about: it is what has to be
+            // made available on the before side and what has to be ordered on the after side. The
+            // pass is named too, so a reader who wants the other access finds it in
+            // `GraphInspection::accesses`.
+            //
+            // **No tie-break between two writes, because a pass cannot declare two.** Every
+            // layout `RequirementOf` names is required by at most one access that writes, so two
+            // writes of one resource in one pass either repeat an access --
+            // `DiagnosticKind::DuplicateAccess` -- or disagree about a layout --
+            // `DiagnosticKind::AccessLayoutConflict`. Tests/TestDeriveBarriers.cpp asserts the
+            // premise over the whole access set rather than leaving it to this comment. A guard
+            // here reading `!step.passWrites` would state a preference for the *first* write that
+            // no declaration can exercise, and which write to blame is a question for whoever
+            // makes two of them declarable.
             step.cause.access = access.access;
         }
     }

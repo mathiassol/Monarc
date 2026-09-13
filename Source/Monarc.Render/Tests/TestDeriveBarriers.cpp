@@ -29,6 +29,7 @@ using Monarc::ErrorCode;
 using Monarc::Result;
 using Monarc::Status;
 using Monarc::SystemAllocator;
+using Monarc::Render::AccessRequirement;
 using Monarc::Render::BarrierCause;
 using Monarc::Render::BarrierCauseKind;
 using Monarc::Render::BarrierCauseSide;
@@ -200,20 +201,39 @@ constexpr PipelineStage kCapturedFirstDstStage   = PipelineStage::ColorAttachmen
 constexpr Access        kCapturedFirstSrcAccess  = Access::None;
 constexpr Access        kCapturedFirstDstAccess  = Access::ColorAttachmentWrite;
 
+constexpr TextureLayout kCapturedSecondOldLayout = TextureLayout::ColorAttachment;
+constexpr TextureLayout kCapturedSecondNewLayout = TextureLayout::PresentSource;
+constexpr PipelineStage kCapturedSecondSrcStage  = PipelineStage::ColorAttachmentOutput;
+constexpr PipelineStage kCapturedSecondDstStage  = PipelineStage::None;
+constexpr Access        kCapturedSecondSrcAccess = Access::ColorAttachmentWrite;
+constexpr Access        kCapturedSecondDstAccess = Access::None;
+
 // ---------------------------------------------------------------------------------------
-// The premise the emission rule's one-sidedness rests on, pinned where it is relied on.
+// Two premises about `ResourceAccess` that the derivation's shape rests on, pinned where they
+// are relied on rather than in TestAccess.cpp, because it is this file's rules that need them.
 //
-// Private/DeriveBarriers.cpp reads `passWrites` of the step *after* a gap and not of the step
-// before it, and argues that between two passes the two cannot disagree while their states are
-// equal: a pass step's access set is the union of `RequirementOf`'s access bits, and the write
-// bits come only from accesses that write -- so two pass steps with equal access sets either both
-// wrote or neither did.
+// **The first bounds where the emission rule's two sides can disagree.**
+// Private/DeriveBarriers.cpp reads `passWrites` on **both** sides of a gap, and argues that
+// between two passes the two cannot disagree while their states are equal: a pass step's access
+// set is the union of `RequirementOf`'s access bits, and the write bits come only from accesses
+// that write -- so two pass steps with equal access sets either both wrote or neither did. That
+// is what confines the `from` term's effect to one gap in the whole chain, the one between the
+// last pass and an import's declared outgoing state, and confining it is the argument that the
+// file deviates from the phase plan's emission rule in one place rather than everywhere.
 //
-// That holds because no read access and no write access share an access bit, which is what the
-// assertions below say. They are `static_assert`s because `RequirementOf` is `constexpr`, and
-// they are here rather than in TestAccess.cpp because it is this file's rule that needs them:
-// giving `ColorAttachmentRead` the `ColorAttachmentWrite` bit would leave every row of
-// TestAccess.cpp's map to be changed to match, and would make the one-sided rule wrong.
+// It holds because no read access and no write access share an access bit. Giving
+// `ColorAttachmentRead` the `ColorAttachmentWrite` bit would leave every row of TestAccess.cpp's
+// map to be changed to match, and would widen that deviation to every gap between two passes.
+//
+// **The second is why `CombinePassStep` needs no tie-break between two writes.** No layout is
+// required by two different accesses that both write, so a pass cannot declare two writes of one
+// resource at all: `DiagnosticKind::AccessLayoutConflict` refuses two accesses whose layouts
+// disagree, and `DiagnosticKind::DuplicateAccess` refuses the same access twice. The day an
+// access set breaks that, `CombinePassStep` has to decide which write its cause blames -- and
+// this assertion is what puts the decision in front of whoever adds the access.
+//
+// Both are `static_assert`s because `RequirementOf` is `constexpr`, and each is paired with an
+// anti-vacuity assertion, because a quantifier over an empty set holds for the wrong reason.
 // ---------------------------------------------------------------------------------------
 
 constexpr ResourceAccess kAllAccesses[] = {
@@ -259,17 +279,45 @@ static_assert(!IsEnumerator(static_cast<ResourceAccess>(std::size(kAllAccesses))
 }
 
 static_assert(!Monarc::RHI::HasAny(BitsOfAccessesThat(false), BitsOfAccessesThat(true)),
-              "a read access shares an access bit with a write access, which makes the barrier "
-              "derivation's one-sided emission rule wrong -- see Private/DeriveBarriers.cpp");
+              "a read access shares an access bit with a write access, which widens the barrier "
+              "derivation's deviation from the phase plan's emission rule from one gap per chain "
+              "to every gap between two passes -- see Private/DeriveBarriers.cpp");
 static_assert(BitsOfAccessesThat(true) != Access::None,
               "no access writes, so the assertion above is vacuous");
 
-constexpr TextureLayout kCapturedSecondOldLayout = TextureLayout::ColorAttachment;
-constexpr TextureLayout kCapturedSecondNewLayout = TextureLayout::PresentSource;
-constexpr PipelineStage kCapturedSecondSrcStage  = PipelineStage::ColorAttachmentOutput;
-constexpr PipelineStage kCapturedSecondDstStage  = PipelineStage::None;
-constexpr Access        kCapturedSecondSrcAccess = Access::ColorAttachmentWrite;
-constexpr Access        kCapturedSecondDstAccess = Access::None;
+/// How many ordered pairs of *distinct* texture accesses require one layout.
+///
+/// `sameDirection` selects the pairs that agree about writing: passing `true` counts the pairs
+/// that would give `CombinePassStep` two writes or two reads to choose between, and passing
+/// `false` counts the read/write pairs -- which must not be zero, or the count above is zero for
+/// the wrong reason. Ordered pairs, so every count is even.
+[[nodiscard]] constexpr int LayoutSharingPairs(bool sameDirection) {
+    int pairs = 0;
+    for (const ResourceAccess first : kAllAccesses) {
+        for (const ResourceAccess second : kAllAccesses) {
+            if (first == second) {
+                continue;
+            }
+            const AccessRequirement left  = RequirementOf(first);
+            const AccessRequirement right = RequirementOf(second);
+            // `namesTexture` and not the layout value, which is filler for `IndirectRead` and
+            // happens to be a real layout -- `AccessRequirement::namesTexture` says so.
+            if (!left.namesTexture || !right.namesTexture || left.layout != right.layout) {
+                continue;
+            }
+            pairs += (left.writes == right.writes) == sameDirection ? 1 : 0;
+        }
+    }
+    return pairs;
+}
+
+static_assert(LayoutSharingPairs(true) == 0,
+              "two accesses that agree about writing require one layout -- if both write, a pass "
+              "can declare two writes of one resource and CombinePassStep must decide which one "
+              "its cause blames; if both read, there is a run of reads to merge. "
+              "Private/DeriveBarriers.cpp argues that neither exists");
+static_assert(LayoutSharingPairs(false) != 0,
+              "no layout is required by two accesses at all, so the assertion above is vacuous");
 
 }  // namespace
 
