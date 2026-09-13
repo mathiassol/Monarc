@@ -91,11 +91,11 @@ private:
 /// unfinished job.** `RHI::ICommandList` can do four things -- `Begin`/`End`, `Barrier`,
 /// `BeginRendering`/`EndRendering` and `CopyTextureToBuffer` -- and a pass may do none of
 /// them: the first pair is the frame's, the second is what this class exists to forbid, the
-/// third is the graph's (a pass declares an attachment and the graph begins rendering with
-/// it, which is the point of declaring one), and the fourth names `RHI::TextureHandle` and
-/// `RHI::BufferHandle` directly, where a pass holds a `TextureId`. A4's own pass will record
-/// nothing at all: once Task 4 lands, `Monarc.FirstLight` clears through an attachment
-/// load-op, so its callback has no work.
+/// third is the graph's -- a pass declares an attachment with `PassBuilder::ColorAttachment`
+/// and `RenderGraph::Execute` begins rendering with it, which is the point of declaring one --
+/// and the fourth names `RHI::TextureHandle` and `RHI::BufferHandle` directly, where a pass
+/// holds a `TextureId`. A4's own pass records nothing at all: it clears through an attachment
+/// load-op, so its callback has no work and it declares none.
 ///
 /// **What it will cost, stated rather than predicted.** Each recording call a pass is
 /// eventually allowed becomes one forwarding method here -- a second line to write per call,
@@ -269,6 +269,65 @@ public:
     /// test-and-write pair -- is refused instead; see
     /// `ResourceAccess::DepthStencilAttachmentWrite`.
     [[nodiscard]] Status Write(TextureId texture, ResourceAccess access);
+
+    /// Declares that this pass renders into `texture` as a colour attachment, and how its
+    /// contents are treated at each end of the pass.
+    ///
+    /// **This is how a pass gets an `ICommandList::BeginRendering`, and a pass that declares
+    /// none gets none at all** -- no `BeginRendering`, no `EndRendering`, and its callback runs
+    /// between the barriers either side of it. A compute pass is the obvious future case; a pass
+    /// that only copies is one today. `RenderGraph::Execute` records that.
+    ///
+    /// **Declaration order is slot order, which is to say shader output location.**
+    /// `RHI::RenderingDescription::colorAttachments` is a span whose index is the location a
+    /// fragment shader writes through, so the first call here is location 0 and the order these
+    /// calls are made in is load-bearing rather than cosmetic. `AttachmentInspection::slot`
+    /// reports it.
+    ///
+    /// **It declares the access itself, and there is deliberately no matching `Write` call to
+    /// make beside it.** The load-op already determines the access set exactly: `LoadOp::Clear`
+    /// and `LoadOp::DontCare` overwrite every pixel and are `ResourceAccess::ColorAttachmentWrite`
+    /// alone, and `LoadOp::Load` keeps what is there, which is the read-modify-write pair --
+    /// `ColorAttachmentRead` *and* `ColorAttachmentWrite`, the two accesses `Write`'s own comment
+    /// describes as legal together. Asking a caller for both an attachment and an access would
+    /// create a pair that can disagree -- an attachment cleared on load whose author also
+    /// declared a read is a declaration the derivation would act on and nobody meant -- and this
+    /// module's habit is to make a contradiction unrepresentable rather than diagnosable.
+    ///
+    /// **That cuts against `CreateTexture`'s "creating a resource is not accessing it", and the
+    /// difference is real.** A created resource genuinely might never be touched, which is a
+    /// case culling has to be able to see. An attachment *is* the access: there is no rendering
+    /// instance that names a colour attachment and does not write it.
+    ///
+    /// The store-op is not part of that: `StoreOp::DontCare` discards the result rather than not
+    /// producing it, so it writes exactly as `StoreOp::Store` does.
+    ///
+    /// **Every argument is required, including the clear value**, for the reason `TextureImport`
+    /// argues at length: a defaulted clear value is byte-identical to one an author meant, and
+    /// `{0, 0, 0, 1}` is a plausible-looking black that a `LoadOp::Clear` attachment would
+    /// silently use. A `LoadOp::Load` attachment passes `RHI::ClearColor{}` and that is a visible
+    /// statement at the call site rather than an absence.
+    ///
+    /// **Declaring this resource as an attachment *and* calling `Write` on it is refused**, and
+    /// by `DiagnosticKind::DuplicateAccess` rather than by a rule of its own -- the attachment
+    /// declares the write, so the second one is the same access twice. Which of the two calls is
+    /// refused is whichever came second.
+    ///
+    /// Fails with `ErrorCode::NotFound` for a builder from a previous build and for an id naming
+    /// no resource in this build; with `ErrorCode::InvalidArgument` if the resource's
+    /// `RHI::TextureDescription::usage` lacks `RHI::TextureUsage::ColorAttachment`, if its extent
+    /// has a zero dimension, if this pass already declared that resource as an attachment, if
+    /// this pass already has `RHI::kMaxColorAttachments` of them, or if its extent disagrees with
+    /// this pass's first attachment; and with `ErrorCode::OutOfMemory` if the attachment pool or
+    /// the access pool is full. Each has its own `DiagnosticKind`.
+    ///
+    /// **A refusal from the access half can leave the read declared and the write not**, which
+    /// is the one way this call is not all-or-nothing. It costs nothing: a build with a refused
+    /// declaration does not compile at all, so what is left behind is part of a frame nobody
+    /// gets to run -- the same property the accesses declared before an `AccessPoolExhausted`
+    /// already have.
+    [[nodiscard]] Status ColorAttachment(TextureId texture, RHI::LoadOp loadOp,
+                                         RHI::StoreOp storeOp, RHI::ClearColor clearValue);
 
     /// Sets the callback that records this pass's commands.
     ///

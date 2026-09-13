@@ -66,6 +66,12 @@ const char* ToString(DiagnosticKind kind) {
         case DiagnosticKind::DuplicateImport:         return "DuplicateImport";
         case DiagnosticKind::InvalidImport:           return "InvalidImport";
         case DiagnosticKind::RecordAlreadySet:        return "RecordAlreadySet";
+        case DiagnosticKind::AttachmentPoolExhausted: return "AttachmentPoolExhausted";
+        case DiagnosticKind::TooManyAttachments:      return "TooManyAttachments";
+        case DiagnosticKind::DuplicateAttachment:     return "DuplicateAttachment";
+        case DiagnosticKind::AttachmentNotRenderable: return "AttachmentNotRenderable";
+        case DiagnosticKind::AttachmentExtentEmpty:   return "AttachmentExtentEmpty";
+        case DiagnosticKind::AttachmentExtentConflict: return "AttachmentExtentConflict";
         case DiagnosticKind::AlreadyCompiled:         return "AlreadyCompiled";
         case DiagnosticKind::DependencyCycle:         return "DependencyCycle";
         case DiagnosticKind::TransientNeverWritten:   return "TransientNeverWritten";
@@ -353,11 +359,12 @@ InspectionText WriteInspectionText(const GraphInspection& inspection, std::span<
     // A counts line, because a diff of two reports should say *that* something appeared before
     // it says what -- and because a truncated report still carries the counts, which is how a
     // reader knows what is missing from the end.
-    writer.Line("counts passes={} resources={} accesses={} barriers={} diagnostics={} "
-                "dropped={}\n",
+    writer.Line("counts passes={} resources={} accesses={} attachments={} barriers={} "
+                "diagnostics={} dropped={}\n",
                 inspection.passes.size(), inspection.resources.size(),
-                inspection.accesses.size(), inspection.barriers.size(),
-                inspection.diagnostics.size(), inspection.diagnosticsDropped);
+                inspection.accesses.size(), inspection.attachments.size(),
+                inspection.barriers.size(), inspection.diagnostics.size(),
+                inspection.diagnosticsDropped);
 
     WritePassLines(writer, inspection.passes);
 
@@ -369,6 +376,24 @@ InspectionText WriteInspectionText(const GraphInspection& inspection, std::span<
         const AccessInspection& access = inspection.accesses[i];
         writer.Line("access {} decl-pass={} resource={} access={}\n", i, access.pass,
                     Describe(access.resource).Get(), ToString(access.access));
+    }
+
+    // **After the accesses and before the barriers, which is where an attachment sits in the
+    // frame it describes**: it is a declaration, like an access, and it is what decides that a
+    // `BeginRendering` lands between two of the barriers below.
+    //
+    // The clear value is rendered whatever the load-op, because the report says what was
+    // declared rather than what will be read -- `AttachmentInspection::clearValue` says the
+    // same. Plain `{}` on each float and no presentation type, which is what the note at the
+    // head of this file measured to allocate nothing.
+    for (usize i = 0; i < inspection.attachments.size(); ++i) {
+        const AttachmentInspection& attachment = inspection.attachments[i];
+        writer.Line("attachment {} decl-pass={} resource={} slot={} load={} store={} "
+                    "clear={}/{}/{}/{}\n",
+                    i, attachment.pass, Describe(attachment.resource).Get(), attachment.slot,
+                    RHI::ToString(attachment.loadOp), RHI::ToString(attachment.storeOp),
+                    attachment.clearValue.r, attachment.clearValue.g, attachment.clearValue.b,
+                    attachment.clearValue.a);
     }
 
     for (usize i = 0; i < inspection.barriers.size(); ++i) {

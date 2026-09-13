@@ -115,6 +115,7 @@ TEST_CASE("a fresh graph is declaring, empty, and at build generation zero") {
     CHECK(inspection.passes.empty());
     CHECK(inspection.resources.empty());
     CHECK(inspection.accesses.empty());
+    CHECK(inspection.attachments.empty());
     CHECK(inspection.barriers.empty());
     CHECK(inspection.diagnostics.empty());
     CHECK(inspection.diagnosticsDropped == 0u);
@@ -1267,6 +1268,399 @@ TEST_CASE("a pass with no declarations at all is not an error, and is culled") {
 }
 
 // ---------------------------------------------------------------------------------------
+// Colour attachments: the declaration that gets a pass an `ICommandList::BeginRendering`.
+//
+// **What is under test here is that the load-op decides the access set**, which is the whole
+// design of `PassBuilder::ColorAttachment` -- a caller declares an attachment and does not also
+// declare a matching `Write`, so an attachment and an access cannot disagree. The cases below
+// assert the access set each load-op produces, and that the ones nobody can have meant are
+// refused at the call that made them rather than by `BeginRendering` with a frame half
+// recorded.
+// ---------------------------------------------------------------------------------------
+
+TEST_CASE("a cleared colour attachment declares a write and nothing else") {
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    Result<PassBuilder> pass = graph.AddPass("Clear");
+    REQUIRE(pass.has_value());
+    const Result<TextureId> image = pass->ImportTexture("Swapchain", SwapchainImport());
+    REQUIRE(image.has_value());
+    REQUIRE(pass->ColorAttachment(*image, Monarc::RHI::LoadOp::Clear,
+                                  Monarc::RHI::StoreOp::Store,
+                                  Monarc::RHI::ClearColor{0.25F, 0.5F, 0.75F, 1.0F}));
+
+    const GraphInspection inspection = graph.Inspect();
+
+    // One access, and it is the write. A read here would be the contradiction the design
+    // exists to make unrepresentable: a `LoadOp::Clear` attachment reads nothing, because
+    // every pixel is overwritten before the pass starts.
+    REQUIRE(inspection.accesses.size() == 1u);
+    CHECK(inspection.accesses[0].pass == 0u);
+    CHECK(inspection.accesses[0].resource == *image);
+    CHECK(inspection.accesses[0].access == ResourceAccess::ColorAttachmentWrite);
+
+    REQUIRE(inspection.attachments.size() == 1u);
+    CHECK(inspection.attachments[0].pass == 0u);
+    CHECK(inspection.attachments[0].resource == *image);
+    CHECK(inspection.attachments[0].slot == 0u);
+    CHECK(inspection.attachments[0].loadOp == Monarc::RHI::LoadOp::Clear);
+    CHECK(inspection.attachments[0].storeOp == Monarc::RHI::StoreOp::Store);
+    CHECK(inspection.attachments[0].clearValue ==
+          Monarc::RHI::ClearColor{0.25F, 0.5F, 0.75F, 1.0F});
+}
+
+TEST_CASE("a loaded colour attachment declares the read-modify-write pair") {
+    // **`LoadOp::Load` keeps what is there, which is a read of the attachment**, and the pair
+    // it produces is exactly what `PassBuilder::Write`'s comment calls legal: two accesses to
+    // one resource asking for one layout. The derivation combines them into a single state
+    // carrying both access bits -- see TestDeriveBarriers.cpp -- so this case is what decides
+    // that a `LoadOp::Load` target's barrier is a different barrier from a cleared one's.
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    Result<PassBuilder> pass = graph.AddPass("Blend");
+    REQUIRE(pass.has_value());
+    const Result<TextureId> image = pass->ImportTexture("Swapchain", SwapchainImport());
+    REQUIRE(image.has_value());
+    REQUIRE(pass->ColorAttachment(*image, Monarc::RHI::LoadOp::Load,
+                                  Monarc::RHI::StoreOp::Store, Monarc::RHI::ClearColor{}));
+
+    const GraphInspection inspection = graph.Inspect();
+    REQUIRE(inspection.accesses.size() == 2u);
+    // The read first, which is the order a read-modify-write happens in and the order
+    // `DeclareColorAttachment` declares them in.
+    CHECK(inspection.accesses[0].access == ResourceAccess::ColorAttachmentRead);
+    CHECK(inspection.accesses[1].access == ResourceAccess::ColorAttachmentWrite);
+    CHECK(inspection.accesses[0].resource == *image);
+    CHECK(inspection.accesses[1].resource == *image);
+}
+
+TEST_CASE("a DontCare colour attachment declares a write, like a cleared one") {
+    // `LoadOp::DontCare` says the previous contents are not needed, so nothing is read. The
+    // store-op is what differs from the cleared case and it changes no access:
+    // `StoreOp::DontCare` discards the result rather than declining to produce it.
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    Result<PassBuilder> pass = graph.AddPass("Scratch");
+    REQUIRE(pass.has_value());
+    const Result<TextureId> image = pass->ImportTexture("Swapchain", SwapchainImport());
+    REQUIRE(image.has_value());
+    REQUIRE(pass->ColorAttachment(*image, Monarc::RHI::LoadOp::DontCare,
+                                  Monarc::RHI::StoreOp::DontCare, Monarc::RHI::ClearColor{}));
+
+    const GraphInspection inspection = graph.Inspect();
+    REQUIRE(inspection.accesses.size() == 1u);
+    CHECK(inspection.accesses[0].access == ResourceAccess::ColorAttachmentWrite);
+    REQUIRE(inspection.attachments.size() == 1u);
+    CHECK(inspection.attachments[0].storeOp == Monarc::RHI::StoreOp::DontCare);
+}
+
+TEST_CASE("declaration order is slot order") {
+    // **The property `RHI::RenderingDescription::colorAttachments` makes load-bearing**: the
+    // span's index is the shader output location, so the second call is location 1 whatever
+    // the resources are called or in what order they were declared. Two resources declared in
+    // one order and attached in the other is what makes this case unable to pass by
+    // coincidence.
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    Result<PassBuilder> pass = graph.AddPass("Gbuffer");
+    REQUIRE(pass.has_value());
+    const Result<TextureId> first  = pass->CreateTexture("Albedo", kSwapchainDescription);
+    const Result<TextureId> second = pass->CreateTexture("Normal", kSwapchainDescription);
+    REQUIRE(first.has_value());
+    REQUIRE(second.has_value());
+
+    REQUIRE(pass->ColorAttachment(*second, Monarc::RHI::LoadOp::Clear,
+                                  Monarc::RHI::StoreOp::Store, Monarc::RHI::ClearColor{}));
+    REQUIRE(pass->ColorAttachment(*first, Monarc::RHI::LoadOp::Clear,
+                                  Monarc::RHI::StoreOp::Store, Monarc::RHI::ClearColor{}));
+
+    const GraphInspection inspection = graph.Inspect();
+    REQUIRE(inspection.attachments.size() == 2u);
+    CHECK(inspection.attachments[0].resource == *second);
+    CHECK(inspection.attachments[0].slot == 0u);
+    CHECK(inspection.attachments[1].resource == *first);
+    CHECK(inspection.attachments[1].slot == 1u);
+}
+
+TEST_CASE("two passes each number their own attachment slots from zero") {
+    // The slot is a position within one pass, not within the build. A flat list keyed by pass
+    // is what `AttachmentInspection` is, so this is the case that says the key is read.
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    Result<PassBuilder> first = graph.AddPass("First");
+    REQUIRE(first.has_value());
+    const Result<TextureId> firstImage = first->ImportTexture("SwapchainA", SwapchainImport());
+    REQUIRE(firstImage.has_value());
+    REQUIRE(first->ColorAttachment(*firstImage, Monarc::RHI::LoadOp::Clear,
+                                   Monarc::RHI::StoreOp::Store, Monarc::RHI::ClearColor{}));
+
+    Result<PassBuilder> second = graph.AddPass("Second");
+    REQUIRE(second.has_value());
+    const Result<TextureId> secondImage =
+        second->ImportTexture("SwapchainB", SwapchainImport(TextureHandle::ForTesting(5, 1)));
+    REQUIRE(secondImage.has_value());
+    REQUIRE(second->ColorAttachment(*secondImage, Monarc::RHI::LoadOp::Clear,
+                                    Monarc::RHI::StoreOp::Store, Monarc::RHI::ClearColor{}));
+
+    const GraphInspection inspection = graph.Inspect();
+    REQUIRE(inspection.attachments.size() == 2u);
+    CHECK(inspection.attachments[0].pass == 0u);
+    CHECK(inspection.attachments[0].slot == 0u);
+    CHECK(inspection.attachments[1].pass == 1u);
+    CHECK(inspection.attachments[1].slot == 0u);
+}
+
+TEST_CASE("a colour attachment on a texture that cannot be rendered into is refused") {
+    // The graph has the description for an import as well as for a transient, so a texture
+    // without `TextureUsage::ColorAttachment` is visible here rather than at
+    // `BeginRendering` -- which is the difference between a refusal at the line that made the
+    // mistake and one that arrives with a frame half in the command list.
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    Result<PassBuilder> pass = graph.AddPass("Copy");
+    REQUIRE(pass.has_value());
+    const Result<TextureId> readback = pass->CreateTexture(
+        "Readback", TextureDescription{Monarc::RHI::Extent2D{1280, 720},
+                                       Format::B8G8R8A8_UNORM, TextureUsage::TransferSource});
+    REQUIRE(readback.has_value());
+
+    const Status refused =
+        pass->ColorAttachment(*readback, Monarc::RHI::LoadOp::Clear,
+                              Monarc::RHI::StoreOp::Store, Monarc::RHI::ClearColor{});
+    REQUIRE_FALSE(refused.has_value());
+    CHECK(refused.error().code == ErrorCode::InvalidArgument);
+
+    const GraphInspection inspection = graph.Inspect();
+    REQUIRE(inspection.diagnostics.size() == 1u);
+    CHECK(inspection.diagnostics[0].kind == DiagnosticKind::AttachmentNotRenderable);
+    CHECK(inspection.diagnostics[0].pass == 0u);
+    CHECK(inspection.diagnostics[0].resource == *readback);
+    // Nothing was declared: not the attachment, and not the write it would have implied.
+    CHECK(inspection.attachments.empty());
+    CHECK(inspection.accesses.empty());
+}
+
+TEST_CASE("a colour attachment on an imported texture with an empty extent is refused") {
+    // **Only an import can carry one this far**, which is why the case imports rather than
+    // creates: `IDevice::CreateTexture` refuses an empty extent, so a transient that reached
+    // `BeginRendering` with one would have failed at creation first. The import's description
+    // is the caller's word about a texture the graph did not make.
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    Result<PassBuilder> pass = graph.AddPass("Clear");
+    REQUIRE(pass.has_value());
+    const Result<TextureId> image = pass->ImportTexture(
+        "Swapchain",
+        TextureImport(kSwapchainImage,
+                      TextureDescription{Monarc::RHI::Extent2D{0, 720}, Format::B8G8R8A8_UNORM,
+                                         TextureUsage::ColorAttachment},
+                      kSwapchainIncoming, kSwapchainOutgoing));
+    REQUIRE(image.has_value());
+
+    const Status refused = pass->ColorAttachment(*image, Monarc::RHI::LoadOp::Clear,
+                                                 Monarc::RHI::StoreOp::Store,
+                                                 Monarc::RHI::ClearColor{});
+    REQUIRE_FALSE(refused.has_value());
+    CHECK(refused.error().code == ErrorCode::InvalidArgument);
+
+    const GraphInspection inspection = graph.Inspect();
+    REQUIRE(inspection.diagnostics.size() == 1u);
+    CHECK(inspection.diagnostics[0].kind == DiagnosticKind::AttachmentExtentEmpty);
+    CHECK(inspection.attachments.empty());
+}
+
+TEST_CASE("one pass cannot declare the same resource as an attachment twice") {
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    Result<PassBuilder> pass = graph.AddPass("Clear");
+    REQUIRE(pass.has_value());
+    const Result<TextureId> image = pass->ImportTexture("Swapchain", SwapchainImport());
+    REQUIRE(image.has_value());
+    REQUIRE(pass->ColorAttachment(*image, Monarc::RHI::LoadOp::Clear,
+                                  Monarc::RHI::StoreOp::Store, Monarc::RHI::ClearColor{}));
+
+    const Status again = pass->ColorAttachment(*image, Monarc::RHI::LoadOp::Load,
+                                               Monarc::RHI::StoreOp::Store,
+                                               Monarc::RHI::ClearColor{});
+    REQUIRE_FALSE(again.has_value());
+    CHECK(again.error().code == ErrorCode::InvalidArgument);
+
+    const GraphInspection inspection = graph.Inspect();
+    REQUIRE(inspection.diagnostics.size() == 1u);
+    CHECK(inspection.diagnostics[0].kind == DiagnosticKind::DuplicateAttachment);
+    // **Refused as the duplicate attachment and not as the duplicate access**, which is what
+    // the check order buys: the second call's load-op differs, so its accesses are not the
+    // first call's and `DuplicateAccess` would not have fired on the read. One slot, one
+    // resource, and the mistake named as the mistake.
+    CHECK(inspection.attachments.size() == 1u);
+    CHECK(inspection.accesses.size() == 1u);
+}
+
+TEST_CASE("declaring an attachment and a matching Write is refused as a duplicate access") {
+    // **The pair `PassBuilder::ColorAttachment` exists to prevent, refused by the rule that was
+    // already there.** The attachment declares the write, so the `Write` beside it is the same
+    // access twice -- which is `DuplicateAccess`, and it does not need a rule of its own.
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    Result<PassBuilder> pass = graph.AddPass("Clear");
+    REQUIRE(pass.has_value());
+    const Result<TextureId> image = pass->ImportTexture("Swapchain", SwapchainImport());
+    REQUIRE(image.has_value());
+    REQUIRE(pass->ColorAttachment(*image, Monarc::RHI::LoadOp::Clear,
+                                  Monarc::RHI::StoreOp::Store, Monarc::RHI::ClearColor{}));
+
+    const Status again = pass->Write(*image, ResourceAccess::ColorAttachmentWrite);
+    REQUIRE_FALSE(again.has_value());
+    CHECK(again.error().code == ErrorCode::AlreadyExists);
+
+    const GraphInspection inspection = graph.Inspect();
+    REQUIRE(inspection.diagnostics.size() == 1u);
+    CHECK(inspection.diagnostics[0].kind == DiagnosticKind::DuplicateAccess);
+}
+
+TEST_CASE("attachments of one pass must agree on extent") {
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    Result<PassBuilder> pass = graph.AddPass("Gbuffer");
+    REQUIRE(pass.has_value());
+    const Result<TextureId> full = pass->CreateTexture("Full", kSwapchainDescription);
+    const Result<TextureId> half = pass->CreateTexture(
+        "Half", TextureDescription{Monarc::RHI::Extent2D{640, 360}, Format::B8G8R8A8_UNORM,
+                                   TextureUsage::ColorAttachment});
+    REQUIRE(full.has_value());
+    REQUIRE(half.has_value());
+
+    REQUIRE(pass->ColorAttachment(*full, Monarc::RHI::LoadOp::Clear,
+                                  Monarc::RHI::StoreOp::Store, Monarc::RHI::ClearColor{}));
+    const Status refused = pass->ColorAttachment(*half, Monarc::RHI::LoadOp::Clear,
+                                                 Monarc::RHI::StoreOp::Store,
+                                                 Monarc::RHI::ClearColor{});
+    REQUIRE_FALSE(refused.has_value());
+    CHECK(refused.error().code == ErrorCode::InvalidArgument);
+
+    const GraphInspection inspection = graph.Inspect();
+    REQUIRE(inspection.diagnostics.size() == 1u);
+    CHECK(inspection.diagnostics[0].kind == DiagnosticKind::AttachmentExtentConflict);
+    CHECK(inspection.diagnostics[0].resource == *half);
+    CHECK(inspection.attachments.size() == 1u);
+}
+
+TEST_CASE("a pass cannot declare more than kMaxColorAttachments") {
+    // The bound `BeginPassRendering` relies on: it builds a fixed array of exactly this many,
+    // and this refusal is what keeps it from overflowing. `kMaxColorAttachments + 1` resources
+    // are declared so that the refusal is about the count and not about a resource.
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    Result<PassBuilder> pass = graph.AddPass("TooMany");
+    REQUIRE(pass.has_value());
+
+    for (Monarc::usize i = 0; i < Monarc::RHI::kMaxColorAttachments; ++i) {
+        const Result<TextureId> target = pass->CreateTexture("Target", kSwapchainDescription);
+        REQUIRE(target.has_value());
+        REQUIRE(pass->ColorAttachment(*target, Monarc::RHI::LoadOp::Clear,
+                                      Monarc::RHI::StoreOp::Store, Monarc::RHI::ClearColor{}));
+    }
+
+    const Result<TextureId> extra = pass->CreateTexture("Extra", kSwapchainDescription);
+    REQUIRE(extra.has_value());
+    const Status refused = pass->ColorAttachment(*extra, Monarc::RHI::LoadOp::Clear,
+                                                 Monarc::RHI::StoreOp::Store,
+                                                 Monarc::RHI::ClearColor{});
+    REQUIRE_FALSE(refused.has_value());
+    CHECK(refused.error().code == ErrorCode::InvalidArgument);
+
+    const GraphInspection inspection = graph.Inspect();
+    REQUIRE(inspection.diagnostics.size() == 1u);
+    CHECK(inspection.diagnostics[0].kind == DiagnosticKind::TooManyAttachments);
+    CHECK(inspection.attachments.size() == Monarc::RHI::kMaxColorAttachments);
+}
+
+TEST_CASE("a full attachment pool refuses rather than growing") {
+    SystemAllocator    allocator;
+    RenderGraph::Config config{};
+    config.maxAttachments = 1;
+    RenderGraph graph(allocator, config);
+
+    Result<PassBuilder> first = graph.AddPass("First");
+    REQUIRE(first.has_value());
+    const Result<TextureId> firstTarget = first->CreateTexture("A", kSwapchainDescription);
+    REQUIRE(firstTarget.has_value());
+    REQUIRE(first->ColorAttachment(*firstTarget, Monarc::RHI::LoadOp::Clear,
+                                   Monarc::RHI::StoreOp::Store, Monarc::RHI::ClearColor{}));
+
+    Result<PassBuilder> second = graph.AddPass("Second");
+    REQUIRE(second.has_value());
+    const Result<TextureId> secondTarget = second->CreateTexture("B", kSwapchainDescription);
+    REQUIRE(secondTarget.has_value());
+    const Status refused = second->ColorAttachment(*secondTarget, Monarc::RHI::LoadOp::Clear,
+                                                   Monarc::RHI::StoreOp::Store,
+                                                   Monarc::RHI::ClearColor{});
+    REQUIRE_FALSE(refused.has_value());
+    CHECK(refused.error().code == ErrorCode::OutOfMemory);
+
+    const GraphInspection inspection = graph.Inspect();
+    REQUIRE(inspection.diagnostics.size() == 1u);
+    CHECK(inspection.diagnostics[0].kind == DiagnosticKind::AttachmentPoolExhausted);
+    CHECK(inspection.attachments.size() == 1u);
+    // **Refused before the access was declared**, which is the order that keeps a full pool
+    // from leaving a write behind for a resource with no attachment.
+    CHECK(inspection.accesses.size() == 1u);
+}
+
+TEST_CASE("an attachment from a builder kept across Reset is refused") {
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    Result<PassBuilder> stale = graph.AddPass("Stale");
+    REQUIRE(stale.has_value());
+    const Result<TextureId> image = stale->ImportTexture("Swapchain", SwapchainImport());
+    REQUIRE(image.has_value());
+
+    graph.Reset();
+
+    const Status refused = stale->ColorAttachment(*image, Monarc::RHI::LoadOp::Clear,
+                                                  Monarc::RHI::StoreOp::Store,
+                                                  Monarc::RHI::ClearColor{});
+    REQUIRE_FALSE(refused.has_value());
+    CHECK(refused.error().code == ErrorCode::NotFound);
+
+    const GraphInspection inspection = graph.Inspect();
+    REQUIRE(inspection.diagnostics.size() == 1u);
+    CHECK(inspection.diagnostics[0].kind == DiagnosticKind::UnknownPass);
+}
+
+TEST_CASE("an attachment naming no resource in this build is refused") {
+    SystemAllocator allocator;
+    RenderGraph     graph(allocator, RenderGraph::Config{});
+
+    Result<PassBuilder> pass = graph.AddPass("Clear");
+    REQUIRE(pass.has_value());
+
+    const TextureId nothing = TextureId::ForTesting(7, graph.BuildGeneration());
+    const Status    refused = pass->ColorAttachment(nothing, Monarc::RHI::LoadOp::Clear,
+                                                    Monarc::RHI::StoreOp::Store,
+                                                    Monarc::RHI::ClearColor{});
+    REQUIRE_FALSE(refused.has_value());
+    CHECK(refused.error().code == ErrorCode::NotFound);
+
+    const GraphInspection inspection = graph.Inspect();
+    REQUIRE(inspection.diagnostics.size() == 1u);
+    CHECK(inspection.diagnostics[0].kind == DiagnosticKind::UnknownResource);
+    CHECK(inspection.diagnostics[0].resource == nothing);
+}
+
+// ---------------------------------------------------------------------------------------
 // ADR-0006's central promise, kept by the compiler.
 //
 // **"A pass may not record a barrier" is a `static_assert` here rather than a rule in a
@@ -1422,6 +1816,7 @@ static_assert(!kCanGetCommandList<PassCommandList>,
 static_assert(!kCanReachCommandListPointer<PassCommandList>,
               "PassCommandList::m_commands is reachable -- a pass can barrier through the "
               "wrapped pointer without needing an accessor at all");
+
 
 // ---------------------------------------------------------------------------------------
 // `TextureImport` requires every field, which is the property `RHI::TextureBarrier` argues for

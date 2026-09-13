@@ -75,7 +75,7 @@ public:
     /// `GraphDiagnostic` naming the pass. It cannot lurk, and the person who accepted the
     /// default is the person who finds it.
     ///
-    /// Two of the five are not the caller's to choose in any case: `maxBarriers` and
+    /// Two of the six are not the caller's to choose in any case: `maxBarriers` and
     /// `maxDiagnostics` size pools the *graph* fills, so a caller asked to pick one would be
     /// predicting the derivation's own output. And the nearer precedent in this tree already
     /// defaults everything -- `RHI::DeviceConfig`'s `maxTextures` and `maxBuffers`, which is
@@ -92,6 +92,18 @@ public:
         /// per-pass cap would have to be sized for the widest one and paid for by every
         /// other.
         u32 maxAccesses = 512;
+
+        /// Total colour attachments across the whole build. `maxAccesses`' argument for a flat
+        /// budget applies unchanged, with a second reason of its own: a pass is capped at
+        /// `RHI::kMaxColorAttachments` by `DiagnosticKind::TooManyAttachments` whatever this
+        /// number is, so a per-pass field would be a second, lower cap for a caller to get
+        /// wrong.
+        ///
+        /// Default 64 rather than `maxAccesses`' 512, because an attachment is far rarer than an
+        /// access -- every attachment declares one or two accesses, and most accesses are not
+        /// attachments at all. A build that overflows it is refused with
+        /// `DiagnosticKind::AttachmentPoolExhausted` at the declaration that overflowed.
+        u32 maxAttachments = 64;
 
         /// Capacity of the derived-barrier list, filled by the derivation in
         /// Private/DeriveBarriers.cpp. Allocated at construction rather than when the first
@@ -250,6 +262,9 @@ private:
                                                   const TextureImport& import);
     [[nodiscard]] Status DeclareAccess(u32 pass, u32 generation, TextureId texture,
                                        ResourceAccess access, bool writing);
+    [[nodiscard]] Status DeclareColorAttachment(u32 pass, u32 generation, TextureId texture,
+                                                RHI::LoadOp loadOp, RHI::StoreOp storeOp,
+                                                const RHI::ClearColor& clearValue);
     [[nodiscard]] Result<void*> ClaimRecordStorage(u32 pass, u32 generation);
 
     void CommitRecord(u32 pass, Detail::IPassRecord* record);
@@ -426,12 +441,13 @@ private:
     u32        m_buildGeneration    = 0;
     u32        m_diagnosticsDropped = 0;
 
-    Array<PassInspection>     m_passes;
-    Array<ResourceInspection> m_resources;
-    Array<AccessInspection>   m_accesses;
-    Array<DerivedBarrier>     m_barriers;
-    Array<GraphDiagnostic>    m_diagnostics;
-    Array<PassRecordSlot>     m_records;
+    Array<PassInspection>       m_passes;
+    Array<ResourceInspection>   m_resources;
+    Array<AccessInspection>     m_accesses;
+    Array<AttachmentInspection> m_attachments;
+    Array<DerivedBarrier>       m_barriers;
+    Array<GraphDiagnostic>      m_diagnostics;
+    Array<PassRecordSlot>       m_records;
 
     // ---------------------------------------------------------------------------------
     // Compilation's scratch state.

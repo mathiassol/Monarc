@@ -199,6 +199,142 @@ Status RenderGraph::DeclareAccess(u32 pass, u32 generation, TextureId texture,
     return {};
 }
 
+Status RenderGraph::DeclareColorAttachment(u32 pass, u32 generation, TextureId texture,
+                                           RHI::LoadOp loadOp, RHI::StoreOp storeOp,
+                                           const RHI::ClearColor& clearValue) {
+    if (!IsCurrentPass(pass, generation)) {
+        return std::unexpected(Refuse(DiagnosticKind::UnknownPass, ErrorCode::NotFound,
+                                      "PassBuilder::ColorAttachment: this builder names no pass "
+                                      "in the current build",
+                                      pass, TextureId{}));
+    }
+
+    const usize resource = FindResource(texture);
+    if (resource == m_resources.Size()) {
+        return std::unexpected(Refuse(DiagnosticKind::UnknownResource, ErrorCode::NotFound,
+                                      "PassBuilder::ColorAttachment: that id names no resource "
+                                      "in the current build",
+                                      pass, texture));
+    }
+
+    // **The description is what makes both of the next two checkable here rather than at record
+    // time**, and the graph has one for every resource -- supplied by the creating pass for a
+    // transient and by the importing pass for an import. `ICommandList::BeginRendering` refuses
+    // both conditions too, and arriving there means finding out with a frame already half
+    // recorded; see `DiagnosticKind::TooManyAttachments` for the argument in full.
+    const RHI::TextureDescription& description = m_resources[resource].description;
+    if (!RHI::HasAny(description.usage, RHI::TextureUsage::ColorAttachment)) {
+        return std::unexpected(Refuse(DiagnosticKind::AttachmentNotRenderable,
+                                      ErrorCode::InvalidArgument,
+                                      "PassBuilder::ColorAttachment: that resource was not "
+                                      "described with TextureUsage::ColorAttachment",
+                                      pass, texture));
+    }
+    if (description.extent.width == 0 || description.extent.height == 0) {
+        return std::unexpected(Refuse(DiagnosticKind::AttachmentExtentEmpty,
+                                      ErrorCode::InvalidArgument,
+                                      "PassBuilder::ColorAttachment: that resource's extent has "
+                                      "a zero dimension",
+                                      pass, texture));
+    }
+
+    // **One sweep over this pass's attachments, and it answers all three of the remaining
+    // questions**: whether this resource is already one, how many slots are taken, and what
+    // extent the pass's first attachment fixed. Linear over a list bounded by
+    // `RHI::kMaxColorAttachments` per pass, which is the same shape `DeclareAccess`' sweep has.
+    u32       slot        = 0;
+    TextureId firstOfPass = {};
+    for (const AttachmentInspection& existing : m_attachments) {
+        if (existing.pass != pass) {
+            continue;
+        }
+        if (existing.resource == texture) {
+            return std::unexpected(Refuse(DiagnosticKind::DuplicateAttachment,
+                                          ErrorCode::InvalidArgument,
+                                          "PassBuilder::ColorAttachment: this pass already "
+                                          "declared that resource as a colour attachment",
+                                          pass, texture));
+        }
+        if (slot == 0) {
+            firstOfPass = existing.resource;
+        }
+        ++slot;
+    }
+
+    if (slot >= static_cast<u32>(RHI::kMaxColorAttachments)) {
+        return std::unexpected(Refuse(DiagnosticKind::TooManyAttachments,
+                                      ErrorCode::InvalidArgument,
+                                      "PassBuilder::ColorAttachment: this pass already has "
+                                      "RHI::kMaxColorAttachments colour attachments",
+                                      pass, texture));
+    }
+
+    // **The extent is read from the resources and never from the caller, which is why a
+    // disagreement is a refusal and not an arbitration.** `RHI::RenderingDescription` has
+    // exactly one extent, so a pass whose attachments disagree has no rendering description at
+    // all, and there is no third value for the graph to prefer.
+    if (firstOfPass.IsValid() &&
+        m_resources[firstOfPass.index].description.extent != description.extent) {
+        return std::unexpected(Refuse(DiagnosticKind::AttachmentExtentConflict,
+                                      ErrorCode::InvalidArgument,
+                                      "PassBuilder::ColorAttachment: that resource's extent "
+                                      "disagrees with this pass's first colour attachment",
+                                      pass, texture));
+    }
+
+    // Checked after the sweep, which is the order `DeclareAccess` and `DeclareImport` both use
+    // and for their reason: a full pool and a duplicate at once is better reported as the
+    // duplicate, because the duplicate is the mistake.
+    if (m_attachments.Size() >= m_config.maxAttachments) {
+        return std::unexpected(Refuse(DiagnosticKind::AttachmentPoolExhausted,
+                                      ErrorCode::OutOfMemory,
+                                      "PassBuilder::ColorAttachment: attachment pool exhausted",
+                                      pass, texture));
+    }
+
+    // **The accesses the load-op implies, declared before the attachment is recorded.** A
+    // `default`-less switch, so a new `RHI::LoadOp` is a compile error here rather than an
+    // attachment whose access set was guessed -- the rule `RequirementOf` in Access.h follows
+    // for its own map.
+    //
+    // The read comes first for `LoadOp::Load`, because that is the order a read-modify-write
+    // attachment happens in and the order `GraphInspection::accesses` will show. Neither the
+    // derivation nor the ordering depends on it: a pass's accesses to one resource are combined
+    // into one state.
+    //
+    // `StoreOp` contributes nothing. `StoreOp::DontCare` discards the result rather than
+    // declining to produce it, so it writes exactly as `StoreOp::Store` does.
+    bool loads = false;
+    switch (loadOp) {
+        case RHI::LoadOp::Load:     loads = true; break;
+        case RHI::LoadOp::Clear:    loads = false; break;
+        case RHI::LoadOp::DontCare: loads = false; break;
+    }
+
+    if (loads) {
+        if (Status read = DeclareAccess(pass, generation, texture,
+                                        ResourceAccess::ColorAttachmentRead, false);
+            !read) {
+            return read;
+        }
+    }
+    if (Status written =
+            DeclareAccess(pass, generation, texture, ResourceAccess::ColorAttachmentWrite, true);
+        !written) {
+        return written;
+    }
+
+    AttachmentInspection declared{};
+    declared.pass       = pass;
+    declared.resource   = texture;
+    declared.slot       = slot;
+    declared.loadOp     = loadOp;
+    declared.storeOp    = storeOp;
+    declared.clearValue = clearValue;
+    m_attachments.Push(declared);
+    return {};
+}
+
 usize RenderGraph::FindResource(TextureId texture) const {
     // `m_resources.Size()` is the not-found answer, which is also why an index equal to it is
     // out of range: the two coincide rather than one being a special case of the other.

@@ -97,6 +97,9 @@ constexpr DiagnosticKind kAllDiagnosticKinds[] = {
     DiagnosticKind::AccessNamesNoTexture,  DiagnosticKind::DuplicateAccess,
     DiagnosticKind::AccessLayoutConflict,  DiagnosticKind::DuplicateImport,
     DiagnosticKind::InvalidImport,         DiagnosticKind::RecordAlreadySet,
+    DiagnosticKind::AttachmentPoolExhausted, DiagnosticKind::TooManyAttachments,
+    DiagnosticKind::DuplicateAttachment,   DiagnosticKind::AttachmentNotRenderable,
+    DiagnosticKind::AttachmentExtentEmpty, DiagnosticKind::AttachmentExtentConflict,
     DiagnosticKind::AlreadyCompiled,       DiagnosticKind::DependencyCycle,
     DiagnosticKind::TransientNeverWritten, DiagnosticKind::UnorderedOverwrite,
     DiagnosticKind::BarrierPoolExhausted,
@@ -166,6 +169,12 @@ constexpr DiagnosticKind kAllDiagnosticKinds[] = {
         case DiagnosticKind::DuplicateImport:
         case DiagnosticKind::InvalidImport:
         case DiagnosticKind::RecordAlreadySet:
+        case DiagnosticKind::AttachmentPoolExhausted:
+        case DiagnosticKind::TooManyAttachments:
+        case DiagnosticKind::DuplicateAttachment:
+        case DiagnosticKind::AttachmentNotRenderable:
+        case DiagnosticKind::AttachmentExtentEmpty:
+        case DiagnosticKind::AttachmentExtentConflict:
         case DiagnosticKind::AlreadyCompiled:
         case DiagnosticKind::DependencyCycle:
         case DiagnosticKind::TransientNeverWritten:
@@ -254,7 +263,7 @@ TEST_CASE("an empty declaring graph renders its header and nothing else") {
     char buffer[512] = {};
     CHECK(Render(graph.Inspect(), buffer) ==
           "graph build=0 phase=Declaring\n"
-          "counts passes=0 resources=0 accesses=0 barriers=0 diagnostics=0 dropped=0\n");
+          "counts passes=0 resources=0 accesses=0 attachments=0 barriers=0 diagnostics=0 dropped=0\n");
 }
 
 TEST_CASE("the FirstLight frame renders exactly this text") {
@@ -280,7 +289,7 @@ TEST_CASE("the FirstLight frame renders exactly this text") {
     char buffer[2048] = {};
     CHECK(Render(graph.Inspect(), buffer) ==
           "graph build=0 phase=Compiled\n"
-          "counts passes=1 resources=1 accesses=1 barriers=2 diagnostics=0 dropped=0\n"
+          "counts passes=1 resources=1 accesses=1 attachments=0 barriers=2 diagnostics=0 dropped=0\n"
           "pass 0 order=0 queue=Graphics culled=no record=no name=\"Present\"\n"
           "resource 0 id=0:0 origin=Imported format=B8G8R8A8_UNORM extent=1280x720 usage=0x1 "
           "lifetime=0..0 alias=none name=\"Swapchain\"\n"
@@ -344,7 +353,7 @@ TEST_CASE("of two resources, only the imported one renders an import line") {
     char buffer[2048] = {};
     CHECK(Render(graph.Inspect(), buffer) ==
           "graph build=0 phase=Compiled\n"
-          "counts passes=1 resources=2 accesses=2 barriers=3 diagnostics=0 dropped=0\n"
+          "counts passes=1 resources=2 accesses=2 attachments=0 barriers=3 diagnostics=0 dropped=0\n"
           "pass 0 order=0 queue=Graphics culled=no record=no name=\"Offscreen\"\n"
           "resource 0 id=0:0 origin=Transient format=B8G8R8A8_UNORM extent=1280x720 usage=0x1 "
           "lifetime=0..0 alias=none name=\"Target\"\n"
@@ -409,7 +418,7 @@ TEST_CASE("an access line renders its pass, not its own row number") {
     char buffer[2048] = {};
     CHECK(Render(graph.Inspect(), buffer) ==
           "graph build=0 phase=Compiled\n"
-          "counts passes=2 resources=2 accesses=3 barriers=4 diagnostics=0 dropped=0\n"
+          "counts passes=2 resources=2 accesses=3 attachments=0 barriers=4 diagnostics=0 dropped=0\n"
           "pass 0 order=0 queue=Graphics culled=no record=no name=\"Producer\"\n"
           "pass 1 order=1 queue=Graphics culled=no record=no name=\"Consumer\"\n"
           "resource 0 id=0:0 origin=Transient format=B8G8R8A8_UNORM extent=1280x720 usage=0x1 "
@@ -482,7 +491,7 @@ TEST_CASE("the resource lines render their own row number, not the id's index") 
     char buffer[2048] = {};
     CHECK(Render(inspection, buffer) ==
           "graph build=3 phase=Compiled\n"
-          "counts passes=0 resources=2 accesses=0 barriers=0 diagnostics=0 dropped=0\n"
+          "counts passes=0 resources=2 accesses=0 attachments=0 barriers=0 diagnostics=0 dropped=0\n"
           "resource 0 id=5:3 origin=Transient format=B8G8R8A8_UNORM extent=1280x720 usage=0x1 "
           "lifetime=none..none alias=none name=\"Scratch\"\n"
           "resource 1 id=2:3 origin=Imported format=B8G8R8A8_UNORM extent=1280x720 usage=0x1 "
@@ -522,7 +531,7 @@ TEST_CASE("the pass lines come out in execution order, culled passes last") {
     char buffer[1024] = {};
     CHECK(Render(inspection, buffer) ==
           "graph build=0 phase=Compiled\n"
-          "counts passes=3 resources=0 accesses=0 barriers=0 diagnostics=0 dropped=0\n"
+          "counts passes=3 resources=0 accesses=0 attachments=0 barriers=0 diagnostics=0 dropped=0\n"
           "pass 1 order=0 queue=Graphics culled=no record=no name=\"Early\"\n"
           "pass 0 order=1 queue=Graphics culled=no record=no name=\"Late\"\n"
           "pass 2 order=none queue=Graphics culled=yes record=no name=\"Culled\"\n");
@@ -544,7 +553,7 @@ TEST_CASE("passes with no order yet keep declaration order") {
     char buffer[1024] = {};
     CHECK(Render(graph.Inspect(), buffer) ==
           "graph build=0 phase=Declaring\n"
-          "counts passes=3 resources=0 accesses=0 barriers=0 diagnostics=0 dropped=0\n"
+          "counts passes=3 resources=0 accesses=0 attachments=0 barriers=0 diagnostics=0 dropped=0\n"
           "pass 0 order=none queue=Graphics culled=no record=no name=\"First\"\n"
           "pass 1 order=none queue=Graphics culled=no record=no name=\"Second\"\n"
           "pass 2 order=none queue=Graphics culled=no record=no name=\"Third\"\n");
@@ -562,7 +571,7 @@ TEST_CASE("a refused declaration renders as a diagnostic line") {
     char buffer[1024] = {};
     CHECK(Render(graph.Inspect(), buffer) ==
           "graph build=0 phase=CompileFailed\n"
-          "counts passes=1 resources=0 accesses=0 barriers=0 diagnostics=1 dropped=0\n"
+          "counts passes=1 resources=0 accesses=0 attachments=0 barriers=0 diagnostics=1 dropped=0\n"
           "pass 0 order=none queue=Graphics culled=no record=no name=\"Consumer\"\n"
           "diagnostic 0 kind=UnknownResource code=NotFound decl-pass=0 resource=7:0 group=none "
           "message=\"PassBuilder::Read/Write: that id names no resource in the current "
@@ -626,7 +635,7 @@ TEST_CASE("diagnostics of one report carry their group, and overlapping reports 
     char buffer[2048] = {};
     CHECK(Render(inspection, buffer) ==
           "graph build=0 phase=CompileFailed\n"
-          "counts passes=0 resources=0 accesses=0 barriers=0 diagnostics=5 dropped=2\n"
+          "counts passes=0 resources=0 accesses=0 attachments=0 barriers=0 diagnostics=5 dropped=2\n"
           "diagnostic 0 kind=UnknownPass code=NotFound decl-pass=1 resource=none group=0 "
           "message=\"in a cycle\"\n"
           "diagnostic 1 kind=UnknownPass code=NotFound decl-pass=2 resource=none group=0 "
@@ -696,7 +705,7 @@ TEST_CASE("a hand-built inspection renders fields no compiled graph puts togethe
     char buffer[2048] = {};
     CHECK(Render(inspection, buffer) ==
           "graph build=3 phase=Compiled\n"
-          "counts passes=2 resources=1 accesses=0 barriers=1 diagnostics=0 dropped=5\n"
+          "counts passes=2 resources=1 accesses=0 attachments=0 barriers=1 diagnostics=0 dropped=5\n"
           "pass 0 order=0 queue=Graphics culled=no record=yes name=\"Depth\"\n"
           "pass 1 order=none queue=Graphics culled=yes record=no name=\"Culled\"\n"
           "resource 0 id=0:3 origin=Transient format=B8G8R8A8_UNORM extent=1280x720 usage=0x1 "

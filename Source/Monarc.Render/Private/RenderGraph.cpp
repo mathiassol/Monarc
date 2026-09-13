@@ -46,6 +46,7 @@ RenderGraph::RenderGraph(IAllocator& allocator, const Config& config)
       m_passes(allocator),
       m_resources(allocator),
       m_accesses(allocator),
+      m_attachments(allocator),
       m_barriers(allocator),
       m_diagnostics(allocator),
       m_records(allocator),
@@ -66,6 +67,7 @@ RenderGraph::RenderGraph(IAllocator& allocator, const Config& config)
     m_passes.Reserve(m_config.maxPasses);
     m_resources.Reserve(m_config.maxResources);
     m_accesses.Reserve(m_config.maxAccesses);
+    m_attachments.Reserve(m_config.maxAttachments);
     m_barriers.Reserve(m_config.maxBarriers);
     m_diagnostics.Reserve(m_config.maxDiagnostics);
 
@@ -103,6 +105,7 @@ void RenderGraph::Reset() {
     m_passes.Clear();
     m_resources.Clear();
     m_accesses.Clear();
+    m_attachments.Clear();
     m_barriers.Clear();
     m_diagnostics.Clear();
 
@@ -164,6 +167,8 @@ GraphInspection RenderGraph::Inspect() const {
     inspection.resources =
         std::span<const ResourceInspection>(m_resources.Data(), m_resources.Size());
     inspection.accesses = std::span<const AccessInspection>(m_accesses.Data(), m_accesses.Size());
+    inspection.attachments =
+        std::span<const AttachmentInspection>(m_attachments.Data(), m_attachments.Size());
     inspection.barriers = std::span<const DerivedBarrier>(m_barriers.Data(), m_barriers.Size());
     inspection.diagnostics =
         std::span<const GraphDiagnostic>(m_diagnostics.Data(), m_diagnostics.Size());
@@ -285,6 +290,12 @@ Status PassBuilder::Read(TextureId texture, ResourceAccess access) {
 
 Status PassBuilder::Write(TextureId texture, ResourceAccess access) {
     return m_graph->DeclareAccess(m_pass, m_generation, texture, access, true);
+}
+
+Status PassBuilder::ColorAttachment(TextureId texture, RHI::LoadOp loadOp, RHI::StoreOp storeOp,
+                                    RHI::ClearColor clearValue) {
+    return m_graph->DeclareColorAttachment(m_pass, m_generation, texture, loadOp, storeOp,
+                                           clearValue);
 }
 
 Result<void*> PassBuilder::ClaimRecordStorage() const {

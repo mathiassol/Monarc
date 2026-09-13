@@ -310,6 +310,45 @@ struct AccessInspection {
     constexpr bool operator==(const AccessInspection&) const = default;
 };
 
+/// One colour attachment one pass declared.
+///
+/// **A flat list keyed by pass, exactly as `AccessInspection` is, and for its reason**: a pass
+/// declares between zero and `RHI::kMaxColorAttachments` of these, so a fixed array inside
+/// `PassInspection` would pay for eight rows in every pass of every build to hold the one A4
+/// declares. Filtering this list by `pass` is what `Execute` does to build one
+/// `RHI::RenderingDescription`.
+///
+/// **There is deliberately no `PassInspection::hasAttachments` beside `hasRecord`.** The two
+/// look alike and are not: a recording callback is 64 bytes of type-erased callable that the
+/// report cannot hold, so `hasRecord` is the only way to see that a pass has one -- where an
+/// attachment *is* in the report, and a bool would be a second copy of a fact this list already
+/// states, free to disagree with it.
+struct AttachmentInspection {
+    /// Index into `GraphInspection::passes` -- declaration order, not execution order.
+    u32 pass = 0;
+
+    TextureId resource = {};
+
+    /// **This attachment's shader output location, and declaration order is what sets it.**
+    /// `RHI::RenderingDescription::colorAttachments` is a span whose index is the location a
+    /// fragment shader writes through, so the order a pass declares its attachments in is
+    /// load-bearing rather than cosmetic -- the first `PassBuilder::ColorAttachment` call is
+    /// location 0. Stored rather than recovered by counting this list, because the number is
+    /// what the declaration *meant* and because it is the value
+    /// `DiagnosticKind::TooManyAttachments` bounds.
+    u32 slot = 0;
+
+    RHI::LoadOp  loadOp  = RHI::LoadOp::Load;
+    RHI::StoreOp storeOp = RHI::StoreOp::Store;
+
+    /// Read only when `loadOp` is `RHI::LoadOp::Clear`, exactly as
+    /// `RHI::ColorAttachment::clearValue` is. Reported whatever the load-op, because the report
+    /// says what was declared rather than what will be read.
+    RHI::ClearColor clearValue = {};
+
+    constexpr bool operator==(const AttachmentInspection&) const = default;
+};
+
 /// What put one side of a derived barrier where it is.
 enum class BarrierCauseKind : u32 {
     /// An imported resource's declared incoming state -- the before side of its first
@@ -406,9 +445,16 @@ struct DerivedBarrier {
 ///
 /// **One enumerator per refusal the graph can produce, and no placeholders for later tasks.**
 /// A diagnostic kind is what a test asserts on instead of matching a message, so an
-/// enumerator nothing emits would be an assertion nobody could write. The first thirteen are
+/// enumerator nothing emits would be an assertion nobody could write. The first eighteen are
 /// declaration refusals; the last four are `Compile`'s own, and are the only four it records
 /// about the declarations it was given.
+///
+/// **`Execute` records none of these, and that is a decision rather than a gap.** Every refusal
+/// it can make is either about the *phase* -- a build that never compiled, or one whose compile
+/// failed -- or about what the device and the command list said, and neither is a fact about the
+/// declarations this report describes. A row added during execution would land in a report whose
+/// `GraphPhase` reads `Compiled`, so the report would simultaneously say the build succeeded and
+/// carry a refusal; `RenderGraph::Execute` states that where it refuses.
 enum class DiagnosticKind : u32 {
     /// `AddPass` was called with every pass slot occupied.
     PassPoolExhausted = 0,
@@ -486,6 +532,57 @@ enum class DiagnosticKind : u32 {
 
     /// A pass set a second recording callback.
     RecordAlreadySet,
+
+    /// A colour attachment was declared with every attachment slot occupied -- see
+    /// `RenderGraph::Config::maxAttachments`. The pool sibling of `AccessPoolExhausted`, and it
+    /// refuses at the declaration that overflowed for that one's reason.
+    AttachmentPoolExhausted,
+
+    /// A pass declared more than `RHI::kMaxColorAttachments` colour attachments.
+    ///
+    /// **Refused here rather than by `ICommandList::BeginRendering`, which refuses it too.** The
+    /// graph knows how many a pass declared the moment the declaration is made, and a refusal at
+    /// that call names the line that went one too far; the same mistake found at record time
+    /// arrives from `Execute` with a frame already half in the command list. That is the rule
+    /// every attachment refusal below follows.
+    TooManyAttachments,
+
+    /// One pass declared the same resource as a colour attachment twice.
+    ///
+    /// **Two slots naming one image, which is not a frame anyone can have meant**: both would be
+    /// written through, in an order the fragment shader decides, and the second declaration's
+    /// load-op would contradict the first's. Distinct from `DuplicateAccess`, which is about the
+    /// same *access* twice -- a second `ColorAttachment` call on one resource asks for a second
+    /// output location, and the access it implies is what makes `DuplicateAccess` fire second
+    /// rather than first if this one is ever removed.
+    DuplicateAttachment,
+
+    /// A colour attachment named a resource whose `RHI::TextureDescription::usage` lacks
+    /// `RHI::TextureUsage::ColorAttachment`.
+    ///
+    /// **Checkable here because the graph has the description for both kinds of resource** --
+    /// supplied by the creating pass for a transient and by the importing pass for an import --
+    /// so a texture that cannot be rendered into is visible at declaration. `BeginRendering`
+    /// refuses it too, and `TooManyAttachments` argues why arriving there is worse.
+    AttachmentNotRenderable,
+
+    /// A colour attachment named a resource whose extent has a zero dimension.
+    ///
+    /// `ICommandList::BeginRendering` refuses an empty render area, and
+    /// `IDevice::CreateTexture` refuses an empty extent -- so the only resource that can carry
+    /// one this far is an *import*, whose description the graph was handed rather than used to
+    /// create anything. `TooManyAttachments`' argument for refusing at declaration applies.
+    AttachmentExtentEmpty,
+
+    /// Two colour attachments of one pass name resources of different extents.
+    ///
+    /// **`RHI::RenderingDescription` has exactly one extent**, so a pass whose attachments
+    /// disagree has no rendering description at all -- and the graph reads the extent from the
+    /// resource descriptions rather than taking one from the caller, so there is no third value
+    /// to arbitrate between them. Refused at the declaration that disagreed, which is the same
+    /// shape `AccessLayoutConflict` uses for the same kind of mistake: a pair of declarations
+    /// that are each fine alone.
+    AttachmentExtentConflict,
 
     /// `Compile` was called on a graph that was not accepting declarations.
     AlreadyCompiled,
@@ -672,6 +769,16 @@ struct GraphInspection {
 
     /// Declaration order, flat across passes. See `AccessInspection`.
     std::span<const AccessInspection> accesses = {};
+
+    /// Declaration order, flat across passes. See `AttachmentInspection`.
+    ///
+    /// **The order inside one pass is that pass's slot order**, which is what makes this list
+    /// enough to rebuild an `RHI::RenderingDescription` from: filter by `pass`, and the entries
+    /// come out in the order `Execute` puts them in the span. `AttachmentInspection::slot` says
+    /// the same thing per row, so a filtered read and a per-row read cannot be told apart -- and
+    /// an execution that reordered them would disagree with `slot` rather than silently render
+    /// through the wrong output location.
+    std::span<const AttachmentInspection> attachments = {};
 
     /// Every barrier the derivation produced, **in the order a frame records them**: by the
     /// execution position each is emitted in front of, and within one position by the order that
