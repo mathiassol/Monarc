@@ -133,6 +133,10 @@ public:
     };
 
     RenderGraph(IAllocator& allocator, const Config& config);
+
+    /// Destroys the stored recording callbacks and the transient textures `Execute` created.
+    /// `Reset`'s precondition about in-flight work and about the device's lifetime applies here
+    /// unchanged -- it is the same destruction.
     ~RenderGraph();
 
     RenderGraph(const RenderGraph&)            = delete;
@@ -150,6 +154,32 @@ public:
     /// `ResourceId`'s class comment.
     ///
     /// Destroys any recording callbacks the previous build stored.
+    ///
+    /// **And destroys the transient textures `Execute` created, which is where the graph's
+    /// ownership of them ends.** The precondition is `IDevice::DestroyTexture`'s own, pushed up
+    /// one level and stated rather than inherited silently: **the caller must have ensured the
+    /// GPU is finished with the previous build's work before calling this.** Nothing here tracks
+    /// in-flight use, because nothing in the RHI does -- `IQueue::Wait` is how a caller knows.
+    ///
+    /// **Why here and not at the end of `Execute`, which is what the phase plan's checklist
+    /// says.** `Execute` returns *before* the command list is submitted, so a texture destroyed
+    /// there is freed while a recorded command buffer still references it, and
+    /// `IDevice::DestroyTexture` bumps the slot generation immediately and by design. Destroying
+    /// at the *next* `Execute` does not fix it either: `IDevice::BeginFrame` waits on its own
+    /// frame slot's timeline value, so with `RHI::kFramesInFlight` at two, frame N+1 has waited
+    /// on frame N-1 and not on frame N.
+    ///
+    /// **The gap that leaves, stated because a reader will otherwise assume it closed.** A frame
+    /// loop that resets one graph per frame with frames in flight needs either deferred
+    /// destruction -- a queue of textures to free once a timeline value is reached -- or one
+    /// graph per frame slot. Phase A4 builds neither, and nothing A4 ships reaches the hazard:
+    /// its frame declares no transients at all, so there is nothing for a `Reset` to destroy.
+    ///
+    /// **The other half of the precondition is the device's own lifetime.** The graph keeps the
+    /// `RHI::IDevice&` its last `Execute` was given, for exactly as long as it holds a texture
+    /// that device made, so a graph holding transients must be `Reset` or destroyed before that
+    /// device is. A graph that never executed, or whose builds declared no transient, holds no
+    /// device pointer at all.
     void Reset();
 
     /// Claims a pass and returns the builder that declares it.
@@ -195,18 +225,57 @@ public:
     /// `DiagnosticKind::BarrierPoolExhausted`.
     [[nodiscard]] Status Compile();
 
-    /// Records the compiled frame into `commands`, creating and destroying the transient
-    /// resources it needs on `device`.
+    /// Records the compiled frame into `commands`, creating on `device` the transient resources
+    /// it needs.
     ///
-    /// **Not implemented yet, and it refuses rather than doing nothing.** Task 4 of the
-    /// phase plan is what writes it, in Private/Execute.cpp -- the only file in this module
-    /// that will touch an `RHI::ICommandList`. Until then this returns
-    /// `ErrorCode::Unsupported`, because a call that silently succeeded having recorded
-    /// nothing is the shape of green that this codebase keeps finding and deleting.
+    /// In Private/Execute.cpp -- **the only file in this module that touches an
+    /// `RHI::ICommandList`**. The signature is what keeps `Compile` device-free: everything
+    /// execution needs is a parameter here rather than a constructor argument.
     ///
-    /// The signature is the point of declaring it now: **everything execution needs is a
-    /// parameter here rather than a constructor argument**, which is what keeps `Compile`
-    /// device-free.
+    /// **That "only file" is kept by the type system and not by a rule, which is worth stating
+    /// because it is not obvious and is not total.** This is the one declaration in the module
+    /// that takes an `RHI::ICommandList&`, and the only other way to hold one is
+    /// `PassCommandList::Commands()`, which is private to `RenderGraph` -- so no other
+    /// translation unit here can obtain a list to record into. What the compiler does not stop
+    /// is `RenderGraph` growing a *second* member that takes one; there is no architecture gate
+    /// for that, because the textual check a gate could make -- "no file but Execute.cpp names
+    /// `ICommandList`" -- is already false: PassBuilder.h names it, holds one, and must.
+    ///
+    /// **What it records, in order, because that order is the whole deliverable:**
+    /// `ICommandList::Begin`; then, for each surviving pass in execution order, every
+    /// `DerivedBarrier` whose `emittedBeforePass` is that pass's position, then
+    /// `BeginRendering` if the pass declared attachments, then the pass's recording callback
+    /// through a `PassCommandList`, then `EndRendering`; then every `DerivedBarrier` with
+    /// `emittedBeforePass == kNoPass`, which is the imports' outgoing transitions; then
+    /// `ICommandList::End`. The barriers keep the order `GraphInspection::barriers` is in --
+    /// this reads that order and does not re-derive it.
+    ///
+    /// **A pass with no attachments gets no `BeginRendering` and no `EndRendering` at all.** Its
+    /// callback is still invoked, between the barriers in front of it and the next pass's. That
+    /// is what a compute pass will be, and it is what a pass that only copies is today.
+    ///
+    /// **It does not destroy the transients it creates, and that is the decision this call makes
+    /// rather than an omission** -- see `Reset`, which does. `IDevice::DestroyTexture` requires
+    /// its caller to have ensured the GPU is finished, and this call returns *before* the list is
+    /// submitted, so a texture destroyed here would be freed while a recorded command buffer
+    /// still referenced it.
+    ///
+    /// **Calling it twice on one compiled build is legal and creates nothing twice**: a
+    /// transient already created is reused, so the second recording names the same textures. It
+    /// is not something a frame loop does -- one build, one recording -- and it is what makes a
+    /// retry after a refused `Execute` leak nothing.
+    ///
+    /// Fails with `ErrorCode::InvalidArgument` for a graph that has not compiled and for one
+    /// whose compile failed -- **a partial frame is not what a caller of either wanted** -- and
+    /// with whatever `device` or `commands` returned otherwise. **A refusal made before
+    /// `Begin` leaves `commands` untouched; one made after it leaves the list recording and
+    /// abandoned mid-frame**, which is a real outcome rather than a hypothetical because
+    /// `BeginRendering` returns a `Status`. Private/Execute.cpp says which refusals are on which
+    /// side of that line, and the caller's answer to the second is to drop the recording rather
+    /// than to submit it.
+    ///
+    /// Nothing it does reaches `GraphInspection`: the report describes the build, and execution
+    /// is not part of one. See the note on `DiagnosticKind`.
     [[nodiscard]] Status Execute(RHI::IDevice& device, RHI::ICommandList& commands);
 
     /// Everything the graph can say about the build it is holding. See `GraphInspection`.
@@ -281,10 +350,14 @@ private:
     ///
     /// **Every refusal that names a pass or a resource goes through here**, so no such refusal
     /// can happen without the diagnostics list -- or `m_diagnosticsDropped`, when the list is
-    /// full -- saying that it did. Two refusals deliberately do not: `Compile`'s report that
-    /// an earlier declaration was refused, which would add a row naming nothing on top of the
-    /// row that already says what happened, and `Execute`'s not-implemented-yet, which is
-    /// about the build being unfinished rather than about the declarations in it.
+    /// full -- saying that it did. Two kinds of refusal deliberately do not: `Compile`'s report
+    /// that an earlier declaration was refused, which would add a row naming nothing on top of
+    /// the row that already says what happened, and **every refusal `Execute` makes**, including
+    /// the ones that do name a resource -- a texture the device would not create, a rendering
+    /// pass the list would not begin. Those are not facts about the declarations this report
+    /// describes, and a row recorded during execution would land in a report whose phase reads
+    /// `Compiled`: a report saying the build succeeded and carrying a refusal at once. See the
+    /// note at the head of `DiagnosticKind`.
     ///
     /// `message` must be a string literal -- `Error::message` is a non-owning view.
     ///
@@ -298,6 +371,40 @@ private:
 
     /// Destroys every stored recording callback. Called by `Reset` and by the destructor.
     void DestroyRecords();
+
+    /// Destroys every transient texture `Execute` created and forgets the device it made them
+    /// on. Called by `Reset` and by the destructor, which is where this graph's ownership of
+    /// them ends -- `Reset`'s comment carries the argument and the precondition.
+    ///
+    /// A no-op on a graph that never executed, and on one whose builds declared no transient:
+    /// `m_transientDevice` is null and every handle in `m_transientTextures` is invalid.
+    void DestroyTransients();
+
+    // ---------------------------------------------------------------------------------
+    // Execution's stages, in Private/Execute.cpp and called only by `Execute`. **The only
+    // functions in this class below which there is a device**, which is the line the class
+    // comment draws and the reason `Compile`'s stages are all above it.
+    // ---------------------------------------------------------------------------------
+
+    /// Creates a texture on `device` for every transient some surviving pass touches, and
+    /// records it in `m_transientTextures`. A transient already created is left alone, which is
+    /// what makes a second `Execute` of one build -- or a retry after a refused one -- create
+    /// nothing twice.
+    [[nodiscard]] Status CreateTransients(RHI::IDevice& device);
+
+    /// The live texture `resource` stands for: an import's declared handle, or the transient
+    /// one `CreateTransients` made. Invalid for a resource that has neither, which is a state no
+    /// barrier can name -- see the caller.
+    [[nodiscard]] RHI::TextureHandle TextureOf(u32 resource) const;
+
+    /// Records every barrier whose `emittedBeforePass` is `position`, in the order
+    /// `GraphInspection::barriers` holds them. `kNoPass` is the end-of-frame position, which is
+    /// how the imports' outgoing transitions are recorded.
+    [[nodiscard]] Status RecordBarriersAt(u32 position, RHI::ICommandList& commands);
+
+    /// Begins `pass`'s rendering instance, or does nothing at all if it declared no colour
+    /// attachment. `began` says which, so that the caller ends only what was begun.
+    [[nodiscard]] Status BeginPassRendering(u32 pass, RHI::ICommandList& commands, bool& began);
 
     // ---------------------------------------------------------------------------------
     // Compilation's stages, in Private/Compile.cpp and called only by `Compile` in the
@@ -448,6 +555,26 @@ private:
     Array<DerivedBarrier>       m_barriers;
     Array<GraphDiagnostic>      m_diagnostics;
     Array<PassRecordSlot>       m_records;
+
+    /// The live texture each transient was given by `Execute`, indexed by resource index, or an
+    /// invalid handle for a transient that has none -- one no surviving pass touches, one whose
+    /// build has not executed, and every imported resource, whose handle is its own.
+    /// `maxResources` entries, filled at construction like the compile scratch below.
+    ///
+    /// **Cleared by `Reset` rather than left, because a handle here is an ownership claim** --
+    /// `DestroyTransients` destroys exactly what this array names, and a stale entry would name
+    /// a slot some later build's texture now occupies.
+    Array<RHI::TextureHandle> m_transientTextures;
+
+    /// The device `Execute` last created a transient on, or nullptr.
+    ///
+    /// **The one device this class holds, and the class comment's claim survives it:** the
+    /// *constructor* takes an allocator and a `Config` and nothing else, and declaration and
+    /// compilation never read this. It is written by `CreateTransients` and read only by
+    /// `DestroyTransients`, because destroying a texture needs the device that made it and
+    /// `Reset` has no parameter to be handed one through. `Reset`'s comment states the lifetime
+    /// precondition that buys.
+    RHI::IDevice* m_transientDevice = nullptr;
 
     // ---------------------------------------------------------------------------------
     // Compilation's scratch state.

@@ -50,6 +50,7 @@ RenderGraph::RenderGraph(IAllocator& allocator, const Config& config)
       m_barriers(allocator),
       m_diagnostics(allocator),
       m_records(allocator),
+      m_transientTextures(allocator),
       m_accessesByResource(allocator),
       m_resourceBucketStart(allocator),
       m_accessesByPass(allocator),
@@ -78,6 +79,12 @@ RenderGraph::RenderGraph(IAllocator& allocator, const Config& config)
         m_records.Emplace();
     }
 
+    // Filled to capacity for `m_records`' reason: a resource's index is its index here from
+    // construction, so `Execute` writes a slot rather than appending one and `DestroyTransients`
+    // can read every slot whether or not a build ever reached it. Execution is a path a frame
+    // runs, and is held to the same no-allocation rule declaration and compilation are.
+    FillToCapacity(m_transientTextures, m_config.maxResources);
+
     // Compilation's scratch, sized from the same three capacities and filled for the same
     // reason -- see the fields. **`+ 1` on the two bucket-boundary arrays is the end sentinel**:
     // bucket `k` runs from `start[k]` to `start[k + 1]`, so the last bucket needs a boundary
@@ -95,10 +102,19 @@ RenderGraph::RenderGraph(IAllocator& allocator, const Config& config)
     FillToCapacity(m_resourceStep, m_config.maxResources);
 }
 
-RenderGraph::~RenderGraph() { DestroyRecords(); }
+RenderGraph::~RenderGraph() {
+    DestroyRecords();
+    DestroyTransients();
+}
 
 void RenderGraph::Reset() {
     DestroyRecords();
+
+    // **The transients go here and not at the end of `Execute`**, which is where the phase
+    // plan's checklist put them and where destroying them would be a use-after-free: `Execute`
+    // returns before the list is submitted. `RenderGraph::Reset`'s own comment carries the whole
+    // argument, the precondition it pushes onto the caller, and the gap it leaves open.
+    DestroyTransients();
 
     // Clear, not release: `Array::Clear` destroys every element and keeps the capacity, which
     // is the whole point of resetting rather than reconstructing.

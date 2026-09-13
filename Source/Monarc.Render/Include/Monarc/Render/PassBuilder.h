@@ -97,6 +97,14 @@ private:
 /// holds a `TextureId`. A4's own pass records nothing at all: it clears through an attachment
 /// load-op, so its callback has no work and it declares none.
 ///
+/// **Its member list was enumerated again in Task 4, which is the edit the enumeration in
+/// Tests/TestPassDeclaration.cpp was written to be re-run by, and it grew no member.** `Execute`
+/// constructs one and calls `Commands()` on it; neither is new, and no recording call was
+/// forwarded through it because the graph's own attachments are what `BeginRendering` is built
+/// from and A4 gives a pass nothing else to record. So the guards there cover the class as it
+/// stands, and `sizeof` is pinned beside them so that a *data* member added later fails a
+/// build rather than waiting for the next audit.
+///
 /// **What it will cost, stated rather than predicted.** Each recording call a pass is
 /// eventually allowed becomes one forwarding method here -- a second line to write per call,
 /// over a stored pointer, with nothing virtual in this class. That cost is real and paid on
@@ -122,8 +130,21 @@ private:
     /// **Private, so only the graph can hand one to a pass.** A feature that could construct
     /// its own over a raw `RHI::ICommandList` would not have gained anything it did not
     /// already have, but it would make this class look like something a caller assembles
-    /// rather than something it is given. A `ForTesting` factory arrives with the first test
-    /// that needs to invoke a callback without a graph, which is Task 4's.
+    /// rather than something it is given.
+    ///
+    /// **This comment promised a `ForTesting` factory "with the first test that needs to invoke
+    /// a callback without a graph, which is Task 4's". Task 4 has no such test, and the factory
+    /// is therefore not here.** What closes the invocation path is `RenderGraph::Execute` itself:
+    /// it constructs one of these, calls `Detail::IPassRecord::Invoke` through it, and
+    /// Tests/TestExecute.cpp drives that with a stub `RHI::ICommandList`, so the constructor,
+    /// `Commands()` and both `Invoke` bodies are all run rather than merely asserted about.
+    ///
+    /// A standalone one would buy nothing anyway, and the reason is this class's own emptiness:
+    /// it offers no operation, so a callback handed one cannot do anything a test could observe
+    /// -- including telling which list it wraps. So the factory would be a public way to build
+    /// the thing the private constructor exists to withhold, in exchange for no assertion at
+    /// all. It arrives if a test ever needs one, which is the rule everything else in this module
+    /// follows; until then the narrowest confinement of a `ForTesting` hole is not to open it.
     explicit PassCommandList(RHI::ICommandList& commands) : m_commands(&commands) {}
 
     /// The wrapped list. **Reachable only by `RenderGraph`** -- this is the single seam, and

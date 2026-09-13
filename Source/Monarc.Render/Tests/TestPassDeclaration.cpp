@@ -1700,10 +1700,23 @@ TEST_CASE("an attachment naming no resource in this build is refused") {
 // still be private. So this is an enumeration that was true when it was written rather than a
 // property the compiler maintains.
 //
-// **Task 4 is when to re-run it**, and the plan says so: `Execute` is what first constructs a
-// `PassCommandList` and first has a reason to forward something through it, and a forwarding
-// method is exactly the edit that adds a member this block does not know about. Re-enumerate
-// the class then rather than reading these assertions as coverage of whatever it has grown.
+// **Task 4 re-ran it, which is what this paragraph used to say to do.** `RenderGraph::Execute`
+// now constructs a `PassCommandList` and calls `Commands()` on it, so the private constructor,
+// the accessor and both `Invoke` bodies are executed rather than only asserted about -- see
+// Tests/TestExecute.cpp, which drives that path with a stub `RHI::ICommandList`. The
+// re-enumeration found the class **unchanged**: the four deleted copy and move operations, the
+// private constructor, `Commands()`, `m_commands` and an implicit destructor, which is exactly
+// the list above. No forwarding method was added, because A4 gives a pass nothing to record --
+// the graph's own attachments are what `BeginRendering` is built from -- and the promised
+// `ForTesting` factory was not added either, for the reason PassBuilder.h now gives where it
+// used to promise it.
+//
+// **What the re-run did add is `sizeof`, below, because the enumeration above is a fact about a
+// moment and this is a fact the compiler keeps.** A new *data* member -- a second pointer, a
+// back-reference to the graph, a cached anything -- changes the size and fails a build; it
+// cannot yield a list on its own, but it is the change that most often comes with a member that
+// can. A new *function* member is still invisible to everything here, which is why the next edit
+// to this class enumerates it again rather than reading a green suite as coverage.
 //
 // **The diagnostics, measured on both compilers, because a `static_assert` says the property
 // holds and not what a caller who breaks it is told.** Each was compiled as its own
@@ -1817,6 +1830,11 @@ static_assert(!kCanReachCommandListPointer<PassCommandList>,
               "PassCommandList::m_commands is reachable -- a pass can barrier through the "
               "wrapped pointer without needing an accessor at all");
 
+// The wrapper is one pointer and nothing else, which is what makes the member enumeration above
+// re-checkable by a compiler rather than only by an audit. See the note on Task 4's re-run.
+static_assert(sizeof(PassCommandList) == sizeof(Monarc::RHI::ICommandList*),
+              "PassCommandList has grown a data member -- re-enumerate the class and ask of the "
+              "new one what the guards above ask of Commands() and m_commands");
 
 // ---------------------------------------------------------------------------------------
 // `TextureImport` requires every field, which is the property `RHI::TextureBarrier` argues for
