@@ -41,6 +41,28 @@ struct WindowDescription {
     /// Non-owning; must outlive the Create call. A string literal at the call site is the
     /// intended use, matching Error::message in Monarc/Core/Error.h.
     const char* title = "Monarc";
+
+    /// Whether showing the window also gives it the keyboard focus.
+    ///
+    /// **True by default, and that default is the shipped behaviour**: an application window
+    /// that opened behind whatever the user was already doing would be a worse window. A
+    /// `static_assert` in Tests/TestWindow.cpp pins the default, because flipping it would
+    /// change `Monarc.FirstLight` silently.
+    ///
+    /// **False exists for the test suites, and it is not a nicety.** A full run opens 36
+    /// windows — 16 in Monarc.Host.Windowed.Tests and 20 in its device suite, which loops
+    /// several cases over both adapters — and each one activating in turn takes the focus away
+    /// from whatever else is running for the five to ten seconds the run lasts. Nothing either
+    /// suite asserts depends on activation: a window still has an `HWND`, a client size, a
+    /// message queue and a surface without it. `SW_SHOWNOACTIVATE` rather than `SW_SHOW`.
+    ///
+    /// The one case that genuinely needs to be in front asks for it: the screen-capture case in
+    /// TestsDevice/TestSwapchain.cpp `BitBlt`s from the *screen* DC, and calls
+    /// `WindowTestHooks::BringToForeground` to front itself. That is unaffected by this field —
+    /// it sets `HWND_TOPMOST` and calls `SetForegroundWindow` directly, and it already tolerates
+    /// that call being refused, which is why it reports what the top window actually was rather
+    /// than assuming.
+    bool activateOnShow = true;
 };
 
 /// What happened to a window.

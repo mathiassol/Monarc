@@ -495,7 +495,12 @@ Result<Window> WindowPlatform::Create(const WindowDescription& description) {
 
     window.m_nativeHandle = handle;
 
-    ShowWindow(handle, SW_SHOW);
+    // SW_SHOWNOACTIVATE differs from SW_SHOW in exactly one respect -- it does not give the
+    // window the focus -- which is why WindowDescription::activateOnShow can select between
+    // them without either half of the suite losing anything. The window is displayed, sized and
+    // pumping either way, and WM_SIZE arrives either way (dropped just below, for the reason
+    // stated there).
+    ShowWindow(handle, description.activateOnShow ? SW_SHOW : SW_SHOWNOACTIVATE);
     // The size *after* showing, and read from the platform: a window manager decides the final
     // client size, and this is the number a swapchain is created from.
     window.m_clientSize = QueryClientSize(handle);
@@ -510,9 +515,10 @@ Result<Window> WindowPlatform::Create(const WindowDescription& description) {
 
     MONARC_LOG(LogCategories::Window, Info,
                "window opened | asked for {}x{} client | became {}x{} | system DPI {} | style "
-               "0x{:x}",
+               "0x{:x} | activated {}",
                description.size.width, description.size.height, window.m_clientSize.width,
-               window.m_clientSize.height, dpi, static_cast<u32>(kWindowStyle));
+               window.m_clientSize.height, dpi, static_cast<u32>(kWindowStyle),
+               description.activateOnShow);
 
     // Moved out, which re-points the native window's back-pointer at the destination --
     // `Window`'s move constructor calls `Rebind` for exactly this. The local `window` was the

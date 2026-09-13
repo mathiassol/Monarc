@@ -105,6 +105,7 @@ add_subdirectory(Source/Monarc.Core)
 add_subdirectory(Source/Monarc.Jobs)
 add_subdirectory(Source/Monarc.RHI)
 add_subdirectory(Source/Monarc.RHI.Vulkan)
+add_subdirectory(Source/Monarc.Render)
 add_subdirectory(Source/Monarc.Host.Windowed)
 add_subdirectory(Source/Monarc.FirstLight)
 

@@ -393,6 +393,39 @@ private:
 // with unrelated work. The shape above is what a split barrier is built from either way, so
 // this is a field or a pair of calls added later rather than a different model.
 
+/// A texture's complete state in ADR-0005's model: one side of a `TextureBarrier`, without the
+/// texture.
+///
+/// Exactly the three values `TextureBarrier` carries per side -- a layout, a stage scope and an
+/// access scope -- named once, so that code with an opinion about what state a texture *is in*
+/// can say so without building a barrier around it. A barrier is then a pair of these plus a
+/// handle, which is the relationship this type exists to make sayable.
+///
+/// **The stage and access halves are not decoration on the layout.** A state that carried only
+/// a layout would say when a texture's contents are readable and nothing about when the
+/// transition itself may run, and a transition is a write like any other: it has to be ordered
+/// against whatever produced the image and whatever consumes it. `kSwapchainImageIncoming` in
+/// Monarc/RHI/Swapchain.h is the worked example -- its stage is `ColorAttachmentOutput` rather
+/// than `None` for a reason that is about a semaphore and not about a layout at all -- and that
+/// constant's comment is where the argument is.
+///
+/// **A plain aggregate with defaults, unlike `TextureBarrier` above, and the difference is
+/// where the omission would be invisible.** `TextureBarrier` has no default constructor because
+/// a barrier with defaulted layouts is byte-identical to one whose author meant `Undefined`, and
+/// nothing at the call site shows which. This type does not inherit that refusal and does not
+/// need to: a lone state is not a transition, so there is nothing here for an omission to be
+/// mistaken for. What has to refuse an omission is whatever holds a *pair* of these, and each
+/// such holder does it for itself -- `Render::TextureImport` in Monarc.Render/PassBuilder.h
+/// takes both states with no defaults, so writing `TextureState{}` there is possible but is a
+/// visible statement at the call site rather than an absence.
+struct TextureState {
+    TextureLayout layout = TextureLayout::Undefined;
+    PipelineStage stage  = PipelineStage::None;
+    Access        access = Access::None;
+
+    constexpr bool operator==(const TextureState&) const = default;
+};
+
 // ---------------------------------------------------------------------------------------
 // Describing a barrier in words.
 // ---------------------------------------------------------------------------------------

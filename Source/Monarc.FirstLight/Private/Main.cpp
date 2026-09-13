@@ -26,10 +26,18 @@
 // name>` picks which GPU to run on, because this machine has two and a capture per adapter is
 // what the phase plan asks for. Both are stated in `--help`.
 //
-// It is also the only thing in the build that references a symbol from all four of
-// Monarc.Core, Monarc.RHI, Monarc.RHI.Vulkan and Monarc.Host.Windowed at once. A declared
-// dependency nothing calls links happily and proves nothing, so every edge below is a real
-// call into the module it names.
+// It is also the only thing in the build that references a symbol from all five of
+// Monarc.Core, Monarc.RHI, Monarc.RHI.Vulkan, Monarc.Host.Windowed and Monarc.Render at once.
+// A declared dependency nothing calls links happily and proves nothing, so every edge below is
+// a real call into the module it names.
+//
+// **Phase A4 deleted this program's barriers, and that deletion is the phase's point.** Through
+// A3 the frame below hand-wrote two `ICommandList::Barrier` calls and one `BeginRendering`; it
+// now declares one pass that writes the imported swapchain image with a clear load-op and lets
+// `Monarc.Render` derive both barriers and begin the rendering instance. Nothing in this file
+// names `RHI::Barrier.h` any more, and keeping the hand-written frame beside the graph as a
+// fallback would have defeated the exercise -- the claim being tested is that the derivation is
+// good enough to run on, and a fallback is what you reach for when it is not.
 //
 // Runtime kind, so ADR-0003's restricted library subset applies: MONARC_LOG rather than
 // <iostream>, which is banned in shipping code and would be the easy thing to reach for in a
@@ -41,7 +49,6 @@
 #include <Monarc/Core/Memory/SystemAllocator.h>
 #include <Monarc/Host/Window.h>
 #include <Monarc/RHI/Adapter.h>
-#include <Monarc/RHI/Barrier.h>
 #include <Monarc/RHI/Capabilities.h>
 #include <Monarc/RHI/Device.h>
 #include <Monarc/RHI/Swapchain.h>
@@ -49,6 +56,7 @@
 #include <Monarc/RHI/Vulkan/VulkanBackend.h>
 #include <Monarc/RHI/Vulkan/VulkanDevice.h>
 #include <Monarc/RHI/Vulkan/VulkanSwapchain.h>
+#include <Monarc/Render/RenderGraph.h>
 
 #include <charconv>
 #include <string_view>
@@ -341,68 +349,95 @@ void PrintHelp() {
     return chosen;
 }
 
-/// Records and submits one frame: barrier into the colour-attachment layout, clear, barrier
-/// into the present layout.
+/// Declares this frame and records it, through the render graph.
 ///
-/// **The two barriers are the whole of A3's use of ADR-0005's model, and their synchronisation
-/// scopes are chosen to chain with the swapchain's semaphores rather than filled in with
-/// `AllCommands`.**
+/// **One pass, one imported resource, one attachment, and no barrier anywhere in this file.**
+/// The pass declares that it renders into the acquired swapchain image with a clear load-op;
+/// `RenderGraph::Compile` derives the two transitions that implies from the import's declared
+/// incoming and outgoing states, and `RenderGraph::Execute` records them either side of the
+/// `BeginRendering` the attachment asked for. The recorded sequence is the one A3 hand-wrote,
+/// which Monarc.Render/Tests/TestExecute.cpp asserts device-free against the values decoded from
+/// A3's RenderDoc captures.
 ///
-/// - The first names `PipelineStage::ColorAttachmentOutput` on *both* sides. The before scope
-///   is not `None`, and that is deliberate: `VulkanDeviceState::SubmitList` waits on the
-///   acquire semaphore at the colour-attachment-output stage, and a layout transition is a
-///   write that must be ordered after that wait. Naming the same stage is what chains the two.
-/// - The second names `PipelineStage::None` and `Access::None` on the after side, because
-///   there is no *command* after it: what reads the image next is the presentation engine, and
-///   the render-finished semaphore -- signalled at `ALL_COMMANDS`, so after this transition --
-///   is the dependency that covers it.
-[[nodiscard]] Monarc::Status RecordFrame(Monarc::RHI::ICommandList& list,
-                                         Monarc::RHI::TextureHandle image,
-                                         Monarc::RHI::Extent2D      extent) {
-    if (Monarc::Status begun = list.Begin(); !begun) {
-        return begun;
+/// **No `PassBuilder::Record` callback, because there is nothing to record.** A load-op clear
+/// happens when the rendering instance begins, so this pass contributes no command of its own --
+/// `PassInspection::hasRecord` reports false for it, and `PassBuilder::Record`'s comment names
+/// this frame as the reason a pass without a callback is not an error.
+///
+/// **The extent and format are read back from the swapchain every frame rather than captured
+/// once**, because a resize changes both the image and its description: `ISwapchain::Recreate`
+/// is what the loop calls, and the import declared here has to describe the image that
+/// `Acquire` just handed back rather than the one the window opened with.
+[[nodiscard]] Monarc::Status RecordFrame(Monarc::Render::RenderGraph& graph,
+                                         Monarc::RHI::IDevice&        device,
+                                         Monarc::RHI::ICommandList&   list,
+                                         Monarc::RHI::TextureHandle   image,
+                                         Monarc::RHI::Extent2D        extent,
+                                         Monarc::RHI::Format          format) {
+    // **One graph for the whole program, reset per frame**, which is what keeps declaration off
+    // the allocator: `RenderGraph`'s pools are sized once at construction and never grown, so a
+    // frame that declares into a reset graph allocates nothing.
+    //
+    // `Reset` carries a precondition -- the caller must have ensured the GPU is finished with
+    // the previous build's work, because `Reset` is what destroys the transient textures
+    // `Execute` created. **This frame does not reach it, and the reason is that it declares no
+    // transients at all**: every resource below is imported, the graph creates nothing and owns
+    // nothing, and a `Reset` here therefore has nothing to destroy. A frame that did declare one
+    // would need either deferred destruction or a graph per frame slot -- `RenderGraph::Reset`
+    // states that gap, and Phase A4 builds neither.
+    graph.Reset();
+
+    // The import's description is what `BeginRendering` is built from: a rendering instance is
+    // described by its attachments' extent, and the graph has no other way to learn it. Usage is
+    // what this app asked the swapchain for -- `allowReadback` is false above, so these images
+    // are colour attachments and nothing else, and `PassBuilder::ColorAttachment` refuses a
+    // resource whose usage lacks `ColorAttachment`.
+    const Monarc::RHI::TextureDescription description{extent, format,
+                                                      Monarc::RHI::TextureUsage::ColorAttachment};
+
+    Monarc::Result<Monarc::Render::PassBuilder> pass = graph.AddPass("first light");
+    if (!pass) {
+        return Monarc::Status(std::unexpect, pass.error());
     }
 
-    list.Barrier(Monarc::RHI::TextureBarrier(
-        image, Monarc::RHI::TextureLayout::Undefined,
-        Monarc::RHI::TextureLayout::ColorAttachment,
-        Monarc::RHI::PipelineStage::ColorAttachmentOutput,
-        Monarc::RHI::PipelineStage::ColorAttachmentOutput, Monarc::RHI::Access::None,
-        Monarc::RHI::Access::ColorAttachmentWrite));
-
-    const Monarc::RHI::ColorAttachment attachments[1] = {
-        {image, Monarc::RHI::LoadOp::Clear, Monarc::RHI::StoreOp::Store, kClearColor}};
-
-    Monarc::RHI::RenderingDescription rendering{};
-    rendering.extent           = extent;
-    rendering.colorAttachments = attachments;
-
-    // No draw call, and none is needed: a load-op clear happens when rendering begins. There is
-    // deliberately no separate clear command in this interface -- Device.h's `LoadOp::Clear`
-    // says why, and this is the path A4's render graph will take too.
-    if (Monarc::Status began = list.BeginRendering(rendering); !began) {
-        return began;
+    // **The two states are the swapchain's, named rather than restated.**
+    // `RHI::kSwapchainImageIncoming` and `kSwapchainImageOutgoing` in Monarc/RHI/Swapchain.h
+    // carry the argument for all six values -- five forced by the swapchain contract, one
+    // chosen -- and the chosen one, the incoming stage, is the same value
+    // `VulkanDeviceState::SubmitList` waits on the acquire semaphore at. This app used to write
+    // the six out and agree with the backend by prose; there is nothing here left to disagree.
+    const Monarc::Result<Monarc::Render::TextureId> target = pass->ImportTexture(
+        "swapchain image",
+        Monarc::Render::TextureImport(image, description, Monarc::RHI::kSwapchainImageIncoming,
+                                      Monarc::RHI::kSwapchainImageOutgoing));
+    if (!target) {
+        return Monarc::Status(std::unexpect, target.error());
     }
-    list.EndRendering();
 
-    list.Barrier(Monarc::RHI::TextureBarrier(
-        image, Monarc::RHI::TextureLayout::ColorAttachment,
-        Monarc::RHI::TextureLayout::PresentSource,
-        Monarc::RHI::PipelineStage::ColorAttachmentOutput, Monarc::RHI::PipelineStage::None,
-        Monarc::RHI::Access::ColorAttachmentWrite, Monarc::RHI::Access::None));
+    if (Monarc::Status declared =
+            pass->ColorAttachment(*target, Monarc::RHI::LoadOp::Clear,
+                                  Monarc::RHI::StoreOp::Store, kClearColor);
+        !declared) {
+        return declared;
+    }
 
-    return list.End();
+    if (Monarc::Status compiled = graph.Compile(); !compiled) {
+        return compiled;
+    }
+    return graph.Execute(device, list);
 }
 
 /// The frame loop. Returns the process's exit code.
 ///
-/// **Every step the phase plan's Task 4 checkbox names, in the order it names them**: acquire,
-/// barrier undefined to colour attachment, begin rendering with a clear, end, barrier to
-/// present, submit, present, advance the timeline. The timeline advance is
-/// `IQueue::Submit`'s return value and `IDevice::BeginFrame`'s wait on it; there is no separate
-/// call, which is the point of a timeline.
+/// **Every step A3's Task 4 checkbox named, in the order it named them**: acquire, transition to
+/// the colour-attachment layout, begin rendering with a clear, end, transition to present,
+/// submit, present, advance the timeline. A4 changed who writes the middle five -- the graph
+/// derives and records them from one declaration -- and changed nothing about the rest. The
+/// timeline advance is `IQueue::Submit`'s return value and `IDevice::BeginFrame`'s wait on it;
+/// there is no separate call, which is the point of a timeline.
 [[nodiscard]] int RunFrameLoop(Monarc::Host::Window& window, Monarc::RHI::IDevice& device,
-                               Monarc::RHI::ISwapchain& swapchain, Monarc::u32 frameLimit) {
+                               Monarc::RHI::ISwapchain&     swapchain,
+                               Monarc::Render::RenderGraph& graph, Monarc::u32 frameLimit) {
     Monarc::u32 presented = 0;
     Monarc::u32 parked    = 0;
     Monarc::u32 recreated = 0;
@@ -491,7 +526,8 @@ void PrintHelp() {
         }
 
         if (Monarc::Status recorded =
-                RecordFrame(**commands, acquired->texture, swapchain.Extent());
+                RecordFrame(graph, device, **commands, acquired->texture, swapchain.Extent(),
+                            swapchain.ImageFormat());
             !recorded) {
             Report("recording the frame failed", recorded.error());
             return 1;
@@ -617,7 +653,20 @@ void PrintHelp() {
                Monarc::RHI::ToString(swapchain->ImageFormat()), swapchain->ImageCount(),
                Monarc::RHI::kFramesInFlight);
 
-    const int exitCode = RunFrameLoop(*window, *device, *swapchain, options.frames);
+    // **Constructed once, outside the loop, and reset per frame.** The pools are fixed at
+    // construction, so this is where the frame's declarations stop touching the allocator; the
+    // defaults are far larger than one pass and one resource, and choosing smaller numbers here
+    // would be a capacity to keep in step with a frame that is one declaration long.
+    //
+    // **`RenderGraph`'s other stated precondition does not bind here, and it is worth saying
+    // which one and why.** A graph holding transient textures must be reset or destroyed before
+    // the device that made them, because it keeps the `IDevice&` its last `Execute` was given
+    // for exactly as long as it holds one. This graph declares no transients, so it never takes
+    // that pointer at all -- which is what makes the explicit `device->Shutdown()` below, which
+    // runs while `graph` is still alive, safe rather than merely untested.
+    Monarc::Render::RenderGraph graph(allocator, Monarc::Render::RenderGraph::Config{});
+
+    const int exitCode = RunFrameLoop(*window, *device, *swapchain, graph, options.frames);
 
     // **Destroyed explicitly and in reverse order, rather than left to scope exit.** The order
     // is not negotiable -- a swapchain names the device's entry points and the backend's

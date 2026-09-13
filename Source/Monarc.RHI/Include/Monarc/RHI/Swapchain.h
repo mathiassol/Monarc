@@ -2,6 +2,7 @@
 
 #include <Monarc/Core/Error.h>
 #include <Monarc/Core/Types.h>
+#include <Monarc/RHI/Barrier.h>
 #include <Monarc/RHI/Device.h>
 #include <Monarc/RHI/Handles.h>
 #include <Monarc/RHI/Types.h>
@@ -144,6 +145,89 @@ struct AcquiredImage {
     /// between frames picks it up without reading this field at all.
     bool suboptimal = false;
 };
+
+// ---------------------------------------------------------------------------------------
+// The state an image is handed over in, and the state it must be handed back in.
+//
+// **These are the swapchain's own facts, and that is why they are here** rather than in the
+// render graph that derives barriers from them or in the application that declares them. Step 3
+// of `ISwapchain`'s frame below -- barrier in, render, barrier out -- is the caller's obligation
+// stated in prose; these two constants are the same obligation stated in values, so that a
+// caller can name it instead of transcribing it.
+//
+// **Six values, five forced by this interface's contract and one chosen.** Each is argued at its
+// own constant. The chosen one is `kSwapchainImageIncoming.stage`, and it is chosen against a
+// backend's submission rather than against anything in this header -- which is exactly why it
+// used to be restated in three places and drift between them silently. It is now restated
+// nowhere: see its comment.
+//
+// Four declaration sites read these: `Monarc.FirstLight`'s frame, the swapchain readback in
+// `Monarc.Host.Windowed`'s device suite, `TestSupport::SwapchainImport` in `Monarc.Render`, which
+// is the frame both of that module's suites replay, and that module's own
+// Tests/TestPassDeclaration.cpp. Each of the four used to write the six values out.
+//
+// `Monarc.Render`'s Private/TestSupport/CapturedFrame.h holds, separately and on purpose, the
+// twelve barrier values Phase A3's RenderDoc captures actually contain -- so a case that feeds
+// these two states through the derivation and compares the result against that transcription is
+// comparing a derivation with a measurement rather than a constant with itself.
+// ---------------------------------------------------------------------------------------
+
+/// The state an image `Acquire` hands back is in.
+///
+/// **`TextureLayout::Undefined` is forced.** Acquiring does not preserve an image's contents --
+/// `vkAcquireNextImageKHR` says nothing about them -- so the only honest layout is the one that
+/// says the contents are not defined. `TextureLayout::Undefined`'s own comment in Barrier.h
+/// records that a transition *out* of it discards them, which is what an image about to be
+/// cleared on load wants anyway.
+///
+/// **`Access::None` is forced for the same reason.** Nothing this queue performed needs making
+/// available to the transition, because the contents it would make available are being
+/// discarded.
+///
+/// **`PipelineStage::ColorAttachmentOutput` is the choice, and it is `None` that would be
+/// wrong.** Presentation hands an image over through a semaphore, and a submission that renders
+/// into an acquired image waits on it. A wait's second synchronisation scope is the stage it was
+/// waited at; a layout transition is a write, so the transition out of `Undefined` has to be
+/// ordered after that wait, which happens only if the transition's *first* scope includes that
+/// stage. `PipelineStage::None` is the empty scope -- it would order the transition after
+/// nothing -- and that is a hole no layer reports, because it is a missing dependency rather
+/// than an illegal call.
+///
+/// **So the wait stage is not a second spelling of this value; it is this value.**
+/// `VulkanDeviceState::SubmitList` in Monarc.RHI.Vulkan/Private/VulkanDevice.cpp puts
+/// `Detail::ToVulkan(kSwapchainImageIncoming.stage)` into the acquire semaphore's
+/// `VkSemaphoreSubmitInfo::stageMask` rather than naming a `VK_PIPELINE_STAGE_2_*` constant of
+/// its own. The two halves of the chain cannot disagree, because there is one value.
+///
+/// **What that buys and what it does not.** It forecloses the drift -- a declaration and a wait
+/// that stop matching -- and it does not make the value itself verified: Monarc's builds do not
+/// enable Vulkan's synchronisation validation (a separate feature from the validation layer this
+/// module does turn on), so nothing measures the chain at run time. What holds the value is the
+/// argument above plus Phase A3's captures, which `Monarc.Render`'s derivation suite compares
+/// against.
+inline constexpr TextureState kSwapchainImageIncoming{
+    TextureLayout::Undefined, PipelineStage::ColorAttachmentOutput, Access::None};
+
+/// The state an image must be in before `Present`.
+///
+/// **All three are forced.** `TextureLayout::PresentSource` is `Present`'s own requirement --
+/// `VUID-VkPresentInfoKHR-pImageIndices-01430` -- and is the layout `TextureLayout`'s comment in
+/// Barrier.h records as reachable for a swapchain image and for nothing else.
+///
+/// Both scopes are `None` because there is no *command* after the transition. What reads the
+/// image next is the presentation engine, by way of the render-finished semaphore that
+/// `SubmitList` signals at `VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT` -- so the dependency that
+/// covers the transition is a semaphore signal, not a barrier's after-scope.
+///
+/// **That signal stage is not derived from this constant, and the asymmetry with
+/// `kSwapchainImageIncoming` is the point.** The incoming pairing is an equality -- the wait
+/// stage has to *be* the stage the transition's first scope names -- so there is one value to
+/// share. The outgoing pairing is a containment: the signal's first scope has to cover the
+/// transition, and `ALL_COMMANDS` is the widest scope there is, so it covers this transition
+/// whatever `stage` held. There is no equation here to collapse into one value, and writing one
+/// would be inventing a constraint rather than encoding one.
+inline constexpr TextureState kSwapchainImageOutgoing{TextureLayout::PresentSource,
+                                                      PipelineStage::None, Access::None};
 
 /// A surface and the images presented to it.
 ///

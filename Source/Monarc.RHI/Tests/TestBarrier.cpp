@@ -20,6 +20,7 @@ using Monarc::RHI::PipelineStage;
 using Monarc::RHI::TextureBarrier;
 using Monarc::RHI::TextureHandle;
 using Monarc::RHI::TextureLayout;
+using Monarc::RHI::TextureState;
 using Monarc::RHI::ToString;
 
 namespace {
@@ -123,11 +124,13 @@ constexpr std::string_view kNoCollision = "no two collide";
 /// collides exactly one pair, so it turned exactly one of the 286 red -- and it turns one of
 /// these three red, with the pair named.
 ///
-/// **The numbers that belong to this file are 15 cases and 46 assertions**, measured with
-/// `--source-file=*TestBarrier.cpp`, out of the binary's 51 and 174. An earlier version of this
+/// **The numbers that belong to this file are 17 cases and 53 assertions**, measured with
+/// `--source-file=*TestBarrier.cpp`, out of the binary's 60 and 216. An earlier version of this
 /// note said "this file's total went from 453 to 169 when they became three", and neither
 /// figure was this file's total: both were the whole binary's, at a commit several behind. That
-/// is precisely the mistake the next paragraph warns about, made inside the warning.
+/// is precisely the mistake the next paragraph warns about, made inside the warning. (It was
+/// then left at 15 and 46 out of 51 and 174 until `TextureState`'s two cases arrived here from
+/// Monarc.Render; the two file figures were right and the binary's two were stale again.)
 ///
 /// **This property does have to be here, and that is worth separating from the count.** A
 /// duplicated `ToString` case is invisible to everything else in either suite: the mutation
@@ -347,6 +350,39 @@ TEST_CASE("a buffer barrier reports every field it was given, in the right place
 }
 
 // ---------------------------------------------------------------------------------------
+// `TextureState` -- one side of a texture barrier, without the texture.
+//
+// These two cases came from Monarc.Render/Tests/TestAccess.cpp with the type itself. They are
+// here now for the reason `Describe` is in this module rather than in the backend that calls
+// it: a type's own suite is the one that has to still pass when the module above it is not
+// built, and this suite links no Vulkan and needs no GPU.
+// ---------------------------------------------------------------------------------------
+
+TEST_CASE("a default TextureState is Undefined and nothing else") {
+    // Pinned because `Render::TextureImport`'s argument is where this value would be written by
+    // accident, and because Barrier.h's claim that `TextureState{}` is "a visible statement
+    // rather than an absence" is only worth anything if what it states is known.
+    const TextureState state{};
+    CHECK(state.layout == TextureLayout::Undefined);
+    CHECK(state.stage == PipelineStage::None);
+    CHECK(state.access == Access::None);
+}
+
+TEST_CASE("TextureState compares on all three fields") {
+    const TextureState base{TextureLayout::ColorAttachment, PipelineStage::ColorAttachmentOutput,
+                            Access::ColorAttachmentWrite};
+    CHECK(base == TextureState{TextureLayout::ColorAttachment,
+                               PipelineStage::ColorAttachmentOutput,
+                               Access::ColorAttachmentWrite});
+    CHECK(base != TextureState{TextureLayout::PresentSource, PipelineStage::ColorAttachmentOutput,
+                               Access::ColorAttachmentWrite});
+    CHECK(base != TextureState{TextureLayout::ColorAttachment, PipelineStage::None,
+                               Access::ColorAttachmentWrite});
+    CHECK(base != TextureState{TextureLayout::ColorAttachment,
+                               PipelineStage::ColorAttachmentOutput, Access::None});
+}
+
+// ---------------------------------------------------------------------------------------
 // `Describe`, which is the text a backend's barrier refusal logs.
 // ---------------------------------------------------------------------------------------
 //
@@ -550,3 +586,9 @@ static_assert(std::is_default_constructible_v<BufferBarrier>);
 static_assert(std::is_trivially_copyable_v<GlobalBarrier>);
 static_assert(std::is_trivially_copyable_v<BufferBarrier>);
 static_assert(std::is_trivially_copyable_v<TextureBarrier>);
+
+// `TextureState` is the aggregate the three above are not -- see its comment in Barrier.h for
+// why the asymmetry is deliberate -- and trivially copyable for the same reason they are.
+static_assert(std::is_aggregate_v<TextureState>);
+static_assert(std::is_default_constructible_v<TextureState>);
+static_assert(std::is_trivially_copyable_v<TextureState>);

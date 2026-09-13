@@ -57,6 +57,7 @@
 #include <Monarc/RHI/Vulkan/VulkanBackend.h>
 #include <Monarc/RHI/Vulkan/VulkanDevice.h>
 #include <Monarc/RHI/Vulkan/VulkanSwapchain.h>
+#include <Monarc/Render/RenderGraph.h>
 
 #include <WindowPlatform.h>
 
@@ -88,8 +89,16 @@ constexpr Monarc::u64 kWaitTimeoutNanoseconds = 5'000'000'000ULL;
 /// the readback's staging buffer stays under a megabyte. The size matters for one case: the
 /// on-screen capture reads the *centre* pixel, so the window has to be big enough that its
 /// centre is unambiguously inside the client area.
-constexpr WindowDescription kHarnessWindow{.size  = {640, 360},
-                                           .title = "Monarc -- swapchain test"};
+///
+/// `activateOnShow` is false, as it is for the device-free suite: twenty windows open here and
+/// each one taking the focus would make the machine unusable for the length of a run. **The
+/// screen-capture case is unaffected**, because it does not rely on having been activated at
+/// creation -- it calls `WindowTestHooks::BringToForeground` and then asks `WindowFromPoint` who
+/// is actually on top, refusing to assert if the answer is not Monarc's window. Verified: the
+/// capture still reads the clear exactly with this false.
+constexpr WindowDescription kHarnessWindow{.size           = {640, 360},
+                                           .title          = "Monarc -- swapchain test",
+                                           .activateOnShow = false};
 
 constexpr Monarc::RHI::Format kSwapchainFormat = Monarc::RHI::Format::B8G8R8A8_UNORM;
 
@@ -276,6 +285,59 @@ struct Harness {
     return list.End();
 }
 
+/// Declares and records the same frame through `Monarc.Render`'s graph instead of by hand.
+///
+/// **`RecordFrame` above and this are the two halves of Phase A4's claim.** They record the same
+/// frame: `Undefined` to `ColorAttachment`, a rendering instance with a clear load-op, and
+/// `ColorAttachment` to `PresentSource`. The difference is that the three lines that write the
+/// barriers are here replaced by one import declaration and one attachment declaration, and the
+/// graph derives them. Nothing below names `RHI::TextureBarrier`.
+///
+/// This is `Monarc.FirstLight`'s frame, declaration for declaration, which is deliberate: the
+/// RenderDoc captures the phase compares against are of that program, so a test that declared
+/// something subtly different would be evidence about a frame nobody runs.
+[[nodiscard]] Monarc::Status RecordFrameThroughGraph(Monarc::Render::RenderGraph& graph,
+                                                     Monarc::RHI::IDevice&        device,
+                                                     Monarc::RHI::ICommandList&   list,
+                                                     Monarc::RHI::TextureHandle   image,
+                                                     Monarc::RHI::Extent2D        extent) {
+    graph.Reset();
+
+    // Only `ColorAttachment`, even when the swapchain was created with readback: the usage the
+    // *graph* is told about is the usage the frame it records needs, and the frame it records
+    // does not copy. The copy happens in a second submission the graph knows nothing about --
+    // see the readback case, which explains why it has to.
+    const Monarc::RHI::TextureDescription description{extent, kSwapchainFormat,
+                                                      Monarc::RHI::TextureUsage::ColorAttachment};
+
+    Monarc::Result<Monarc::Render::PassBuilder> pass = graph.AddPass("first light");
+    if (!pass) {
+        return Monarc::Status(std::unexpect, pass.error());
+    }
+
+    // The same two states `Monarc.FirstLight` imports, and the same *objects*: this suite's claim
+    // is "the frame that app records, recorded here", so declaring a second copy of the six values
+    // would let the two frames drift apart while both still passed. `RHI::kSwapchainImageIncoming`
+    // and `kSwapchainImageOutgoing` in Monarc/RHI/Swapchain.h carry the argument for each.
+    const Monarc::Result<Monarc::Render::TextureId> target = pass->ImportTexture(
+        "swapchain image",
+        Monarc::Render::TextureImport(image, description, Monarc::RHI::kSwapchainImageIncoming,
+                                      Monarc::RHI::kSwapchainImageOutgoing));
+    if (!target) {
+        return Monarc::Status(std::unexpect, target.error());
+    }
+
+    if (Monarc::Status declared = pass->ColorAttachment(*target, Monarc::RHI::LoadOp::Clear,
+                                                        Monarc::RHI::StoreOp::Store, kClearColor);
+        !declared) {
+        return declared;
+    }
+    if (Monarc::Status compiled = graph.Compile(); !compiled) {
+        return compiled;
+    }
+    return graph.Execute(device, list);
+}
+
 /// What one frame did.
 struct FrameResult {
     bool                        presented     = false;
@@ -312,6 +374,113 @@ struct FrameResult {
         harness.swapchain->SubmitForPresent(harness.device->GraphicsQueue(), **commands);
     REQUIRE(submitted.has_value());
     result.timelineValue = *submitted;
+
+    REQUIRE(harness.swapchain->Present().has_value());
+    result.presented = true;
+    return result;
+}
+
+/// Copies the image the graph just rendered into `staging`, in a submission of its own, and
+/// leaves it back in `PresentSource` so that it can still be presented.
+///
+/// **This exists because A4's render graph cannot record a readback, and that is a finding about
+/// the graph rather than a shortcut here.** Three separate things would each have to change
+/// before the copy below could be a pass:
+///
+///   1. `Render::ResourceAccess` has no transfer access at all, so no pass can ask for the
+///      `TransferSource` layout. An import's *outgoing* state can name it -- it is stated in
+///      `RHI` vocabulary -- but an outgoing state is the end of the frame, and this image's end
+///      is `PresentSource`.
+///   2. `Render::PassCommandList` forwards no recording call, so a pass callback has nothing
+///      with which to issue a copy.
+///   3. Culling drops a pass that only reads an import, and a readback pass's output is a buffer
+///      the graph does not model -- so even with the first two, it would be culled before it ran.
+///
+/// So the frame under test stays exactly `Monarc.FirstLight`'s -- every barrier in it derived --
+/// and the readback is scaffolding around it, in a second command list. **The two texture
+/// barriers below are the only hand-written ones left in this file's graph path, and neither is
+/// part of the frame**: they take the image out of `PresentSource` and put it back.
+///
+/// Ordering: this submission's first barrier has all earlier commands on the queue in its first
+/// synchronisation scope, which is what orders it after the clear; and the caller waits on this
+/// submission's timeline value before presenting, so the presentation engine sees the image only
+/// once it is back in `PresentSource`.
+[[nodiscard]] Monarc::u64 ReadBackPresentedImage(Harness&                   harness,
+                                                 Monarc::RHI::TextureHandle image,
+                                                 Monarc::RHI::BufferHandle  staging) {
+    const Monarc::Result<Monarc::RHI::ICommandList*> commands = harness.device->BeginFrame();
+    REQUIRE(commands.has_value());
+    REQUIRE(*commands != nullptr);
+    Monarc::RHI::ICommandList& list = **commands;
+
+    REQUIRE(list.Begin().has_value());
+
+    list.Barrier(Monarc::RHI::TextureBarrier(
+        image, Monarc::RHI::TextureLayout::PresentSource,
+        Monarc::RHI::TextureLayout::TransferSource,
+        Monarc::RHI::PipelineStage::ColorAttachmentOutput, Monarc::RHI::PipelineStage::Copy,
+        Monarc::RHI::Access::ColorAttachmentWrite, Monarc::RHI::Access::TransferRead));
+
+    REQUIRE(list.CopyTextureToBuffer(image, staging).has_value());
+
+    // Waiting on the timeline makes the copy's writes available; it does not make them visible to
+    // the host. A memory dependency into the host stage is what does.
+    list.Barrier(Monarc::RHI::BufferBarrier{staging, Monarc::RHI::PipelineStage::Copy,
+                                            Monarc::RHI::PipelineStage::Host,
+                                            Monarc::RHI::Access::TransferWrite,
+                                            Monarc::RHI::Access::HostRead});
+
+    list.Barrier(Monarc::RHI::TextureBarrier(
+        image, Monarc::RHI::TextureLayout::TransferSource,
+        Monarc::RHI::TextureLayout::PresentSource, Monarc::RHI::PipelineStage::Copy,
+        Monarc::RHI::PipelineStage::None, Monarc::RHI::Access::TransferRead,
+        Monarc::RHI::Access::None));
+
+    REQUIRE(list.End().has_value());
+
+    const Monarc::Result<Monarc::u64> submitted = harness.device->GraphicsQueue().Submit(list);
+    REQUIRE(submitted.has_value());
+    REQUIRE(harness.device->GraphicsQueue()
+                .Wait(*submitted, kWaitTimeoutNanoseconds)
+                .has_value());
+    return *submitted;
+}
+
+/// Runs one frame through the harness with the **graph** recording it, and optionally reads the
+/// image back before presenting it. `PresentOneFrame`'s shape, with `RecordFrame` replaced.
+[[nodiscard]] FrameResult PresentOneFrameThroughGraph(Harness&                     harness,
+                                                      Monarc::Render::RenderGraph& graph,
+                                                      Monarc::RHI::BufferHandle    staging) {
+    FrameResult result{};
+
+    const Monarc::Result<Monarc::RHI::ICommandList*> commands = harness.device->BeginFrame();
+    REQUIRE(commands.has_value());
+    REQUIRE(*commands != nullptr);
+
+    const Monarc::Result<Monarc::RHI::AcquiredImage> acquired = harness.swapchain->Acquire();
+    REQUIRE(acquired.has_value());
+    result.outcome = acquired->outcome;
+    if (acquired->outcome != Monarc::RHI::AcquireOutcome::Acquired) {
+        return result;
+    }
+    result.texture    = acquired->texture;
+    result.imageIndex = acquired->index;
+    result.suboptimal = acquired->suboptimal;
+
+    REQUIRE(RecordFrameThroughGraph(graph, *harness.device, **commands, acquired->texture,
+                                    harness.swapchain->Extent())
+                .has_value());
+
+    const Monarc::Result<Monarc::u64> submitted =
+        harness.swapchain->SubmitForPresent(harness.device->GraphicsQueue(), **commands);
+    REQUIRE(submitted.has_value());
+    result.timelineValue = *submitted;
+
+    if (staging.IsValid()) {
+        // The readback's own submission is the one that says the bytes are there, so its
+        // timeline value is what the caller must wait on -- it has already been waited on inside.
+        result.timelineValue = ReadBackPresentedImage(harness, acquired->texture, staging);
+    }
 
     REQUIRE(harness.swapchain->Present().has_value());
     result.presented = true;
@@ -357,6 +526,39 @@ void ReportBytes(const char* what, const char* adapterName, std::span<const Mona
                what, adapterName, bytes[0], bytes[1], bytes[2], bytes[3], fourthByte,
                kExpectedSwapchainBytes[0], kExpectedSwapchainBytes[1],
                kExpectedSwapchainBytes[2], kExpectedSwapchainBytes[3]);
+}
+
+/// Asserts that every pixel of a swapchain readback is the clear colour, and logs what was read.
+///
+/// **One copy of this, called by the hand-written readback and by the graph-recorded one.** The
+/// two cases differ in who wrote the frame's barriers and in nothing else, so the assertion has
+/// to be literally the same assertion rather than two that happen to agree today.
+void CheckReadbackPixels(const char* what, const char* adapterName,
+                         std::span<const Monarc::u8> bytes) {
+    ReportBytes(what, adapterName, bytes, "alpha");
+
+    CHECK(bytes[0] == kExpectedSwapchainBytes[0]);
+    CHECK(bytes[1] == kExpectedSwapchainBytes[1]);
+    CHECK(bytes[2] == kExpectedSwapchainBytes[2]);
+    CHECK(bytes[3] == kExpectedSwapchainBytes[3]);
+
+    // Every pixel, individually, which is what catches a copy whose row pitch was wrong: on a
+    // 640-wide target a stride bug lands the second row's bytes somewhere inside this span
+    // rather than past the end of it.
+    Monarc::usize       matching = 0;
+    const Monarc::usize pixels   = bytes.size() / 4;
+    for (Monarc::usize pixel = 0; pixel < pixels; ++pixel) {
+        const Monarc::u8* pixelBytes = bytes.data() + pixel * 4;
+        if (pixelBytes[0] == kExpectedSwapchainBytes[0] &&
+            pixelBytes[1] == kExpectedSwapchainBytes[1] &&
+            pixelBytes[2] == kExpectedSwapchainBytes[2] &&
+            pixelBytes[3] == kExpectedSwapchainBytes[3]) {
+            ++matching;
+        }
+    }
+    MONARC_LOG(SwapchainTest, Info, "{} on \"{}\": {} of {} pixel(s) exact", what, adapterName,
+               matching, pixels);
+    CHECK(matching == pixels);
 }
 
 /// Asserts that a swapchain which is not initialised answers every query as empty and refuses
@@ -621,31 +823,7 @@ TEST_CASE("THE SWAPCHAIN READBACK: the clear reaches the image that gets present
         REQUIRE(mapped.has_value());
         REQUIRE(mapped->size() == ReadbackByteCount(extent));
 
-        ReportBytes("swapchain readback", adapter.name, *mapped, "alpha");
-
-        CHECK((*mapped)[0] == kExpectedSwapchainBytes[0]);
-        CHECK((*mapped)[1] == kExpectedSwapchainBytes[1]);
-        CHECK((*mapped)[2] == kExpectedSwapchainBytes[2]);
-        CHECK((*mapped)[3] == kExpectedSwapchainBytes[3]);
-
-        // Every pixel, individually, which is what catches a copy whose row pitch was wrong: on
-        // a 640-wide target a stride bug lands the second row's bytes somewhere inside this span
-        // rather than past the end of it.
-        Monarc::usize       matching = 0;
-        const Monarc::usize pixels   = mapped->size() / 4;
-        for (Monarc::usize pixel = 0; pixel < pixels; ++pixel) {
-            const Monarc::u8* bytes = mapped->data() + pixel * 4;
-            if (bytes[0] == kExpectedSwapchainBytes[0] &&
-                bytes[1] == kExpectedSwapchainBytes[1] &&
-                bytes[2] == kExpectedSwapchainBytes[2] &&
-                bytes[3] == kExpectedSwapchainBytes[3]) {
-                ++matching;
-            }
-        }
-        MONARC_LOG(SwapchainTest, Info,
-                   "swapchain readback on \"{}\": {} of {} pixel(s) exact", adapter.name,
-                   matching, pixels);
-        CHECK(matching == pixels);
+        CheckReadbackPixels("swapchain readback", adapter.name, *mapped);
 
         harness.device->UnmapBuffer(*staging);
         REQUIRE(harness.device->WaitIdle().has_value());
@@ -656,6 +834,125 @@ TEST_CASE("THE SWAPCHAIN READBACK: the clear reaches the image that gets present
     // The suite must not pass having read back nothing. If every adapter's surface refused
     // transfer-source images this goes red, which is the finding rather than a silent skip.
     CHECK(adaptersRead >= 1);
+}
+
+TEST_CASE("THE GRAPH READBACK: the same clear, through derived barriers, reaches the image") {
+    // **Phase A4's headline device assertion, and it is the case above with the barriers
+    // deleted.** The frame is recorded by `Monarc.Render`'s graph from one import declaration and
+    // one attachment declaration; the two `vkCmdPipelineBarrier2` calls A3 hand-wrote are derived
+    // from the import's incoming and outgoing states. What is asserted is unchanged: the image
+    // the presentation engine is handed reads back as exactly `(192, 128, 64, 255)`, every pixel,
+    // on every deduplicated adapter that can present.
+    //
+    // **It shares the expected value, the byte assertion and the harness with the case above**,
+    // and differs only in who wrote the barriers -- which is the only difference the phase is
+    // about. Two readbacks that agreed by writing the assertion twice would prove less than one
+    // assertion called from both.
+    //
+    // The graph is built once and `Reset` per frame, which is `RenderGraph`'s intended shape and
+    // `Monarc.FirstLight`'s. It declares no transients, so `Reset`'s precondition about in-flight
+    // work and about outliving the device does not bind -- there is nothing for it to destroy.
+    REQUIRE_FALSE(Adapters().IsEmpty());
+
+    Monarc::usize adaptersRead = 0;
+    for (const Monarc::RHI::AdapterInfo& adapter : Adapters()) {
+        Harness harness;
+        if (const Monarc::Status opened = harness.Open(adapter, true); !opened) {
+            MONARC_LOG(SwapchainTest, Warning, "\"{}\" has no swapchain: {} -- {}", adapter.name,
+                       Monarc::ToString(opened.error().code), opened.error().message);
+            continue;
+        }
+
+        if (!harness.swapchain->ReadbackAvailable()) {
+            // Stated and skipped, never silently asserted away --
+            // `VkSurfaceCapabilitiesKHR::supportedUsageFlags` is not required to offer
+            // transfer-source images. The case above says the same thing at length.
+            MONARC_LOG(SwapchainTest, Warning,
+                       "\"{}\" produced a swapchain whose surface does not offer transfer-source "
+                       "images, so the graph readback did not run on it",
+                       adapter.name);
+            continue;
+        }
+
+        const Monarc::RHI::Extent2D    extent = harness.swapchain->Extent();
+        Monarc::RHI::BufferDescription bufferDescription{};
+        bufferDescription.size     = ReadbackByteCount(extent);
+        bufferDescription.usage    = Monarc::RHI::BufferUsage::TransferDestination;
+        bufferDescription.location = Monarc::RHI::MemoryLocation::HostVisible;
+
+        const Monarc::Result<Monarc::RHI::BufferHandle> staging =
+            harness.device->CreateBuffer(bufferDescription);
+        REQUIRE(staging.has_value());
+
+        Monarc::Render::RenderGraph graph(harness.allocator,
+                                          Monarc::Render::RenderGraph::Config{});
+
+        harness.window->PumpEvents();
+        const FrameResult result = PresentOneFrameThroughGraph(harness, graph, *staging);
+        REQUIRE(result.outcome == Monarc::RHI::AcquireOutcome::Acquired);
+        REQUIRE(result.presented);
+
+        // **Two barriers and no more, which is what makes this the same frame A3 captured.** The
+        // recorded values are asserted device-free in Monarc.Render/Tests/TestExecute.cpp against
+        // the numbers decoded from A3's RenderDoc XML; what this adds is that a driver accepted
+        // them and produced the pixels. The layouts are checked here so that a frame which
+        // silently grew or lost a transition fails at the declaration rather than only in a
+        // capture somebody has to open.
+        const Monarc::Render::GraphInspection report = graph.Inspect();
+        REQUIRE(report.barriers.size() == 2);
+        CHECK(report.barriers[0].layoutBefore == Monarc::RHI::TextureLayout::Undefined);
+        CHECK(report.barriers[0].layoutAfter == Monarc::RHI::TextureLayout::ColorAttachment);
+        CHECK(report.barriers[1].layoutBefore == Monarc::RHI::TextureLayout::ColorAttachment);
+        CHECK(report.barriers[1].layoutAfter == Monarc::RHI::TextureLayout::PresentSource);
+
+        const Monarc::Result<std::span<const Monarc::u8>> mapped =
+            harness.device->MapBufferForRead(*staging);
+        REQUIRE(mapped.has_value());
+        REQUIRE(mapped->size() == ReadbackByteCount(extent));
+
+        CheckReadbackPixels("graph swapchain readback", adapter.name, *mapped);
+
+        harness.device->UnmapBuffer(*staging);
+        REQUIRE(harness.device->WaitIdle().has_value());
+        harness.device->DestroyBuffer(*staging);
+        ++adaptersRead;
+    }
+
+    // The suite must not pass having read back nothing.
+    CHECK(adaptersRead >= 1);
+}
+
+TEST_CASE("ten frames recorded by the graph are presented, with no out-of-date loop") {
+    // The graph's answer to "ten frames acquired and presented" above. A single frame proves the
+    // barriers are accepted; a run of them proves the declaration survives being made again every
+    // frame -- which is the shape `Monarc.FirstLight` actually runs, `Reset` and all.
+    REQUIRE_FALSE(Adapters().IsEmpty());
+
+    Harness harness;
+    REQUIRE(harness.Open(Adapters()[0], false).has_value());
+
+    Monarc::Render::RenderGraph graph(harness.allocator, Monarc::Render::RenderGraph::Config{});
+
+    Monarc::u32 presented  = 0;
+    Monarc::u32 outOfDate  = 0;
+    for (Monarc::u32 frame = 0; frame < 10; ++frame) {
+        harness.window->PumpEvents();
+        const FrameResult result =
+            PresentOneFrameThroughGraph(harness, graph, Monarc::RHI::BufferHandle{});
+        if (result.outcome != Monarc::RHI::AcquireOutcome::Acquired) {
+            ++outOfDate;
+            REQUIRE(harness.swapchain->Recreate(harness.window->ClientSize()).has_value());
+            continue;
+        }
+        ++presented;
+    }
+
+    MONARC_LOG(SwapchainTest, Info,
+               "graph frame loop on \"{}\": {} presented, {} out-of-date acquire(s)",
+               Adapters()[0].name, presented, outOfDate);
+    CHECK(presented == 10);
+    CHECK(outOfDate == 0);
+    REQUIRE(harness.device->WaitIdle().has_value());
 }
 
 TEST_CASE("THE SCREEN CAPTURE: the window's own pixels are the clear colour") {

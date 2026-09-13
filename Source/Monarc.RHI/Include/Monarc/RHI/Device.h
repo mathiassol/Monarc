@@ -102,6 +102,21 @@ enum class StoreOp : u32 {
     DontCare,
 };
 
+/// The enumerator's own spelling. Never nullptr; a value outside the enumerator set gets a name
+/// of its own rather than any real enumerator's, for the reason `ToString(Format)` in Types.h
+/// gives -- conflating a named state with an invalid one misdirects whoever reads the line.
+///
+/// **Here rather than in the module that wanted them, which is `Monarc.Render`.** Its render
+/// graph's inspection report renders an attachment's two ops, and that report is this pair's
+/// first and only caller today. `Describe` in Barrier.h argues the placement at length for
+/// itself and the argument is the same one: a value spelling that names no type but the enum
+/// lives with the enum, or the second consumer either duplicates it or reaches into a module it
+/// has no business seeing.
+/// @{
+[[nodiscard]] const char* ToString(LoadOp op);
+[[nodiscard]] const char* ToString(StoreOp op);
+/// @}
+
 /// A clear value for a colour attachment, in the attachment's own channel order.
 ///
 /// Floats even for a UNORM target: that is how both APIs take a clear value, and the

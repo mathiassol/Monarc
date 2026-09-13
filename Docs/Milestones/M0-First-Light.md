@@ -57,7 +57,7 @@ account of what is true; a phase is marked complete here once it has a
 | **A2c** | Platform — files, paths, time, threads, dynamic libraries, GUID | The OS boundary, selected by directory rather than `#ifdef` ([ADR-0016](../Architecture/Decisions/ADR-0016-platform-code-selection.md)) — [plan](../Plans/2026-09-06-phase-a2c-platform.md) | **Complete** |
 | **A2d** | `Monarc.Jobs` | A parallel job graph with dependencies, under test — the first module beyond `Monarc.Core` — [plan](../Plans/2026-09-06-phase-a2d-jobs.md) | **Complete** |
 | **A3** | `RHI`, `RHI.Vulkan`, `Host.Windowed` | A window with a cleared screen, via the RHI directly, plus a headless readback test that proves the colour — [plan](../Plans/2026-09-06-phase-a3-rhi-and-first-light.md) | **Complete** — [what it delivered, and what it does not prove](../Status.md#a3-delivered) |
-| **A4** | Minimal render graph | A window opens and the screen clears **through the real render graph** | Not started |
+| **A4** | Minimal render graph | A window opens and the screen clears **through the real render graph** — [plan](../Plans/2026-09-08-phase-a4-render-graph.md) | **Complete** — [what it delivered, and what it does not prove](../Status.md#a4-delivered) |
 | **B** | `ShaderCompiler`, `Shaders`, `Render` | A cube renders from in-memory data via `RenderScene` and a Slang shader | Not started |
 | **C** | `Reflect`, `Serialize`, `Assets`, `Cook` | A glTF mesh and texture are imported, cooked, loaded by handle, and rendered | Not started |
 | **D** | `World`, `Engine` | An Actor with a `StaticMeshComponent` and a camera, in a saved scene | Not started |

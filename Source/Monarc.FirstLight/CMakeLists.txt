@@ -8,7 +8,7 @@ monarc_app(
     NAME         Monarc.FirstLight
     KIND         Runtime
     TIER         3
-    PRIVATE_DEPS Monarc.Core Monarc.RHI Monarc.RHI.Vulkan Monarc.Host.Windowed)
+    PRIVATE_DEPS Monarc.Core Monarc.RHI Monarc.RHI.Vulkan Monarc.Host.Windowed Monarc.Render)
 
 # Monarc.FirstLight itself is deliberately not a CTest entry. It is an integration proof that
 # currently exits non-zero on purpose -- the window arrives in Task 4 -- so registering it
