@@ -3,6 +3,8 @@
 #include <Monarc/Core/Memory/SystemAllocator.h>
 #include <Monarc/Render/RenderGraph.h>
 
+#include <TestSupport/CapturedFrame.h>
+
 #include <iterator>
 
 // The barrier derivation: the transitions the declared reads and writes imply.
@@ -46,6 +48,19 @@ using Monarc::Render::RequirementOf;
 using Monarc::Render::TextureId;
 using Monarc::Render::TextureImport;
 using Monarc::Render::TextureState;
+using Monarc::Render::TestSupport::kCapturedFirstDstAccess;
+using Monarc::Render::TestSupport::kCapturedFirstDstStage;
+using Monarc::Render::TestSupport::kCapturedFirstNewLayout;
+using Monarc::Render::TestSupport::kCapturedFirstOldLayout;
+using Monarc::Render::TestSupport::kCapturedFirstSrcAccess;
+using Monarc::Render::TestSupport::kCapturedFirstSrcStage;
+using Monarc::Render::TestSupport::kCapturedSecondDstAccess;
+using Monarc::Render::TestSupport::kCapturedSecondDstStage;
+using Monarc::Render::TestSupport::kCapturedSecondNewLayout;
+using Monarc::Render::TestSupport::kCapturedSecondOldLayout;
+using Monarc::Render::TestSupport::kCapturedSecondSrcAccess;
+using Monarc::Render::TestSupport::kCapturedSecondSrcStage;
+using Monarc::Render::TestSupport::kSwapchainDescription;
 using Monarc::RHI::Access;
 using Monarc::RHI::Format;
 using Monarc::RHI::PipelineStage;
@@ -56,35 +71,19 @@ using Monarc::RHI::TextureUsage;
 
 namespace {
 
-constexpr TextureDescription kSwapchainDescription{
-    Monarc::RHI::Extent2D{1280, 720}, Format::B8G8R8A8_UNORM, TextureUsage::ColorAttachment};
-
 /// The three stages `RequirementOf` gives every shader access, spelled once.
 constexpr PipelineStage kShaderStages =
     PipelineStage::VertexShader | PipelineStage::FragmentShader | PipelineStage::ComputeShader;
 
-/// The import `Monarc.FirstLight` will declare for the swapchain image it clears and presents.
+/// The import `Monarc.FirstLight` declares, by the index of the handle it names.
 ///
-/// **Every one of the six values below is a statement about the world outside the graph, and
-/// five of them are forced rather than chosen.** The sixth is argued at the headline case.
-///
-/// - `incoming.layout = Undefined`: `vkAcquireNextImageKHR` does not preserve the contents of
-///   the image it hands back, so the only honest layout for it is the one that says the contents
-///   are not defined. `RHI::TextureLayout::Undefined`'s own comment says a transition out of it
-///   discards them, which is exactly right for an image about to be cleared on load.
-/// - `incoming.access = None`: nothing this queue performed needs making available. The image's
-///   previous contents are being discarded.
-/// - `outgoing.layout = PresentSource`: `ISwapchain::Present` requires it --
-///   `VUID-VkPresentInfoKHR-pImageIndices-01430`, recorded at `TextureLayout::PresentSource`.
-/// - `outgoing.stage = None` and `outgoing.access = None`: there is no *command* after the
-///   transition. What reads the image next is the presentation engine, by way of the
-///   render-finished semaphore, which `SubmitList` signals at `ALL_COMMANDS` -- so the
-///   dependency that covers it is a semaphore rather than a barrier scope.
+/// **The import's six declared states live in Private/TestSupport/CapturedFrame.h**, beside the
+/// captured barrier values they produce, because Tests/TestExecute.cpp declares the same frame
+/// and a second copy of either would be a second thing to keep true. This wrapper exists only
+/// because the cases below want a *different anchor handle* per resource and say so by index --
+/// see `AnchoredPass`.
 [[nodiscard]] TextureImport SwapchainImport(Monarc::u32 index = 4) {
-    return TextureImport(
-        TextureHandle::ForTesting(index, 1), kSwapchainDescription,
-        TextureState{TextureLayout::Undefined, PipelineStage::ColorAttachmentOutput, Access::None},
-        TextureState{TextureLayout::PresentSource, PipelineStage::None, Access::None});
+    return Monarc::Render::TestSupport::SwapchainImport(TextureHandle::ForTesting(index, 1));
 }
 
 /// An import whose two ends are chosen to frame a case rather than to model a swapchain.
@@ -168,45 +167,10 @@ constexpr PipelineStage kShaderStages =
     return BarrierCauseSide{kind, kNoPass, ResourceAccess::ColorAttachmentRead};
 }
 
-// ---------------------------------------------------------------------------------------
-// A3's measured barriers, decoded from the captures.
-//
-// **The reference is Build/Captures/monarc-firstlight-nvidia-rtx3070ti_frame345.xml and
-// Build/Captures/monarc-firstlight-intel-uhd730_frame331.xml**, the two RenderDoc XML dumps
-// Phase A3 left behind of the hand-written frame. Both contain exactly two
-// `vkCmdPipelineBarrier2` chunks, each with one `VkImageMemoryBarrier2`, and **the two adapters'
-// values are identical** -- decoded field by field from both files rather than from one.
-//
-// The raw numbers are in the XML beside the spellings, and are repeated here so that the mapping
-// from a Vulkan enumerator to an `RHI` one is visible rather than assumed:
-//
-//   barrier 0 (before rendering)          barrier 1 (to present)
-//   oldLayout      0  UNDEFINED           oldLayout      2          COLOR_ATTACHMENT_OPTIMAL
-//   newLayout      2  COLOR_ATTACHMENT..  newLayout      1000001002 PRESENT_SRC_KHR
-//   srcStageMask   1024 COLOR_ATT_OUTPUT  srcStageMask   1024       COLOR_ATTACHMENT_OUTPUT
-//   dstStageMask   1024 COLOR_ATT_OUTPUT  dstStageMask   0          NONE
-//   srcAccessMask  0  NONE                srcAccessMask  256        COLOR_ATTACHMENT_WRITE
-//   dstAccessMask  256 COLOR_ATT_WRITE    dstAccessMask  0          NONE
-//
-// **These constants are the capture, not the derivation**, which is the whole point of naming
-// them: the headline case compares what the graph produced against values transcribed from a
-// file, so a change to the derivation that also changed the expectation would have to change
-// this table and stop matching the citation above it.
-// ---------------------------------------------------------------------------------------
-
-constexpr TextureLayout kCapturedFirstOldLayout  = TextureLayout::Undefined;
-constexpr TextureLayout kCapturedFirstNewLayout  = TextureLayout::ColorAttachment;
-constexpr PipelineStage kCapturedFirstSrcStage   = PipelineStage::ColorAttachmentOutput;
-constexpr PipelineStage kCapturedFirstDstStage   = PipelineStage::ColorAttachmentOutput;
-constexpr Access        kCapturedFirstSrcAccess  = Access::None;
-constexpr Access        kCapturedFirstDstAccess  = Access::ColorAttachmentWrite;
-
-constexpr TextureLayout kCapturedSecondOldLayout = TextureLayout::ColorAttachment;
-constexpr TextureLayout kCapturedSecondNewLayout = TextureLayout::PresentSource;
-constexpr PipelineStage kCapturedSecondSrcStage  = PipelineStage::ColorAttachmentOutput;
-constexpr PipelineStage kCapturedSecondDstStage  = PipelineStage::None;
-constexpr Access        kCapturedSecondSrcAccess = Access::ColorAttachmentWrite;
-constexpr Access        kCapturedSecondDstAccess = Access::None;
+// A3's measured barriers are in Private/TestSupport/CapturedFrame.h, which transcribes both
+// RenderDoc XML dumps field by field and carries the citation, the raw Vulkan numbers and the
+// argument for why the constants are the capture rather than the derivation. They are used from
+// here and from Tests/TestExecute.cpp, which is why they are not in either file.
 
 // ---------------------------------------------------------------------------------------
 // Two premises about `ResourceAccess` that the derivation's shape rests on, pinned where they
