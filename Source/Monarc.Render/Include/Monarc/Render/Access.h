@@ -104,11 +104,11 @@ struct AccessScope {
 };
 
 // **A texture's whole state -- a layout with both scopes -- is `RHI::TextureState` in
-// Monarc/RHI/Barrier.h, and it used to be here.** It moved because `Monarc.RHI` has facts of its
-// own to state about one: a swapchain image is handed over in one state and must be handed back
-// in another, and a module cannot state a fact in a vocabulary it does not have. Beside
-// `TextureBarrier` is where it belongs anyway -- a barrier is a pair of those states plus a
-// handle.
+// Monarc/RHI/Barrier.h, and it used to be here.** It moved because `Monarc.RHI` acquired a
+// caller of its own: `kSwapchainImageIncoming` and `kSwapchainImageOutgoing` in
+// Monarc/RHI/Swapchain.h are the swapchain's own facts about the images it hands out, and a
+// module cannot state a fact in a vocabulary it does not have. Beside `TextureBarrier` is where
+// it belongs anyway -- a barrier is a pair of those states plus a handle.
 //
 // `AccessScope` above did not move with it, under `Format`'s rule in Monarc/RHI/Types.h -- "a
 // format arrives with its first user, and not before", which `PipelineStage` in Barrier.h names

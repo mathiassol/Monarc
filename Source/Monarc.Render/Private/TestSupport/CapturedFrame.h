@@ -3,6 +3,7 @@
 #include <Monarc/RHI/Barrier.h>
 #include <Monarc/RHI/Device.h>
 #include <Monarc/RHI/Handles.h>
+#include <Monarc/RHI/Swapchain.h>
 #include <Monarc/Render/Access.h>
 #include <Monarc/Render/PassBuilder.h>
 
@@ -74,39 +75,27 @@ inline constexpr RHI::TextureDescription kSwapchainDescription{
 
 /// The import `Monarc.FirstLight` declares for the swapchain image it clears and presents.
 ///
-/// **Every one of the six values below is a statement about the world outside the graph, and
-/// five of them are forced rather than chosen.** The sixth is `incoming.stage`.
+/// **The six declared values are not written here, and that is what keeps the two suites'
+/// equivalence cases from being tautologies.** They are `RHI::kSwapchainImageIncoming` and
+/// `kSwapchainImageOutgoing` in Monarc/RHI/Swapchain.h, where the argument for each lives: five
+/// forced by the swapchain contract, one -- `incoming.stage` -- chosen against
+/// `VulkanDeviceState::SubmitList`'s acquire-semaphore wait. The
+/// twelve `kCaptured*` values above are the other half: transcribed from A3's RenderDoc files
+/// and belonging to no declaration, so a case that feeds these two states through the derivation
+/// and compares the result against those twelve is comparing two independent things.
 ///
-/// - `incoming.layout = Undefined`: `vkAcquireNextImageKHR` does not preserve the contents of
-///   the image it hands back, so the only honest layout for it is the one that says the contents
-///   are not defined. `RHI::TextureLayout::Undefined`'s own comment says a transition out of it
-///   discards them, which is exactly right for an image about to be cleared on load.
-/// - `incoming.access = None`: nothing this queue performed needs making available. The image's
-///   previous contents are being discarded.
-/// - `outgoing.layout = PresentSource`: `ISwapchain::Present` requires it --
-///   `VUID-VkPresentInfoKHR-pImageIndices-01430`, recorded at `TextureLayout::PresentSource`.
-/// - `outgoing.stage = None` and `outgoing.access = None`: there is no *command* after the
-///   transition. What reads the image next is the presentation engine, by way of the
-///   render-finished semaphore, which `SubmitList` signals at `ALL_COMMANDS` -- so the
-///   dependency that covers it is a semaphore rather than a barrier scope.
-/// - `incoming.stage = ColorAttachmentOutput` is the choice: `VulkanDeviceState::SubmitList`
-///   waits on the acquire semaphore at that stage and a layout transition is a write that has to
-///   be ordered after that wait. **Do not change it to make a capture match** -- the derivation
-///   is a function of it, and *"the derived barriers are a function of the declared import
-///   states"* in Tests/TestDeriveBarriers.cpp is what pins that it is a choice rather than a
-///   constant.
+/// **Which pins `incoming.stage` from one end only, and that is worth being exact about.**
+/// Change the constant and the equivalence case fails against the capture. Change the acquire
+/// wait stage in Monarc.RHI.Vulkan instead, which is still a literal of its own, and nothing
+/// here moves -- the two are a pair that has to agree, and only one of them is under test.
 ///
 /// `image` is a parameter because the two suites need different handles: a derivation test needs
 /// none that resolves anywhere, and an execution test needs one its stub device really made,
 /// which is what a swapchain image is -- see `RHI::AcquiredImage`, which registers every
 /// swapchain image in the device's own texture pool.
 [[nodiscard]] inline TextureImport SwapchainImport(RHI::TextureHandle image) {
-    return TextureImport(image, kSwapchainDescription,
-                         RHI::TextureState{RHI::TextureLayout::Undefined,
-                                           RHI::PipelineStage::ColorAttachmentOutput,
-                                           RHI::Access::None},
-                         RHI::TextureState{RHI::TextureLayout::PresentSource,
-                                           RHI::PipelineStage::None, RHI::Access::None});
+    return TextureImport(image, kSwapchainDescription, RHI::kSwapchainImageIncoming,
+                         RHI::kSwapchainImageOutgoing);
 }
 
 }  // namespace Monarc::Render::TestSupport

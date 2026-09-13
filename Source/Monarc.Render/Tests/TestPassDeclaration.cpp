@@ -4,6 +4,7 @@
 #include <Monarc/RHI/Barrier.h>
 #include <Monarc/RHI/Device.h>
 #include <Monarc/RHI/Handles.h>
+#include <Monarc/RHI/Swapchain.h>
 #include <Monarc/Render/RenderGraph.h>
 
 #include <TestSupport/GraphLogCapture.h>
@@ -37,6 +38,8 @@ using Monarc::Render::TextureId;
 using Monarc::Render::TextureImport;
 using Monarc::RHI::Access;
 using Monarc::RHI::Format;
+using Monarc::RHI::kSwapchainImageIncoming;
+using Monarc::RHI::kSwapchainImageOutgoing;
 using Monarc::RHI::PipelineStage;
 using Monarc::RHI::TextureDescription;
 using Monarc::RHI::TextureHandle;
@@ -51,27 +54,23 @@ namespace {
 constexpr TextureDescription kSwapchainDescription{
     Monarc::RHI::Extent2D{1280, 720}, Format::B8G8R8A8_UNORM, TextureUsage::ColorAttachment};
 
-/// The swapchain image's declared states, and the values are Phase A3's measured ones.
-///
-/// A3's `RecordFrame` barriers the acquired image `Undefined -> ColorAttachment` with
-/// `ColorAttachmentOutput` on **both** sides -- the before scope chains with the acquire
-/// semaphore's wait stage -- and then `ColorAttachment -> PresentSource` with `None` after,
-/// because what reads the image next is the presentation engine by way of a semaphore. Those
-/// are the two states an import declares, and Task 3's derivation is what has to reproduce
-/// them. Written here so that Task 1's round-trip asserts the same values Task 3 will.
-/// @{
-constexpr TextureState kSwapchainIncoming{TextureLayout::Undefined,
-                                          PipelineStage::ColorAttachmentOutput, Access::None};
-constexpr TextureState kSwapchainOutgoing{TextureLayout::PresentSource, PipelineStage::None,
-                                          Access::None};
-/// @}
+// **The swapchain image's two declared states are `RHI::kSwapchainImageIncoming` and
+// `kSwapchainImageOutgoing`, used by their own names, and this file used to transcribe them.**
+// They are the swapchain's own facts and they live with it in Monarc/RHI/Swapchain.h, which
+// argues each of the six values. The copy that stood here carried a comment saying it was A3's
+// measured pair -- true right up until someone changed the pair, and silent after that.
+//
+// The round-trip cases below feed them in and assert they come back, which is a test of
+// `TextureImport`'s plumbing and would hold for any two distinct states. Using the real pair
+// costs nothing and stops the file describing values it does not use.
 
 /// A handle standing in for one an `ISwapchain` would hand out. `ForTesting` because no device
 /// created it -- see `RHI::Handle`'s class comment on what that name buys.
 const TextureHandle kSwapchainImage = TextureHandle::ForTesting(4, 1);
 
 [[nodiscard]] TextureImport SwapchainImport(TextureHandle image = kSwapchainImage) {
-    return TextureImport(image, kSwapchainDescription, kSwapchainIncoming, kSwapchainOutgoing);
+    return TextureImport(image, kSwapchainDescription, kSwapchainImageIncoming,
+                         kSwapchainImageOutgoing);
 }
 
 /// A recording callback that counts its own destructions through a caller's counter.
@@ -191,8 +190,8 @@ TEST_CASE("a declaration round-trips through inspection unchanged") {
     CHECK(inspection.resources[1].id == *image);
     CHECK(inspection.resources[1].origin == ResourceOrigin::Imported);
     CHECK(inspection.resources[1].importedTexture == kSwapchainImage);
-    CHECK(inspection.resources[1].incoming == kSwapchainIncoming);
-    CHECK(inspection.resources[1].outgoing == kSwapchainOutgoing);
+    CHECK(inspection.resources[1].incoming == kSwapchainImageIncoming);
+    CHECK(inspection.resources[1].outgoing == kSwapchainImageOutgoing);
     CHECK(inspection.resources[1].description.format == Format::B8G8R8A8_UNORM);
 
     // Accesses, flat and in declaration order.
@@ -1461,7 +1460,7 @@ TEST_CASE("a colour attachment on an imported texture with an empty extent is re
         TextureImport(kSwapchainImage,
                       TextureDescription{Monarc::RHI::Extent2D{0, 720}, Format::B8G8R8A8_UNORM,
                                          TextureUsage::ColorAttachment},
-                      kSwapchainIncoming, kSwapchainOutgoing));
+                      kSwapchainImageIncoming, kSwapchainImageOutgoing));
     REQUIRE(image.has_value());
 
     const Status refused = pass->ColorAttachment(*image, Monarc::RHI::LoadOp::Clear,

@@ -404,10 +404,10 @@ private:
 /// **The stage and access halves are not decoration on the layout.** A state that carried only
 /// a layout would say when a texture's contents are readable and nothing about when the
 /// transition itself may run, and a transition is a write like any other: it has to be ordered
-/// against whatever produced the image and whatever consumes it. A swapchain image is the
-/// worked example: the transition out of `Undefined` that a presenting frame opens with names
-/// `ColorAttachmentOutput` on its before side rather than `None`, for a reason that is about a
-/// semaphore and not about a layout at all.
+/// against whatever produced the image and whatever consumes it. `kSwapchainImageIncoming` in
+/// Monarc/RHI/Swapchain.h is the worked example -- its stage is `ColorAttachmentOutput` rather
+/// than `None` for a reason that is about a semaphore and not about a layout at all -- and that
+/// constant's comment is where the argument is.
 ///
 /// **A plain aggregate with defaults, unlike `TextureBarrier` above, and the difference is
 /// where the omission would be invisible.** `TextureBarrier` has no default constructor because

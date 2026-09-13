@@ -115,11 +115,12 @@ constexpr Monarc::RHI::TextureDescription kOutputDescription{kExtent, kFormat, k
 /// is a clear. `PipelineStage::None` and `Access::None` because nothing has touched it: there is
 /// no earlier submission to order against.
 ///
-/// **This differs from `Monarc.FirstLight`'s incoming state in exactly one field, and the
-/// difference is the swapchain.** That import names `ColorAttachmentOutput` on the before side
-/// because `VulkanDeviceState::SubmitList` waits on the acquire semaphore at that stage and the
+/// **This differs from `RHI::kSwapchainImageIncoming` in exactly one field, and the difference is
+/// the swapchain.** That constant names `ColorAttachmentOutput` on the before side because
+/// `VulkanDeviceState::SubmitList` waits on the acquire semaphore at that stage, and the
 /// transition has to be ordered after that wait. There is no acquire here and no semaphore, so
-/// there is nothing for the before scope to chain to.
+/// there is nothing for the before scope to chain to -- which is why this is a state of its own
+/// rather than the swapchain's reused.
 constexpr Monarc::RHI::TextureState kFreshTexture{Monarc::RHI::TextureLayout::Undefined,
                                                   Monarc::RHI::PipelineStage::None,
                                                   Monarc::RHI::Access::None};

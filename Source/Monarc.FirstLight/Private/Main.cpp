@@ -84,40 +84,6 @@ constexpr Monarc::RHI::Format kSurfaceFormat = Monarc::RHI::Format::B8G8R8A8_UNO
 constexpr Monarc::RHI::ClearColor kClearColor{64.0F / 255.0F, 128.0F / 255.0F, 192.0F / 255.0F,
                                               1.0F};
 
-/// The state the acquired swapchain image arrives in, as the graph is told it.
-///
-/// **Two of the three are forced and one is a choice.** `TextureLayout::Undefined` is forced:
-/// `vkAcquireNextImageKHR` does not preserve the contents of the image it hands back, so the
-/// only honest layout is the one that says the contents are not defined -- which is also exactly
-/// right for an image about to be cleared on load. `Access::None` is forced for the same reason:
-/// nothing this queue performed needs making available, because the previous contents are being
-/// discarded.
-///
-/// `PipelineStage::ColorAttachmentOutput` is the choice, and it is not `None`:
-/// `VulkanDeviceState::SubmitList` waits on the acquire semaphore at the colour-attachment-output
-/// stage, and a layout transition is a write that has to be ordered after that wait. Naming the
-/// same stage is what chains the barrier to the semaphore.
-///
-/// **This is Task 3's hand-over and it is not a value to tune.** The derivation is a function of
-/// these six numbers, which is what *"the derived barriers are a function of the declared import
-/// states"* in Monarc.Render/Tests/TestDeriveBarriers.cpp pins; the reasoning for all six is at
-/// `SwapchainImport` in Monarc.Render/Private/TestSupport/CapturedFrame.h. If a frame capture
-/// ever disagrees with what these produce, the capture is the finding.
-constexpr Monarc::RHI::TextureState kImageIncoming{
-    Monarc::RHI::TextureLayout::Undefined, Monarc::RHI::PipelineStage::ColorAttachmentOutput,
-    Monarc::RHI::Access::None};
-
-/// The state the graph must leave the swapchain image in.
-///
-/// All three forced. `PresentSource` is `ISwapchain::Present`'s own requirement
-/// (`VUID-VkPresentInfoKHR-pImageIndices-01430`), and the stage and access are `None` because
-/// there is no *command* after the transition: what reads the image next is the presentation
-/// engine, by way of the render-finished semaphore that `SubmitList` signals at `ALL_COMMANDS`.
-/// A semaphore is the dependency that covers it, not a barrier scope.
-constexpr Monarc::RHI::TextureState kImageOutgoing{Monarc::RHI::TextureLayout::PresentSource,
-                                                   Monarc::RHI::PipelineStage::None,
-                                                   Monarc::RHI::Access::None};
-
 /// The size is left at WindowDescription's own default rather than restated here: the number
 /// belongs in one place, and the log line below reads it back from the description so that
 /// what is printed is what will be asked for.
@@ -434,9 +400,16 @@ void PrintHelp() {
         return Monarc::Status(std::unexpect, pass.error());
     }
 
+    // **The two states are the swapchain's, named rather than restated.**
+    // `RHI::kSwapchainImageIncoming` and `kSwapchainImageOutgoing` in Monarc/RHI/Swapchain.h
+    // carry the argument for all six values -- five forced by the swapchain contract, one
+    // chosen -- and the chosen one, the incoming stage, is the stage
+    // `VulkanDeviceState::SubmitList` waits on the acquire semaphore at. This app used to write
+    // the six out; they were never its values to hold.
     const Monarc::Result<Monarc::Render::TextureId> target = pass->ImportTexture(
         "swapchain image",
-        Monarc::Render::TextureImport(image, description, kImageIncoming, kImageOutgoing));
+        Monarc::Render::TextureImport(image, description, Monarc::RHI::kSwapchainImageIncoming,
+                                      Monarc::RHI::kSwapchainImageOutgoing));
     if (!target) {
         return Monarc::Status(std::unexpect, target.error());
     }

@@ -303,10 +303,12 @@ TEST_CASE("the FirstLight frame derives exactly A3's two barriers") {
     // `RequirementOf(ColorAttachmentWrite)`'s layout, stage and access appearing on the after
     // side of the first barrier and the before side of the second, which Access.h pins with
     // `static_assert`s and no declaration can move. Of the six declared values, five are forced
-    // by the swapchain contract -- `SwapchainImport` above gives the citation for each -- and
-    // exactly one is a choice: `incoming.stage`. *"the derived barriers are a function of the
-    // declared import states"* below is the case that shows it is a choice rather than a
-    // constant, so that this one cannot be read as a test that would pass whatever was declared.
+    // by the swapchain contract -- `RHI::kSwapchainImageIncoming` and `kSwapchainImageOutgoing`
+    // in Monarc/RHI/Swapchain.h, which `SwapchainImport` above returns, give the citation for
+    // each -- and exactly one is a choice: `incoming.stage`. *"the derived barriers are a
+    // function of the declared import states"* below is the case that shows it is a choice rather
+    // than a constant, so that this one cannot be read as a test that would pass whatever was
+    // declared.
     SystemAllocator allocator;
     RenderGraph     graph(allocator, RenderGraph::Config{});
 
@@ -367,12 +369,12 @@ TEST_CASE("the derived barriers are a function of the declared import states") {
     //
     // **The declaration the headline uses is the honest one, and this is the evidence rather than
     // the counterexample.** `VulkanDeviceState::SubmitList` waits on the acquire semaphore at
-    // `VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT`, and a layout transition is a write that
-    // has to be ordered after that wait -- so the transition's first synchronisation scope has to
-    // include the stage the semaphore was waited at. A `None` first scope is an empty one, which
-    // orders the transition after nothing. That is why `incoming.stage` is
-    // `ColorAttachmentOutput` in `SwapchainImport` above: not to match the capture, but because
-    // it is what the submission does.
+    // that stage, and a layout transition is a write that has to be ordered after that wait -- so
+    // the transition's first synchronisation scope has to include the stage the semaphore was
+    // waited at. A `None` first scope is an empty one, which orders the transition after nothing.
+    // That is why `RHI::kSwapchainImageIncoming.stage` is `ColorAttachmentOutput`: not to match
+    // the capture, but because it is what the submission does. Monarc/RHI/Swapchain.h holds the
+    // argument; this case holds the demonstration that the derivation follows the field.
     SystemAllocator allocator;
     RenderGraph     graph(allocator, RenderGraph::Config{});
 
@@ -1334,8 +1336,9 @@ TEST_CASE("an outgoing state a writing pass already matches is still a write-aft
     // **What makes it a hazard is that an outgoing state is a dst scope and not a layout wish.**
     // `StepResource` puts `outgoing.stage` and `outgoing.access` into `syncAfter` and
     // `accessAfter` -- the half of a barrier that names the work it is made visible *to* -- and
-    // `SwapchainImport` above reads them the same way, giving `None` because "there is no
-    // *command* after the transition". So an outgoing state naming a **write** access is a
+    // `RHI::kSwapchainImageOutgoing`, which `SwapchainImport` above returns, reads them the same
+    // way: both `None`, because "there is no *command* after the transition" -- see
+    // Monarc/RHI/Swapchain.h. So an outgoing state naming a **write** access is a
     // statement that external commands will write this image, and this frame wrote it too.
     // Nothing else orders the two: two submissions are not ordered by being submitted in order,
     // and with no layout change there is nothing for a validation layer to object to either.

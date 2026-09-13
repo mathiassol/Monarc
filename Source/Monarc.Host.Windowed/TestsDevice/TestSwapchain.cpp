@@ -121,32 +121,6 @@ constexpr Monarc::RHI::ClearColor kClearColor{64.0F / 255.0F, 128.0F / 255.0F, 1
 /// failure rather than a plausible near miss.
 constexpr Monarc::u8 kExpectedSwapchainBytes[4] = {192, 128, 64, 255};
 
-/// The two states `Monarc.FirstLight` declares for the swapchain image it imports, repeated here
-/// because a test of "the same frame, recorded by the graph" has to declare the same frame.
-///
-/// **Six values, five forced by the swapchain contract and one chosen.** `Undefined` because
-/// `vkAcquireNextImageKHR` does not preserve the image's contents; `PresentSource` because
-/// `Present` requires it; both `None` scopes on the outgoing side because what reads the image
-/// next is the presentation engine by way of the render-finished semaphore, not a command. The
-/// choice is `ColorAttachmentOutput` on the incoming side: `VulkanDeviceState::SubmitList` waits
-/// on the acquire semaphore at that stage, and a layout transition is a write that has to be
-/// ordered after that wait.
-///
-/// The full argument is at `SwapchainImport` in Monarc.Render/Private/TestSupport/CapturedFrame.h,
-/// which is where the values are transcribed from A3's RenderDoc captures; that header is private
-/// to `Monarc.Render` and not on this target's include path, so these are stated rather than
-/// shared. **They are not values to tune**: the derivation is a function of them, and a capture
-/// that disagreed would be a finding about the derivation.
-/// @{
-constexpr Monarc::RHI::TextureState kImageIncoming{
-    Monarc::RHI::TextureLayout::Undefined, Monarc::RHI::PipelineStage::ColorAttachmentOutput,
-    Monarc::RHI::Access::None};
-
-constexpr Monarc::RHI::TextureState kImageOutgoing{Monarc::RHI::TextureLayout::PresentSource,
-                                                   Monarc::RHI::PipelineStage::None,
-                                                   Monarc::RHI::Access::None};
-/// @}
-
 /// The backend main() brought up, and the adapters it found. Raw pointers to locals in main
 /// rather than static objects, so nothing Vulkan-shaped is constructed during static
 /// initialisation -- TestVulkanDevice.cpp's arrangement, for the same reason.
@@ -341,9 +315,14 @@ struct Harness {
         return Monarc::Status(std::unexpect, pass.error());
     }
 
+    // The same two states `Monarc.FirstLight` imports, and the same *objects*: this suite's claim
+    // is "the frame that app records, recorded here", so declaring a second copy of the six values
+    // would let the two frames drift apart while both still passed. `RHI::kSwapchainImageIncoming`
+    // and `kSwapchainImageOutgoing` in Monarc/RHI/Swapchain.h carry the argument for each.
     const Monarc::Result<Monarc::Render::TextureId> target = pass->ImportTexture(
         "swapchain image",
-        Monarc::Render::TextureImport(image, description, kImageIncoming, kImageOutgoing));
+        Monarc::Render::TextureImport(image, description, Monarc::RHI::kSwapchainImageIncoming,
+                                      Monarc::RHI::kSwapchainImageOutgoing));
     if (!target) {
         return Monarc::Status(std::unexpect, target.error());
     }
