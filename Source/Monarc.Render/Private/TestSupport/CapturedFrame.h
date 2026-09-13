@@ -102,11 +102,11 @@ inline constexpr RHI::TextureDescription kSwapchainDescription{
 /// swapchain image in the device's own texture pool.
 [[nodiscard]] inline TextureImport SwapchainImport(RHI::TextureHandle image) {
     return TextureImport(image, kSwapchainDescription,
-                         TextureState{RHI::TextureLayout::Undefined,
-                                      RHI::PipelineStage::ColorAttachmentOutput,
-                                      RHI::Access::None},
-                         TextureState{RHI::TextureLayout::PresentSource,
-                                      RHI::PipelineStage::None, RHI::Access::None});
+                         RHI::TextureState{RHI::TextureLayout::Undefined,
+                                           RHI::PipelineStage::ColorAttachmentOutput,
+                                           RHI::Access::None},
+                         RHI::TextureState{RHI::TextureLayout::PresentSource,
+                                           RHI::PipelineStage::None, RHI::Access::None});
 }
 
 }  // namespace Monarc::Render::TestSupport

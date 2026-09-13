@@ -138,13 +138,13 @@ constexpr Monarc::u8 kExpectedSwapchainBytes[4] = {192, 128, 64, 255};
 /// shared. **They are not values to tune**: the derivation is a function of them, and a capture
 /// that disagreed would be a finding about the derivation.
 /// @{
-constexpr Monarc::Render::TextureState kImageIncoming{
+constexpr Monarc::RHI::TextureState kImageIncoming{
     Monarc::RHI::TextureLayout::Undefined, Monarc::RHI::PipelineStage::ColorAttachmentOutput,
     Monarc::RHI::Access::None};
 
-constexpr Monarc::Render::TextureState kImageOutgoing{Monarc::RHI::TextureLayout::PresentSource,
-                                                      Monarc::RHI::PipelineStage::None,
-                                                      Monarc::RHI::Access::None};
+constexpr Monarc::RHI::TextureState kImageOutgoing{Monarc::RHI::TextureLayout::PresentSource,
+                                                   Monarc::RHI::PipelineStage::None,
+                                                   Monarc::RHI::Access::None};
 /// @}
 
 /// The backend main() brought up, and the adapters it found. Raw pointers to locals in main

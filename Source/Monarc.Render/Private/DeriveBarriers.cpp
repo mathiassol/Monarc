@@ -181,11 +181,11 @@
 // Tests/TestDeriveBarriers.cpp is what pins it -- a rule that compared layouts instead of states
 // would drop it, which is how the case came to be written.
 //
-// **`TextureState` has three halves and each of them now has a case that moves it alone**, which
-// the paragraph above found the first of and stopped at. A gap that moves only the **access** is
-// a read-after-write in one layout -- a storage image written and then read -- and one that
-// moves only the **layout** is an image handed over in `General` for one a pass wants in
-// `ShaderReadOnly`. Both are reachable only across an import's declared state, for the same
+// **`RHI::TextureState` has three halves and each of them now has a case that moves it alone**,
+// which the paragraph above found the first of and stopped at. A gap that moves only the
+// **access** is a read-after-write in one layout -- a storage image written and then read -- and
+// one that moves only the **layout** is an image handed over in `General` for one a pass wants
+// in `ShaderReadOnly`. Both are reachable only across an import's declared state, for the same
 // reason the scope gap is: a pass step's three halves all come from `RequirementOf`, whose
 // access bits are one per row, so two pass steps with equal access masks have equal layouts and
 // equal stages -- no gap inside the graph moves the layout alone or the stage alone. Two of them
@@ -212,12 +212,12 @@ void RenderGraph::StartResourceStep(u32 resource) {
         step.state      = declared.incoming;
         step.cause.kind = BarrierCauseKind::ImportIncoming;
     } else {
-        // **Spelled out rather than left to `TextureState{}`'s defaults**, which happen to be
-        // these three values: what is being stated is what `IDevice::CreateTexture` leaves
+        // **Spelled out rather than left to `RHI::TextureState{}`'s defaults**, which happen to
+        // be these three values: what is being stated is what `IDevice::CreateTexture` leaves
         // behind, and a reader of this line should see it rather than have to look the defaults
         // up. A change to those defaults must not quietly change the derivation.
-        step.state = TextureState{RHI::TextureLayout::Undefined, RHI::PipelineStage::None,
-                                  RHI::Access::None};
+        step.state = RHI::TextureState{RHI::TextureLayout::Undefined, RHI::PipelineStage::None,
+                                       RHI::Access::None};
         step.cause.kind = BarrierCauseKind::TransientCreation;
     }
     m_resourceStep[resource] = step;

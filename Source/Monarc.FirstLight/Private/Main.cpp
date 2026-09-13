@@ -103,7 +103,7 @@ constexpr Monarc::RHI::ClearColor kClearColor{64.0F / 255.0F, 128.0F / 255.0F, 1
 /// states"* in Monarc.Render/Tests/TestDeriveBarriers.cpp pins; the reasoning for all six is at
 /// `SwapchainImport` in Monarc.Render/Private/TestSupport/CapturedFrame.h. If a frame capture
 /// ever disagrees with what these produce, the capture is the finding.
-constexpr Monarc::Render::TextureState kImageIncoming{
+constexpr Monarc::RHI::TextureState kImageIncoming{
     Monarc::RHI::TextureLayout::Undefined, Monarc::RHI::PipelineStage::ColorAttachmentOutput,
     Monarc::RHI::Access::None};
 
@@ -114,9 +114,9 @@ constexpr Monarc::Render::TextureState kImageIncoming{
 /// there is no *command* after the transition: what reads the image next is the presentation
 /// engine, by way of the render-finished semaphore that `SubmitList` signals at `ALL_COMMANDS`.
 /// A semaphore is the dependency that covers it, not a barrier scope.
-constexpr Monarc::Render::TextureState kImageOutgoing{Monarc::RHI::TextureLayout::PresentSource,
-                                                      Monarc::RHI::PipelineStage::None,
-                                                      Monarc::RHI::Access::None};
+constexpr Monarc::RHI::TextureState kImageOutgoing{Monarc::RHI::TextureLayout::PresentSource,
+                                                   Monarc::RHI::PipelineStage::None,
+                                                   Monarc::RHI::Access::None};
 
 /// The size is left at WindowDescription's own default rather than restated here: the number
 /// belongs in one place, and the log line below reads it back from the description so that

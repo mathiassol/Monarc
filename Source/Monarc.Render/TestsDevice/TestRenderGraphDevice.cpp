@@ -120,9 +120,9 @@ constexpr Monarc::RHI::TextureDescription kOutputDescription{kExtent, kFormat, k
 /// because `VulkanDeviceState::SubmitList` waits on the acquire semaphore at that stage and the
 /// transition has to be ordered after that wait. There is no acquire here and no semaphore, so
 /// there is nothing for the before scope to chain to.
-constexpr Monarc::Render::TextureState kFreshTexture{Monarc::RHI::TextureLayout::Undefined,
-                                                     Monarc::RHI::PipelineStage::None,
-                                                     Monarc::RHI::Access::None};
+constexpr Monarc::RHI::TextureState kFreshTexture{Monarc::RHI::TextureLayout::Undefined,
+                                                  Monarc::RHI::PipelineStage::None,
+                                                  Monarc::RHI::Access::None};
 
 /// The state the graph must leave the output in so that the next submission can copy it out.
 ///
@@ -133,9 +133,9 @@ constexpr Monarc::Render::TextureState kFreshTexture{Monarc::RHI::TextureLayout:
 /// transition A3's readback hand-wrote, and the copy in the following submission needs no
 /// barrier of its own: this one already made the attachment write available and visible to
 /// `TransferRead` at the `Copy` stage.
-constexpr Monarc::Render::TextureState kReadyToCopy{Monarc::RHI::TextureLayout::TransferSource,
-                                                    Monarc::RHI::PipelineStage::Copy,
-                                                    Monarc::RHI::Access::TransferRead};
+constexpr Monarc::RHI::TextureState kReadyToCopy{Monarc::RHI::TextureLayout::TransferSource,
+                                                 Monarc::RHI::PipelineStage::Copy,
+                                                 Monarc::RHI::Access::TransferRead};
 
 /// The backend main() brought up, and the adapters it found, deduplicated. Raw pointers to
 /// locals in main rather than static objects, so nothing Vulkan-shaped is constructed during

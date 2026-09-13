@@ -236,7 +236,7 @@ struct ResourceInspection {
 
     /// The state the resource is in when it reaches the graph. Meaningful only when `origin`
     /// is `Imported`; a transient's first state is whatever creating it leaves it in.
-    TextureState incoming = {};
+    RHI::TextureState incoming = {};
 
     /// The state the resource must be in when the graph is done with it. Meaningful only when
     /// `origin` is `Imported`.
@@ -251,7 +251,7 @@ struct ResourceInspection {
     /// `lifetime.IsUnused()` is the signal, and it is the only one: a barrier list does not say
     /// what it does not contain, so an importer that must know reads the lifetime rather than
     /// counting barriers.
-    TextureState outgoing = {};
+    RHI::TextureState outgoing = {};
 
     /// The span of execution order over which the resource is live. See `ResourceLifetime`,
     /// which is where the two ends' exact meanings are -- and ask it `IsUnused()` rather than

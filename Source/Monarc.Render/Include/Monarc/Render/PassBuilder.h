@@ -51,7 +51,7 @@ class RenderGraph;
 class TextureImport {
 public:
     constexpr TextureImport(RHI::TextureHandle texture, RHI::TextureDescription description,
-                            TextureState incoming, TextureState outgoing)
+                            RHI::TextureState incoming, RHI::TextureState outgoing)
         : m_texture(texture),
           m_description(description),
           m_incoming(incoming),
@@ -61,8 +61,8 @@ public:
     [[nodiscard]] constexpr const RHI::TextureDescription& Description() const {
         return m_description;
     }
-    [[nodiscard]] constexpr TextureState Incoming() const { return m_incoming; }
-    [[nodiscard]] constexpr TextureState Outgoing() const { return m_outgoing; }
+    [[nodiscard]] constexpr RHI::TextureState Incoming() const { return m_incoming; }
+    [[nodiscard]] constexpr RHI::TextureState Outgoing() const { return m_outgoing; }
 
     // No `operator==`, for the reason `ResourceInspection` in GraphInspection.h records at
     // length: `RHI::TextureDescription` has none, so a defaulted comparison over a member of
@@ -72,8 +72,8 @@ public:
 private:
     RHI::TextureHandle      m_texture;
     RHI::TextureDescription m_description;
-    TextureState            m_incoming;
-    TextureState            m_outgoing;
+    RHI::TextureState       m_incoming;
+    RHI::TextureState       m_outgoing;
 };
 
 /// The command list a pass's recording callback is given: `RHI::ICommandList` with no

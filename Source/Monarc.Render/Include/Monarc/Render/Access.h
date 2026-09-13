@@ -103,37 +103,18 @@ struct AccessScope {
     constexpr bool operator==(const AccessScope&) const = default;
 };
 
-/// A texture's complete state in ADR-0005's model: one side of a texture barrier.
-///
-/// **What an imported resource declares, and the reason the two barriers `Monarc.FirstLight`
-/// hand-wrote in Phase A3 are derivable at all.** A swapchain image arrives from `Acquire` in
-/// `TextureLayout::Undefined` and must be in `PresentSource` before `Present`, and neither
-/// fact is inferable from any pass's declaration -- so an import states both, and the graph's
-/// first and last transitions for that resource are the two ends. See
-/// `TextureImport` in PassBuilder.h.
-///
-/// **The stage and access halves are not decoration on the layout, and A3's measured barriers
-/// are why.** Its first barrier names `PipelineStage::ColorAttachmentOutput` on the *before*
-/// side rather than `None`, because the queue submission waits on the acquire semaphore at
-/// that stage and a layout transition is a write that must be ordered after that wait; its
-/// second names `None` on the after side, because what reads the image next is the
-/// presentation engine by way of a semaphore rather than a command. An import that carried
-/// only layouts could express neither.
-///
-/// **A plain aggregate with defaults, unlike `RHI::TextureBarrier`, and the difference is
-/// where the omission would be invisible.** `TextureBarrier` has no default constructor
-/// because a barrier with defaulted layouts is byte-identical to one whose author meant
-/// `Undefined`, and nothing at the call site shows which. Here the requirement sits one level
-/// up: `TextureImport`'s constructor takes both states with no defaults, so an import cannot
-/// omit them -- writing `TextureState{}` is possible but is a visible statement at the call
-/// site rather than an absence.
-struct TextureState {
-    RHI::TextureLayout layout = RHI::TextureLayout::Undefined;
-    RHI::PipelineStage stage  = RHI::PipelineStage::None;
-    RHI::Access        access = RHI::Access::None;
-
-    constexpr bool operator==(const TextureState&) const = default;
-};
+// **A texture's whole state -- a layout with both scopes -- is `RHI::TextureState` in
+// Monarc/RHI/Barrier.h, and it used to be here.** It moved because `Monarc.RHI` has facts of its
+// own to state about one: a swapchain image is handed over in one state and must be handed back
+// in another, and a module cannot state a fact in a vocabulary it does not have. Beside
+// `TextureBarrier` is where it belongs anyway -- a barrier is a pair of those states plus a
+// handle.
+//
+// `AccessScope` above did not move with it, under `Format`'s rule in Monarc/RHI/Types.h -- "a
+// format arrives with its first user, and not before", which `PipelineStage` in Barrier.h names
+// as the rule it is the deliberate exception to. `AccessScope` has no user in `Monarc.RHI` and
+// would arrive there with one. It is half of what `RequirementOf` returns, which is a fact about
+// barrier *derivation* and therefore about this module.
 
 /// Everything derivation needs about one `ResourceAccess`, in one value.
 ///

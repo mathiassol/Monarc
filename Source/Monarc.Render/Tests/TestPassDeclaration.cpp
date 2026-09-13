@@ -35,13 +35,13 @@ using Monarc::Render::ResourceAccess;
 using Monarc::Render::ResourceOrigin;
 using Monarc::Render::TextureId;
 using Monarc::Render::TextureImport;
-using Monarc::Render::TextureState;
 using Monarc::RHI::Access;
 using Monarc::RHI::Format;
 using Monarc::RHI::PipelineStage;
 using Monarc::RHI::TextureDescription;
 using Monarc::RHI::TextureHandle;
 using Monarc::RHI::TextureLayout;
+using Monarc::RHI::TextureState;
 using Monarc::RHI::TextureUsage;
 
 namespace {
@@ -1855,10 +1855,12 @@ static_assert(sizeof(PassCommandList) == sizeof(Monarc::RHI::ICommandList*),
 //   provided`.
 // - Four arguments with the description and the first state in each other's places -- MSVC
 //   `error C2665: ... no overloaded function could convert all the argument types` with `note:
-//   ... cannot convert argument 2 from 'Monarc::Render::TextureState' to
+//   ... cannot convert argument 2 from 'Monarc::RHI::TextureState' to
 //   'Monarc::RHI::TextureDescription'`; clang-cl `note: candidate constructor not viable: no
 //   known conversion from 'TextureState' to 'RHI::TextureDescription' for 2nd argument`.
 //   Distinct types with no implicit conversion between them are what buys that one.
+//   (Re-measured on both compilers when `TextureState` moved from `Monarc::Render` to
+//   `Monarc::RHI`; only MSVC's spelling of the namespace changed.)
 // ---------------------------------------------------------------------------------------
 
 static_assert(!std::is_default_constructible_v<TextureImport>);

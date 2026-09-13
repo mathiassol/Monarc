@@ -36,13 +36,13 @@ using Monarc::Render::ResourceAccess;
 using Monarc::Render::ResourceOrigin;
 using Monarc::Render::TextureId;
 using Monarc::Render::TextureImport;
-using Monarc::Render::TextureState;
 using Monarc::RHI::Access;
 using Monarc::RHI::Format;
 using Monarc::RHI::PipelineStage;
 using Monarc::RHI::TextureDescription;
 using Monarc::RHI::TextureHandle;
 using Monarc::RHI::TextureLayout;
+using Monarc::RHI::TextureState;
 using Monarc::RHI::TextureUsage;
 
 namespace {

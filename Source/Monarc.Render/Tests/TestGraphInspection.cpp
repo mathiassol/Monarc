@@ -31,7 +31,6 @@ using Monarc::Render::ResourceLifetime;
 using Monarc::Render::ResourceOrigin;
 using Monarc::Render::TextureId;
 using Monarc::Render::TextureImport;
-using Monarc::Render::TextureState;
 using Monarc::Render::ToString;
 using Monarc::Render::WriteInspectionText;
 using Monarc::RHI::Access;
@@ -40,6 +39,7 @@ using Monarc::RHI::PipelineStage;
 using Monarc::RHI::TextureDescription;
 using Monarc::RHI::TextureHandle;
 using Monarc::RHI::TextureLayout;
+using Monarc::RHI::TextureState;
 using Monarc::RHI::TextureUsage;
 
 namespace {

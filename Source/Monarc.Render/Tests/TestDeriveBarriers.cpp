@@ -47,7 +47,6 @@ using Monarc::Render::ResourceAccess;
 using Monarc::Render::RequirementOf;
 using Monarc::Render::TextureId;
 using Monarc::Render::TextureImport;
-using Monarc::Render::TextureState;
 using Monarc::Render::TestSupport::kCapturedFirstDstAccess;
 using Monarc::Render::TestSupport::kCapturedFirstDstStage;
 using Monarc::Render::TestSupport::kCapturedFirstNewLayout;
@@ -67,6 +66,7 @@ using Monarc::RHI::PipelineStage;
 using Monarc::RHI::TextureDescription;
 using Monarc::RHI::TextureHandle;
 using Monarc::RHI::TextureLayout;
+using Monarc::RHI::TextureState;
 using Monarc::RHI::TextureUsage;
 
 namespace {

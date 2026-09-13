@@ -492,8 +492,8 @@ private:
     /// and nothing. Private/DeriveBarriers.cpp is where the chain and the emission rule are
     /// argued.
     struct ResourceStep {
-        TextureState     state = {};
-        BarrierCauseSide cause = {};
+        RHI::TextureState state = {};
+        BarrierCauseSide  cause = {};
 
         /// Whether a **pass** wrote the resource at this step.
         ///

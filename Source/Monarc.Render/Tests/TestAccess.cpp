@@ -18,7 +18,6 @@ using Monarc::Render::AccessScope;
 using Monarc::Render::IsWrite;
 using Monarc::Render::RequirementOf;
 using Monarc::Render::ResourceAccess;
-using Monarc::Render::TextureState;
 using Monarc::Render::ToString;
 using Monarc::RHI::Access;
 using Monarc::RHI::PipelineStage;
@@ -263,30 +262,6 @@ TEST_CASE("ToString gives a value outside the set a name of its own") {
     CHECK(name == "<invalid ResourceAccess>");
 }
 
-TEST_CASE("a default TextureState is Undefined and nothing else") {
-    // Pinned because `TextureImport`'s argument is where this value would be written by
-    // accident, and because Access.h's claim that `TextureState{}` is "a visible statement
-    // rather than an absence" is only worth anything if what it states is known.
-    const TextureState state{};
-    CHECK(state.layout == TextureLayout::Undefined);
-    CHECK(state.stage == PipelineStage::None);
-    CHECK(state.access == Access::None);
-}
-
-TEST_CASE("TextureState compares on all three fields") {
-    const TextureState base{TextureLayout::ColorAttachment, PipelineStage::ColorAttachmentOutput,
-                            Access::ColorAttachmentWrite};
-    CHECK(base == TextureState{TextureLayout::ColorAttachment,
-                               PipelineStage::ColorAttachmentOutput,
-                               Access::ColorAttachmentWrite});
-    CHECK(base != TextureState{TextureLayout::PresentSource, PipelineStage::ColorAttachmentOutput,
-                               Access::ColorAttachmentWrite});
-    CHECK(base != TextureState{TextureLayout::ColorAttachment, PipelineStage::None,
-                               Access::ColorAttachmentWrite});
-    CHECK(base != TextureState{TextureLayout::ColorAttachment,
-                               PipelineStage::ColorAttachmentOutput, Access::None});
-}
-
 // `AccessScope` is a distinct type from `RHI::Access`, whose name it shares a word with. The
 // assertion is that it is a two-field aggregate rather than an alias of either half -- a scope
 // collapsed to a bare stage or a bare access would make a barrier side unable to say both.
@@ -294,7 +269,6 @@ static_assert(!std::is_same_v<AccessScope, PipelineStage>);
 static_assert(!std::is_same_v<AccessScope, Access>);
 static_assert(std::is_trivially_copyable_v<AccessScope>);
 static_assert(std::is_trivially_copyable_v<AccessRequirement>);
-static_assert(std::is_trivially_copyable_v<TextureState>);
 
 int main(int argc, char** argv) {
     // **Installed before any case runs, and put back below rather than left in place.**
