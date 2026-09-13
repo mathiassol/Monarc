@@ -100,9 +100,8 @@ namespace {
 // with `_ITERATOR_DEBUG_LEVEL=0`, and back to 1 under `/MD` with `_ITERATOR_DEBUG_LEVEL=1`.
 // Of the six presets, the two that compile `-MDd` -- msvc-debug and clang-debug -- are the ones
 // where the `usage=0x{:x}` on a resource line, and the four `0x{:x}` fields on a barrier line,
-// cost one transient proxy each. msvc-release, clang-release and
-// clang-asan are `-MD` and clang-ubsan is `-MT`, so on those four the report allocates nothing
-// at all.
+// cost one transient proxy each. msvc-release, clang-release and clang-asan are `-MD` and
+// clang-ubsan is `-MT`, so on those four the report allocates nothing at all.
 //
 // Recorded because this file said "allocates nothing" before anything measured it.
 // ---------------------------------------------------------------------------------------

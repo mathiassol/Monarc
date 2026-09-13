@@ -296,6 +296,22 @@ Status RenderGraph::StepResource(u32 resource, u32 declaringPass, const Resource
     const ResourceStep current = m_resourceStep[resource];
     m_resourceStep[resource]   = next;
 
+    // **`passWrites` implies a `PassAccess` cause, checked here because here is where both halves
+    // are relied on together.** The emission rule reads `passWrites` and then this function copies
+    // `cause` into the barrier -- so a step that claimed a pass wrote while naming an import's end
+    // would emit a barrier whose blamed access is filler (`BarrierCauseSide::access` says the
+    // field is read only for a `PassAccess`) and whose reason a reader cannot recover.
+    // `RenderGraph.h` states the invariant in prose on `ResourceStep::passWrites`; `MONARC_CHECK`
+    // is what makes a build that broke it say so. It reports and never alters control flow, so
+    // the answer is unchanged either way -- the check says the step was built wrong, not that the
+    // derivation refuses it.
+    //
+    // Both sides, because the last step of every chain is never anything's `current`.
+    MONARC_CHECK(!current.passWrites || current.cause.kind == BarrierCauseKind::PassAccess,
+                 "a step a pass wrote must name that pass's access as its cause");
+    MONARC_CHECK(!next.passWrites || next.cause.kind == BarrierCauseKind::PassAccess,
+                 "a step a pass wrote must name that pass's access as its cause");
+
     if (!IsTransition(current, next)) {
         return {};
     }
