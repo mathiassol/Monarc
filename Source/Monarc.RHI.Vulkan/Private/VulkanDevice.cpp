@@ -29,6 +29,7 @@
 #include <Monarc/Core/Containers/Array.h>
 #include <Monarc/Core/Log.h>
 #include <Monarc/RHI/Barrier.h>
+#include <Monarc/RHI/Swapchain.h>
 
 #include <ArrayOps.h>
 #include <Loader.h>
@@ -511,20 +512,32 @@ Result<u64> VulkanDeviceState::SubmitList(VulkanCommandList& list, VkSemaphore w
         waitInfo.sType     = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
         waitInfo.semaphore = waitBinary;
         waitInfo.value     = 0;
-        // COLOR_ATTACHMENT_OUTPUT and not ALL_COMMANDS, and the choice is paired with the
-        // caller's first barrier rather than free: the acquire semaphore says the image is
-        // available, and the first thing that touches the image is the layout transition out
-        // of `Undefined`. A transition is a write, so it has to be ordered after this wait --
-        // which happens because the frame's first barrier names
-        // `PipelineStage::ColorAttachmentOutput` as its *before* scope, and the semaphore's
-        // second scope is this stage. That chain is what Khronos' own synchronisation examples
-        // do; waiting at ALL_COMMANDS instead would work and would order the whole submission
-        // behind the acquire for no reason.
+        // **The stage the caller's first barrier names, translated -- not a `VK_PIPELINE_STAGE_2`
+        // constant of this file's own.** The acquire semaphore says the image is available, and
+        // the first thing that touches the image is the layout transition out of `Undefined`. A
+        // transition is a write, so it has to be ordered after this wait, which happens only if
+        // the transition's *before* scope includes the stage the semaphore was waited at. Those
+        // are two halves of one chain, and `kSwapchainImageIncoming` is the one value both read:
+        // the caller declares the transition's before scope from it, and this line waits at it.
         //
-        // **Nothing in this build verifies the chain.** Synchronisation validation is a
-        // separate validation feature and Monarc does not enable it, so this is reasoning
-        // rather than a measurement, and it is written down as such.
-        waitInfo.stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        // **It used to be a literal here and a literal there, and that is the defect this
+        // closes.** The two agreed only by prose, so changing one and not the other compiled,
+        // ran, and passed every suite -- the wait at COLOR_ATTACHMENT_OUTPUT against a barrier
+        // whose before scope had become `None` is a missing dependency, and a missing dependency
+        // is not an illegal call that a layer can report. With one value there is nothing left to
+        // disagree.
+        //
+        // Translated at run time rather than folded at compile time because `ToVulkan` is an
+        // ordinary function -- it walks a mask's set bits -- and this is a once-per-present
+        // conversion of a single bit.
+        //
+        // **What still is not verified is the value itself.** Synchronisation validation is a
+        // separate validation feature from the layer this module enables, and Monarc does not
+        // turn it on, so no run measures this chain. What holds
+        // `PipelineStage::ColorAttachmentOutput` is the argument at the constant plus A3's
+        // captures; waiting at ALL_COMMANDS instead would also be correct and would order the
+        // whole submission behind the acquire for no reason.
+        waitInfo.stageMask = ToVulkan(kSwapchainImageIncoming.stage);
     }
 
     VkSubmitInfo2 submitInfo{};

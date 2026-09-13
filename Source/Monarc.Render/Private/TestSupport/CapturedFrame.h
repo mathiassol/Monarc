@@ -79,15 +79,16 @@ inline constexpr RHI::TextureDescription kSwapchainDescription{
 /// equivalence cases from being tautologies.** They are `RHI::kSwapchainImageIncoming` and
 /// `kSwapchainImageOutgoing` in Monarc/RHI/Swapchain.h, where the argument for each lives: five
 /// forced by the swapchain contract, one -- `incoming.stage` -- chosen against
-/// `VulkanDeviceState::SubmitList`'s acquire-semaphore wait. The
+/// `VulkanDeviceState::SubmitList`'s acquire-semaphore wait, which reads the same constant. The
 /// twelve `kCaptured*` values above are the other half: transcribed from A3's RenderDoc files
 /// and belonging to no declaration, so a case that feeds these two states through the derivation
 /// and compares the result against those twelve is comparing two independent things.
 ///
-/// **Which pins `incoming.stage` from one end only, and that is worth being exact about.**
-/// Change the constant and the equivalence case fails against the capture. Change the acquire
-/// wait stage in Monarc.RHI.Vulkan instead, which is still a literal of its own, and nothing
-/// here moves -- the two are a pair that has to agree, and only one of them is under test.
+/// **Which means `incoming.stage` is now pinned from both ends.** Change it and the equivalence
+/// case fails against the capture; it cannot be changed *only* in the backend, because the
+/// backend does not hold a second copy. What no test asserts is that `ColorAttachmentOutput` is
+/// the right stage for the semaphore -- that is argument, not measurement, and Swapchain.h says
+/// so where the value is.
 ///
 /// `image` is a parameter because the two suites need different handles: a derivation test needs
 /// none that resolves anywhere, and an execution test needs one its stub device really made,

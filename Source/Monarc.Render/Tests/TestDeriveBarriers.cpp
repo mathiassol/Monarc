@@ -373,8 +373,9 @@ TEST_CASE("the derived barriers are a function of the declared import states") {
     // the transition's first synchronisation scope has to include the stage the semaphore was
     // waited at. A `None` first scope is an empty one, which orders the transition after nothing.
     // That is why `RHI::kSwapchainImageIncoming.stage` is `ColorAttachmentOutput`: not to match
-    // the capture, but because it is what the submission does. Monarc/RHI/Swapchain.h holds the
-    // argument; this case holds the demonstration that the derivation follows the field.
+    // the capture, but because it is what the submission does -- and the submission does it by
+    // translating that same field, so the two cannot part company. Monarc/RHI/Swapchain.h holds
+    // the argument; this case holds the demonstration that the derivation follows the field.
     SystemAllocator allocator;
     RenderGraph     graph(allocator, RenderGraph::Config{});
 

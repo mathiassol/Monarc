@@ -157,7 +157,9 @@ struct AcquiredImage {
 //
 // **Six values, five forced by this interface's contract and one chosen.** Each is argued at its
 // own constant. The chosen one is `kSwapchainImageIncoming.stage`, and it is chosen against a
-// backend's submission rather than against anything in this header.
+// backend's submission rather than against anything in this header -- which is exactly why it
+// used to be restated in three places and drift between them silently. It is now restated
+// nowhere: see its comment.
 //
 // Four declaration sites read these: `Monarc.FirstLight`'s frame, the swapchain readback in
 // `Monarc.Host.Windowed`'s device suite, `TestSupport::SwapchainImport` in `Monarc.Render`, which
@@ -191,19 +193,18 @@ struct AcquiredImage {
 /// nothing -- and that is a hole no layer reports, because it is a missing dependency rather
 /// than an illegal call.
 ///
-/// **The wait stage is still a second spelling of this value, and naming the value here does not
-/// close that.** `VulkanDeviceState::SubmitList` in Monarc.RHI.Vulkan/Private/VulkanDevice.cpp
-/// writes `VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT` into the acquire semaphore's
-/// `VkSemaphoreSubmitInfo::stageMask` itself, and the two agree only because two comments say
-/// they do. Collapsing the four *declaration* sites onto this constant was never the property at
-/// risk: a change here moves all four together and leaves the backend's literal where it was,
-/// which is exactly the mutation that passed every suite. The next commit makes the backend read
-/// this field instead.
+/// **So the wait stage is not a second spelling of this value; it is this value.**
+/// `VulkanDeviceState::SubmitList` in Monarc.RHI.Vulkan/Private/VulkanDevice.cpp puts
+/// `Detail::ToVulkan(kSwapchainImageIncoming.stage)` into the acquire semaphore's
+/// `VkSemaphoreSubmitInfo::stageMask` rather than naming a `VK_PIPELINE_STAGE_2_*` constant of
+/// its own. The two halves of the chain cannot disagree, because there is one value.
 ///
-/// **And the value itself is not verified either way.** Monarc's builds do not enable Vulkan's
-/// synchronisation validation (a separate feature from the validation layer this module does turn
-/// on), so nothing measures the chain at run time. What holds the value is the argument above plus
-/// Phase A3's captures, which `Monarc.Render`'s derivation suite compares against.
+/// **What that buys and what it does not.** It forecloses the drift -- a declaration and a wait
+/// that stop matching -- and it does not make the value itself verified: Monarc's builds do not
+/// enable Vulkan's synchronisation validation (a separate feature from the validation layer this
+/// module does turn on), so nothing measures the chain at run time. What holds the value is the
+/// argument above plus Phase A3's captures, which `Monarc.Render`'s derivation suite compares
+/// against.
 inline constexpr TextureState kSwapchainImageIncoming{
     TextureLayout::Undefined, PipelineStage::ColorAttachmentOutput, Access::None};
 

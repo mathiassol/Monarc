@@ -403,9 +403,9 @@ void PrintHelp() {
     // **The two states are the swapchain's, named rather than restated.**
     // `RHI::kSwapchainImageIncoming` and `kSwapchainImageOutgoing` in Monarc/RHI/Swapchain.h
     // carry the argument for all six values -- five forced by the swapchain contract, one
-    // chosen -- and the chosen one, the incoming stage, is the stage
+    // chosen -- and the chosen one, the incoming stage, is the same value
     // `VulkanDeviceState::SubmitList` waits on the acquire semaphore at. This app used to write
-    // the six out; they were never its values to hold.
+    // the six out and agree with the backend by prose; there is nothing here left to disagree.
     const Monarc::Result<Monarc::Render::TextureId> target = pass->ImportTexture(
         "swapchain image",
         Monarc::Render::TextureImport(image, description, Monarc::RHI::kSwapchainImageIncoming,
