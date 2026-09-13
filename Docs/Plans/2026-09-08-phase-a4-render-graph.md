@@ -244,11 +244,19 @@ that would hurt most.
 **The model.** A resource's accesses in execution order are a *chain of states*: an import's
 declared incoming state or a transient's creation, one state per surviving pass, and for an
 import its declared outgoing state. A gap in the chain becomes a barrier **unless the two
-states are identical and the one after the gap is not a state a pass wrote**. The write term is
+states are identical and neither side of the gap is a state a pass wrote**. The write term is
 what keeps write-after-write — identical layout, identical scopes, and mandatory — from being
-suppressed as a no-op. The one-sided reading is what leaves an already-satisfied outgoing state
-alone while still barriering a pass that writes into an import's declared incoming state.
-`Source/Monarc.Render/Private/DeriveBarriers.cpp` argues all of it where the decision is made.
+suppressed as a no-op, and it reads **both** sides for a reason each end supplies: a pass writing
+into a state identical to its import's declared *incoming* one still gets its barrier, because
+the graph cannot order against work it was only told about; and a pass whose write is followed by
+an *outgoing* state that names a write of its own still gets one, because that is a
+write-after-write across the graph boundary that nothing else in the frame orders.
+
+**An earlier revision of this section read the write term on the side after the gap only, and
+that was wrong at the outgoing end** — with no layout change there is nothing for a validation
+layer to object to either, so the dropped barrier was silent corruption rather than a reported
+error. The rule above is what `Source/Monarc.Render/Private/DeriveBarriers.cpp` implements and
+argues, and Task 3's review is where the one-sided reading was found.
 
 **Three additions, recorded as additions rather than checkboxes**, in the shape
 `RefuseUnorderedOverwrites` uses, so a later reader does not preserve them for the wrong reason:

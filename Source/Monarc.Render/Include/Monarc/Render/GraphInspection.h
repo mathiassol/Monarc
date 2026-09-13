@@ -362,8 +362,8 @@ struct BarrierCause {
 /// a barrier is emitted is argued.** The short version: a resource's accesses in execution
 /// order are a chain of states -- one per surviving pass, framed by an import's declared
 /// incoming and outgoing states or by a transient's creation -- and each gap in that chain
-/// becomes a barrier unless the two states are identical and the one after the gap is not a
-/// state a pass wrote.
+/// becomes a barrier unless the two states are identical and neither side of the gap is a state
+/// a pass wrote.
 ///
 /// **ADR-0005's six fields plus a `TextureId`, and deliberately not an `RHI::TextureBarrier`.**
 /// A compiled graph has no `RHI::TextureHandle` for a transient -- execution is what creates

@@ -145,6 +145,16 @@ constexpr PipelineStage kShaderStages =
     return inspection.barriers[0];
 }
 
+/// Whether a barrier moves nothing: equal layouts, equal scopes, equal accesses.
+///
+/// The shape the phase plan calls "a transition that is not a transition". **Not the same
+/// question as "should not have been emitted"** -- a write-after-write barrier has this shape and
+/// is mandatory -- so a case using this has to say why its frame has no such barrier.
+[[nodiscard]] bool MovesNothing(const DerivedBarrier& barrier) {
+    return barrier.layoutBefore == barrier.layoutAfter && barrier.syncBefore == barrier.syncAfter &&
+           barrier.accessBefore == barrier.accessAfter;
+}
+
 /// A cause side naming a pass's access.
 [[nodiscard]] constexpr BarrierCauseSide ByPass(Monarc::u32 order, ResourceAccess access) {
     return BarrierCauseSide{BarrierCauseKind::PassAccess, order, access};
@@ -1106,12 +1116,15 @@ TEST_CASE("a transition that is not a transition is representable and is not emi
     //
     // **Read and not written, which is what makes these gaps no-ops at all.** A pass that *wrote*
     // into a state identical to the declared incoming one still gets its barrier -- the rule
-    // reads whether a pass wrote the state after the gap, and the write-after-write case is why.
-    // See Private/DeriveBarriers.cpp; the case below this one pins that half.
+    // emits whenever *either* side of the gap is a state a pass wrote, and the write-after-write
+    // case is why. See Private/DeriveBarriers.cpp; the case below this one pins that half.
     //
     // **Representable is the other half of the checkbox**, and `DerivedBarrier` holds such a
-    // value without complaint: `handBuilt` at the foot is one. What the derivation must not do is
-    // put one in the list.
+    // value without complaint: `handBuilt` below is one. What the derivation must not do is put
+    // one in the list, which is asserted over the whole list before anything is counted -- a
+    // statement about every barrier does not depend on how many there are, and putting it after
+    // the counts would mean a derivation that emitted the no-op failed a count and never reached
+    // it.
     //
     // Two of them, matching on two different states, so an answer that held for the sampled case
     // alone fails.
@@ -1141,6 +1154,30 @@ TEST_CASE("a transition that is not a transition is representable and is not emi
     REQUIRE(graph.Compile());
 
     const GraphInspection inspection = graph.Inspect();
+
+    // Representable: a no-op barrier is a value this type holds without complaint, and the block
+    // below compiling is the whole of that half -- `DerivedBarrier` is an aggregate with no
+    // invariant to refuse it. Nothing derived it, which is the point: the derivation's job is not
+    // to make the value unspellable.
+    DerivedBarrier handBuilt{};
+    handBuilt.layoutBefore = TextureLayout::ColorAttachment;
+    handBuilt.layoutAfter  = TextureLayout::ColorAttachment;
+    handBuilt.syncBefore   = PipelineStage::ColorAttachmentOutput;
+    handBuilt.syncAfter    = PipelineStage::ColorAttachmentOutput;
+    handBuilt.accessBefore = Access::ColorAttachmentWrite;
+    handBuilt.accessAfter  = Access::ColorAttachmentWrite;
+    // Which is what `MovesNothing` recognises -- asserted on the hand-built value so that the
+    // loop below is not a quantifier over a predicate that answers `false` to everything.
+    REQUIRE(MovesNothing(handBuilt));
+
+    // And nothing this frame derived is that shape. **Not a rule about every frame**: a
+    // write-after-write barrier has equal states by construction and is mandatory, which the case
+    // named for it asserts. This frame has no second writer of anything, so a barrier that moved
+    // nothing here could only be a suppression that failed.
+    for (const DerivedBarrier& derived : inspection.barriers) {
+        CHECK_FALSE(MovesNothing(derived));
+    }
+
     REQUIRE(CountFor(inspection, *sampled) == 1u);
     REQUIRE(CountFor(inspection, *storage) == 1u);
 
@@ -1156,31 +1193,21 @@ TEST_CASE("a transition that is not a transition is representable and is not emi
           BarrierCause{ByPass(0, ResourceAccess::StorageRead),
                        ByEnd(BarrierCauseKind::ImportOutgoing)});
     CHECK(BarrierFor(inspection, *storage, 0).layoutBefore == TextureLayout::General);
-
-    // Representable: a no-op barrier is a value this type holds without complaint. Nothing
-    // derived it, which is the point -- the derivation's job is not to make it unspellable.
-    DerivedBarrier handBuilt{};
-    handBuilt.layoutBefore = TextureLayout::ColorAttachment;
-    handBuilt.layoutAfter  = TextureLayout::ColorAttachment;
-    handBuilt.syncBefore   = PipelineStage::ColorAttachmentOutput;
-    handBuilt.syncAfter    = PipelineStage::ColorAttachmentOutput;
-    handBuilt.accessBefore = Access::ColorAttachmentWrite;
-    handBuilt.accessAfter  = Access::ColorAttachmentWrite;
-    CHECK(handBuilt == handBuilt);
-    CHECK(handBuilt.layoutBefore == handBuilt.layoutAfter);
 }
 
 TEST_CASE("a pass writing into the state its import declared still gets its barrier") {
-    // **The other side of the no-op rule, and the one a symmetric rule gets wrong.** The import
-    // below declares an incoming state identical to what its one pass needs -- and that pass
-    // *writes*. Suppressing the gap would leave whatever produced the declared incoming state
-    // unordered against this frame's write of the same image at the same stage, which is a
-    // write-after-write hazard the graph has no other way to cover: an import is not an access,
-    // so there is nothing else in the chain to order against.
+    // **The other side of the no-op rule, and the one a rule written on equality alone gets
+    // wrong.** The import below declares an incoming state identical to what its one pass needs
+    // -- and that pass *writes*. Suppressing the gap would leave whatever produced the declared
+    // incoming state unordered against this frame's write of the same image at the same stage,
+    // which is a write-after-write hazard the graph has no other way to cover: an import is not
+    // an access, so there is nothing else in the chain to order against.
     //
-    // **So the rule reads the side after the gap, not both sides**, and this case is what makes
-    // the difference observable. Together with the case above -- same shape, a read instead of a
-    // write, no barrier -- the pair pins the rule rather than one of its outcomes.
+    // **So the write term and not the comparison is what decides this gap**, and this case is
+    // what makes the difference observable. Together with the case above -- same shape, a read
+    // instead of a write, no barrier -- the pair pins the rule rather than one of its outcomes.
+    // It is the `to` side that carries the write here; the case at the chain's *outgoing* end
+    // is where the `from` side carries it, and that one is below.
     //
     // Two of them, on two different states, so neither answer is one resource's accident.
     SystemAllocator allocator;
