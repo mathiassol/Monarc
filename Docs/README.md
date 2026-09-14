@@ -54,7 +54,9 @@ If you are new to the project, read in this order:
   - [Phase A2d — Monarc.Jobs](Plans/2026-09-06-phase-a2d-jobs.md)
   - [Phase A3 — Monarc.RHI, the Vulkan backend, and first light](Plans/2026-09-06-phase-a3-rhi-and-first-light.md)
   - [Phase A4 — The render graph](Plans/2026-09-08-phase-a4-render-graph.md)
-  - [The Linux port](Plans/2026-09-10-linux-port.md) — scheduled after A4; not a milestone phase
+  - [Phase B1 — Slang, reflection, and the cooked shader artifact](Plans/2026-09-14-phase-b1-shaders-and-the-cooked-artifact.md)
+  - [The Linux port](Plans/2026-09-10-linux-port.md) — deferred; not a milestone phase, and no longer
+    scheduled after A4 — see B1's note on why vendoring Slang lowers its cost
 
 A milestone says *what* and *why*; a plan says *how*, in executable steps. Plans are written
 one phase ahead, not all at once, because later phases are shaped by what earlier ones teach.
